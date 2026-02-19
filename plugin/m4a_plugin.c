@@ -38,6 +38,76 @@ static const clap_plugin_descriptor_t s_descriptor = {
     .features = s_features,
 };
 
+/* ---- Config file ---- */
+
+/*
+ * Directory of the loaded .clap file, set during entry_init.
+ * Used to find m4a_plugin.cfg in the same directory as the plugin.
+ */
+static char s_pluginDir[512] = {0};
+
+/*
+ * Load settings from m4a_plugin.cfg placed next to the .clap file.
+ *
+ * The config file uses simple key=value lines, one per line.
+ * Lines starting with '#' are comments and are ignored.
+ *
+ * Supported keys:
+ *   project_root   - Path to the pokeemerald project directory
+ *   voicegroup     - Voicegroup name (e.g. petalburg, littleroot_town)
+ *   reverb         - Reverb amount (0-127)
+ *   master_volume  - Master volume (0-15)
+ */
+static void load_config_file(M4APluginData *data)
+{
+    if (s_pluginDir[0] == '\0')
+        return;
+
+    char configPath[600];
+    snprintf(configPath, sizeof(configPath), "%s/m4a_plugin.cfg", s_pluginDir);
+
+    FILE *f = fopen(configPath, "r");
+    if (!f)
+        return;
+
+    char line[600];
+    while (fgets(line, sizeof(line), f)) {
+        /* Strip trailing newline and carriage return */
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+
+        /* Skip comments and empty lines */
+        if (line[0] == '#' || line[0] == '\0')
+            continue;
+
+        char *eq = strchr(line, '=');
+        if (!eq)
+            continue;
+        *eq = '\0';
+        const char *key = line;
+        const char *value = eq + 1;
+
+        if (strcmp(key, "project_root") == 0) {
+            snprintf(data->projectRoot, sizeof(data->projectRoot), "%s", value);
+        } else if (strcmp(key, "voicegroup") == 0) {
+            snprintf(data->voicegroupName, sizeof(data->voicegroupName), "%s", value);
+        } else if (strcmp(key, "reverb") == 0) {
+            int v = atoi(value);
+            if (v < 0) v = 0;
+            if (v > 127) v = 127;
+            data->reverbAmount = (uint8_t)v;
+        } else if (strcmp(key, "master_volume") == 0) {
+            int v = atoi(value);
+            if (v < 0) v = 0;
+            if (v > 15) v = 15;
+            data->masterVolume = (uint8_t)v;
+        }
+    }
+
+    fclose(f);
+}
+
 /* ---- Plugin lifecycle ---- */
 
 static bool plugin_init(const clap_plugin_t *plugin)
@@ -49,6 +119,8 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->voicegroupName[0] = '\0';
     data->loadedVg = NULL;
     data->activated = false;
+    /* Load defaults from config file placed next to the .clap */
+    load_config_file(data);
     return true;
 }
 
@@ -402,6 +474,19 @@ static const clap_plugin_factory_t s_factory = {
 
 static bool entry_init(const char *plugin_path)
 {
+    if (plugin_path && plugin_path[0]) {
+        /* Extract directory portion: everything up to the last separator */
+        const char *end = plugin_path + strlen(plugin_path);
+        while (end > plugin_path && *end != '/' && *end != '\\')
+            end--;
+        if (end > plugin_path) {
+            size_t dirLen = (size_t)(end - plugin_path);
+            if (dirLen >= sizeof(s_pluginDir))
+                dirLen = sizeof(s_pluginDir) - 1;
+            memcpy(s_pluginDir, plugin_path, dirLen);
+            s_pluginDir[dirLen] = '\0';
+        }
+    }
     return true;
 }
 

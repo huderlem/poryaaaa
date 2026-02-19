@@ -150,21 +150,31 @@ void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
     int32_t count = ch->count;
 
     if (ch->type & VOICE_TYPE_FIX) {
-        /* Fixed frequency: one sample per output, no interpolation */
-        int8_t sample = *ptr;
+        /* Fixed-frequency (no resample): no interpolation.
+         * Advance via fw accumulator at GBA PCM rate - same mechanics as the
+         * interpolating path below, but reading only ptr[0]. */
+        int8_t sample = ptr[0];
         int32_t ampR = (int32_t)sample * ch->envelopeVolumeRight;
         int32_t ampL = (int32_t)sample * ch->envelopeVolumeLeft;
         *mixR += ampR >> 8;
         *mixL += ampL >> 8;
 
-        count--;
-        ptr++;
-        if (count <= 0) {
-            if (ch->isLoop) {
-                ptr = ch->loopStart;
-                count = ch->loopLen;
+        fw += ch->frequency;
+        uint32_t advance = fw >> 23;
+        if (advance) {
+            fw &= 0x7FFFFF;
+            count -= advance;
+            if (count <= 0) {
+                if (ch->isLoop && ch->loopLen > 0) {
+                    while (count <= 0)
+                        count += ch->loopLen;
+                    ptr = ch->loopStart + (ch->loopLen - count);
+                } else {
+                    ch->status = 0;
+                    goto done;
+                }
             } else {
-                ch->status = 0;
+                ptr += advance;
             }
         }
     } else {

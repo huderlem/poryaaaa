@@ -25,7 +25,6 @@ The plugin receives MIDI events from the DAW (note on/off, program change, CC, p
 Requires CMake 3.16+ and a C11 compiler.
 
 ```bash
-cd tools/m4a_plugin
 cmake -B build
 cmake --build build
 ```
@@ -40,12 +39,20 @@ This produces three targets:
 
 ### Cross-compiling for Windows (from WSL2)
 
+Install the cross-compiler if not already present:
+
 ```bash
-cmake -B build -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc
-cmake --build build
+sudo apt install gcc-mingw-w64-x86-64
 ```
 
-Copy `build/m4a_plugin.clap` to your DAW's plugin directory.
+Then build using the provided toolchain file:
+
+```bash
+cmake -B build-windows -DCMAKE_TOOLCHAIN_FILE=mingw-toolchain.cmake
+cmake --build build-windows
+```
+
+Copy `build-windows/m4a_plugin.clap` to your DAW's CLAP plugin directory (e.g. `%APPDATA%\CLAP` or `C:\Program Files\Common Files\CLAP`).
 
 ## Usage
 
@@ -65,11 +72,20 @@ This loads the specified voicegroup, plays a test sequence through several progr
 
 ### CLAP plugin in a DAW
 
-1. Copy `m4a_plugin.clap` to your DAW's CLAP plugin directory
-2. Insert it as an instrument on a MIDI track
-3. Configure the pokeemerald project root path and voicegroup name in the plugin state
-4. Use Program Change messages to select instruments from the voicegroup
-5. Play MIDI notes to hear GBA-accurate audio
+1. Copy `m4a_plugin.clap` to your DAW's CLAP plugin directory (e.g. `%APPDATA%\CLAP`)
+2. Copy `m4a_plugin.cfg.example` to the **same directory** as the `.clap` file and rename it to `m4a_plugin.cfg`
+3. Edit `m4a_plugin.cfg` to set your pokeemerald project root and voicegroup name:
+   ```
+   project_root=C:\Users\you\pokeemerald
+   voicegroup=petalburg
+   ```
+4. Insert the plugin as an instrument on a MIDI track in your DAW
+5. Use Program Change messages to select instruments from the voicegroup
+6. Play MIDI notes to hear GBA-accurate audio
+
+The plugin reads `m4a_plugin.cfg` on startup (when the plugin is loaded). After editing the config file, remove and re-insert the plugin in your DAW (or save and reopen the project) for changes to take effect.
+
+The per-project voicegroup is also saved in the DAW's project state, so once you configure it, it persists in your saved project even without the config file.
 
 ### MIDI mapping
 

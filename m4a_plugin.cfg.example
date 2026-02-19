@@ -1,0 +1,23 @@
+# M4A Plugin Configuration
+#
+# Copy this file to m4a_plugin.cfg (same directory as m4a_plugin.clap)
+# and edit the values below.
+#
+# The plugin reads this file on startup. To apply changes after editing,
+# remove and re-insert the plugin in your DAW, or save/reopen the project.
+
+# Path to the pokeemerald project root directory.
+# On Windows, use backslashes or forward slashes - both work.
+# Example: C:\Users\you\pokeemerald
+project_root=C:\path\to\pokeemerald
+
+# Voicegroup name to load (without path or extension).
+# This is the filename stem under sound/voicegroups/<name>.inc.
+# Examples: petalburg, littleroot_town, slateport_city, battle
+voicegroup=petalburg
+
+# Reverb amount (0 = none, 127 = maximum).
+reverb=0
+
+# Master volume (0-15). 15 matches the GBA's default.
+master_volume=15

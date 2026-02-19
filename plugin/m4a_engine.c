@@ -391,29 +391,26 @@ void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t vel
 
         chn_vol_set(ch, track);
 
-        /* Calculate frequency */
-        ch->frequency = m4a_midi_key_to_freq(voice->wav, (uint8_t)finalKey, track->pitM);
-
-        /* Convert GBA frequency word to our format.
-         * The GBA stores frequency as a fixed-point value where the actual
-         * sample advance per output sample = frequency * divFreq.
-         * divFreq = (16777216 / pcmFreq + 1) >> 1
-         * For 13379 Hz output: divFreq = 627
-         * The fw advances by (frequency * divFreq) per output sample,
-         * with the integer part being the number of source samples to advance.
-         *
-         * For our DAW sample rate, we need to rescale:
-         * Our advance = frequency * gba_divFreq * (gba_rate / daw_rate)
-         * But since frequency is already in the right units from MidiKeyToFreq,
-         * we just need to apply divFreq scaled for our sample rate. */
+        /* Calculate frequency.
+         * GBA freq index 4 = 13379 Hz, pcmSamplesPerVBlank = 224.
+         * divFreq converts from MidiKeyToFreq units to source-samples-per-GBA-tick.
+         * scale converts from GBA tick rate to DAW sample rate. */
         {
-            /* GBA freq index 4 = 13379 Hz, pcmSamplesPerVBlank = 224 */
             int32_t pcmSamplesPerVBlank = 224;
             int32_t pcmFreq = (597275 * pcmSamplesPerVBlank + 5000) / 10000;
-            int32_t divFreq = (16777216 / pcmFreq + 1) >> 1;
-            /* Scale to DAW sample rate */
             float scale = (float)pcmFreq / engine->sampleRate;
-            ch->frequency = (uint32_t)((uint64_t)ch->frequency * divFreq * scale);
+
+            if (voice->type & VOICE_TYPE_FIX) {
+                /* Fixed-frequency (no resample): ignore MIDI key, play at GBA PCM rate.
+                 * On the GBA, SoundMainRAM uses fw advance = 0x800000 per PCM tick
+                 * (i.e., exactly one source sample per GBA output sample).
+                 * Scale that to the DAW sample rate. */
+                ch->frequency = (uint32_t)(0x800000 * scale);
+            } else {
+                int32_t divFreq = (16777216 / pcmFreq + 1) >> 1;
+                ch->frequency = m4a_midi_key_to_freq(voice->wav, (uint8_t)finalKey, track->pitM);
+                ch->frequency = (uint32_t)((uint64_t)ch->frequency * divFreq * scale);
+            }
         }
 
         m4a_pcm_channel_start(ch, voice->wav, voice->type);

@@ -3,3 +3,4 @@ build/
 *.clap
 *.o
 *.d
+m4a_plugin.cfg
