@@ -252,9 +252,14 @@ void m4a_cgb_channel_start(M4ACGBChannel *ch)
         ch->envelopeVolume = 0;
     }
 
-    /* Initialize LFSR for noise channel */
+    /* Initialize LFSR for noise channel.
+     * Bit 3 of frequency is the period/mode bit (NR43 bit 3):
+     * 0 = 15-bit LFSR, 1 = 7-bit short-period LFSR. */
     if (ch->type == 4) {
-        ch->lfsr = 0x7FFF;
+        if (ch->frequency & 0x08)
+            ch->lfsr = 0x7F;    /* 7-bit */
+        else
+            ch->lfsr = 0x7FFF;  /* 15-bit */
     }
 }
 
@@ -264,12 +269,47 @@ void m4a_cgb_channel_stop(M4ACGBChannel *ch)
 }
 
 /*
- * CGB mod vol calculation - matches CgbModVol in m4a.c
+ * CGB pan calculation - matches CgbPan() in m4a.c.
+ * Determines whether the channel is hard-panned to one side.
+ * Sets ch->pan to 0x0F (hard right) or 0xF0 (hard left) and returns 1,
+ * or leaves ch->pan unchanged and returns 0 (center/both sides).
+ */
+static int cgb_pan(M4ACGBChannel *ch)
+{
+    uint32_t rightVolume = (uint8_t)ch->rightVolume;
+    uint32_t leftVolume  = (uint8_t)ch->leftVolume;
+
+    if (rightVolume >= leftVolume) {
+        if (rightVolume / 2 >= leftVolume) {
+            ch->pan = 0x0F;
+            return 1;
+        }
+    } else {
+        if (leftVolume / 2 >= rightVolume) {
+            ch->pan = 0xF0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * CGB mod vol calculation - matches CgbModVol in m4a.c.
+ * Converts the software left/right volumes (from velocity + CC7 + pan) into
+ * the 4-bit hardware envelope goal and the NR51 pan routing bits.
  */
 void m4a_cgb_mod_vol(M4ACGBChannel *ch)
 {
-    ch->pan = 0xFF;
-    ch->envelopeGoal = (uint32_t)(ch->leftVolume + ch->rightVolume) / 16;
+    if (!cgb_pan(ch)) {
+        /* Center (or near-center) pan: output to both sides */
+        ch->pan = 0xFF;
+        ch->envelopeGoal = (uint32_t)(ch->leftVolume + ch->rightVolume) / 16;
+    } else {
+        /* Hard-panned: pan already set by cgb_pan(); clamp goal to hardware max */
+        ch->envelopeGoal = (uint32_t)(ch->leftVolume + ch->rightVolume) / 16;
+        if (ch->envelopeGoal > 15)
+            ch->envelopeGoal = 15;
+    }
     ch->sustainGoal = (ch->envelopeGoal * ch->sustain + 15) >> 4;
     ch->pan &= ch->panMask;
 }
@@ -484,19 +524,36 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
         uint32_t oldPhase = ch->phase;
         ch->phase += phaseInc;
 
-        /* Clock LFSR for each wrap of relevant phase bits */
+        /* Clock LFSR on phase wrap.
+         * Bit 3 of frequency = period mode: 0 = 15-bit LFSR, 1 = 7-bit LFSR. */
         if (ch->phase < oldPhase) {
             uint16_t bit = ((ch->lfsr >> 1) ^ ch->lfsr) & 1;
-            ch->lfsr = (ch->lfsr >> 1) | (bit << 14);
+            if (noiseParams & 0x08)
+                ch->lfsr = (ch->lfsr >> 1) | (bit << 6);   /* 7-bit */
+            else
+                ch->lfsr = (ch->lfsr >> 1) | (bit << 14);  /* 15-bit */
         }
     }
 
-    /* Apply envelope volume (for non-wave channels) */
+    /* Apply envelope volume (for non-wave channels).
+     * envelopeVolume is the 4-bit GBA hardware volume (0-15), matching what
+     * CgbSound writes to NR12/NR22/NR42. */
     if (cgbType != 3) {
         sample = (sample * ch->envelopeVolume) >> 4;
     }
 
-    /* Apply panning */
-    *mixR += (sample * ch->rightVolume) >> 8;
-    *mixL += (sample * ch->leftVolume) >> 8;
+    /* Scale CGB to match the GBA hardware mixing ratio.
+     * SOUNDCNT_H is initialised with SOUND_ALL_MIX_FULL (volume bits = 2), so
+     * mGBA applies psgShift = 4 - 2 = 2 (CGB >> 2) while PCM is << 2.
+     * That is a 16:1 ratio; >> 2 here keeps us in the same integer domain as
+     * the PCM mixer which already incorporates the << 2 implicitly through its
+     * larger sample values (~±127 vs CGB's ~±60). */
+    sample >>= 1;
+
+    /* Route to left/right using NR51-style pan bits in ch->pan.
+     * Panning is binary on the GBA (NR51 enable bits), not a level multiplier. */
+    if (ch->pan & 0x0F)
+        *mixR += sample;
+    if (ch->pan & 0xF0)
+        *mixL += sample;
 }

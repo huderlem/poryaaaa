@@ -102,6 +102,11 @@ static void load_config_file(M4APluginData *data)
             if (v < 0) v = 0;
             if (v > 15) v = 15;
             data->masterVolume = (uint8_t)v;
+        } else if (strcmp(key, "song_master_volume") == 0) {
+            int v = atoi(value);
+            if (v < 0) v = 0;
+            if (v > MAX_SONG_VOLUME) v = MAX_SONG_VOLUME;
+            data->songMasterVolume = (uint8_t)v;
         }
     }
 
@@ -114,6 +119,7 @@ static bool plugin_init(const clap_plugin_t *plugin)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
     data->masterVolume = 15;
+    data->songMasterVolume = MAX_SONG_VOLUME;
     data->reverbAmount = 0;
     data->projectRoot[0] = '\0';
     data->voicegroupName[0] = '\0';
@@ -142,6 +148,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
     m4a_engine_init(&data->engine, (float)sample_rate);
     data->engine.masterVolume = data->masterVolume;
+    data->engine.songMasterVolume = data->songMasterVolume;
     m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
 
     /* If voicegroup is configured, load it */
@@ -361,6 +368,7 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     if (nameLen > 0 && stream->write(stream, data->voicegroupName, nameLen) != (int64_t)nameLen) return false;
     if (stream->write(stream, &data->reverbAmount, 1) != 1) return false;
     if (stream->write(stream, &data->masterVolume, 1) != 1) return false;
+    if (stream->write(stream, &data->songMasterVolume, 1) != 1) return false;
 
     return true;
 }
@@ -383,6 +391,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
 
     if (stream->read(stream, &data->reverbAmount, 1) != 1) return false;
     if (stream->read(stream, &data->masterVolume, 1) != 1) return false;
+    if (stream->read(stream, &data->songMasterVolume, 1) != 1) return false;
 
     /* If activated, reload voicegroup */
     if (data->activated && data->projectRoot[0] && data->voicegroupName[0]) {
@@ -395,6 +404,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
             m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
         }
         data->engine.masterVolume = data->masterVolume;
+        data->engine.songMasterVolume = data->songMasterVolume;
         m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
     }
 

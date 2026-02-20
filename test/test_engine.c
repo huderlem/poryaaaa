@@ -186,6 +186,7 @@ static void test_engine_init(void)
     ASSERT_NEAR(engine.sampleRate, 44100.0f, 0.1f, "sample rate");
     ASSERT_NEAR(engine.samplesPerTick, 44100.0f / 59.7275f, 1.0f, "samples per tick");
     ASSERT_EQ(engine.masterVolume, 15, "master volume");
+    ASSERT_EQ(engine.songMasterVolume, MAX_SONG_VOLUME, "song master volume");
     ASSERT_EQ(engine.maxPcmChannels, 5, "max pcm channels");
 
     /* Verify CGB channel types */

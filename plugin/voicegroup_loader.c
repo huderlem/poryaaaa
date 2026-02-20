@@ -693,7 +693,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 td->type = VOICE_SQUARE_1_ALT;
                 td->key = (uint8_t)key;
                 td->panSweep = (uint8_t)sweep;
-                td->length = (uint8_t)(duty & 0x03);
+                td->wavePointer = (uint32_t *)(uintptr_t)(duty & 0x03);
                 td->attack = (uint8_t)(attack & 0x07);
                 td->decay = (uint8_t)(decay & 0x07);
                 td->sustain = (uint8_t)(sustain & 0x0F);
@@ -708,7 +708,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 td->type = VOICE_SQUARE_1;
                 td->key = (uint8_t)key;
                 td->panSweep = (uint8_t)sweep;
-                td->length = (uint8_t)(duty & 0x03);
+                td->wavePointer = (uint32_t *)(uintptr_t)(duty & 0x03);
                 td->attack = (uint8_t)(attack & 0x07);
                 td->decay = (uint8_t)(decay & 0x07);
                 td->sustain = (uint8_t)(sustain & 0x0F);
@@ -725,7 +725,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 td->type = VOICE_SQUARE_2_ALT;
                 td->key = (uint8_t)key;
                 td->panSweep = 0;
-                td->length = (uint8_t)(duty & 0x03);
+                td->wavePointer = (uint32_t *)(uintptr_t)(duty & 0x03);
                 td->attack = (uint8_t)(attack & 0x07);
                 td->decay = (uint8_t)(decay & 0x07);
                 td->sustain = (uint8_t)(sustain & 0x0F);
@@ -740,7 +740,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 td->type = VOICE_SQUARE_2;
                 td->key = (uint8_t)key;
                 td->panSweep = 0;
-                td->length = (uint8_t)(duty & 0x03);
+                td->wavePointer = (uint32_t *)(uintptr_t)(duty & 0x03);
                 td->attack = (uint8_t)(attack & 0x07);
                 td->decay = (uint8_t)(decay & 0x07);
                 td->sustain = (uint8_t)(sustain & 0x0F);
@@ -806,7 +806,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_NOISE_ALT;
                 td->key = (uint8_t)key;
-                td->panSweep = (uint8_t)(period & 0x01);
+                td->wavePointer = (uint32_t *)(uintptr_t)(period & 0x01);
                 td->attack = (uint8_t)(attack & 0x07);
                 td->decay = (uint8_t)(decay & 0x07);
                 td->sustain = (uint8_t)(sustain & 0x0F);
@@ -820,7 +820,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_NOISE;
                 td->key = (uint8_t)key;
-                td->panSweep = (uint8_t)(period & 0x01);
+                td->wavePointer = (uint32_t *)(uintptr_t)(period & 0x01);
                 td->attack = (uint8_t)(attack & 0x07);
                 td->decay = (uint8_t)(decay & 0x07);
                 td->sustain = (uint8_t)(sustain & 0x0F);

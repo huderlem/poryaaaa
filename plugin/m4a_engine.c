@@ -184,6 +184,7 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     engine->samplesPerTick = sampleRate / VBLANK_RATE;
     engine->tickAccumulator = 0.0f;
     engine->masterVolume = 15;
+    engine->songMasterVolume = MAX_SONG_VOLUME;
     engine->maxPcmChannels = 5;  /* default, matches Pokemon Emerald init */
     engine->c15 = 14;
 
@@ -357,7 +358,7 @@ void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t vel
         m4a_cgb_mod_vol(ch);
 
         if (voiceType == 1 || voiceType == 2) {
-            ch->dutyCycle = voice->panSweep & 0x03;
+            ch->dutyCycle = (uint8_t)(uintptr_t)voice->wavePointer & 0x03;
             if (voiceType == 1)
                 ch->sweep = (voice->panSweep & 0x70) ? voice->panSweep : 0x08;
         } else if (voiceType == 3) {
@@ -366,6 +367,10 @@ void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t vel
 
         /* Calculate frequency */
         ch->frequency = m4a_midi_key_to_cgb_freq(voiceType, (uint8_t)finalKey, track->pitM);
+        /* Noise channel: apply period bit (NR43 bit 3) from wavePointer.
+         * period=0 → 15-bit LFSR, period=1 → 7-bit short-period LFSR. */
+        if (voiceType == 4)
+            ch->frequency |= ((uintptr_t)voice->wavePointer & 0x01) << 3;
 
         m4a_cgb_channel_start(ch);
     } else {
@@ -472,10 +477,25 @@ void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value)
         }
         break;
     case 7:  /* Volume */
-        track->volume = value;
-        break;
+        track->volume = value * engine->songMasterVolume / MAX_SONG_VOLUME;
+        goto refresh_cgb_volumes;
     case 10: /* Pan */
         track->pan = (int8_t)(value - 64);
+        goto refresh_cgb_volumes;
+    refresh_cgb_volumes:
+        /* Recalculate track vol/pan and push updated rightVolume/leftVolume into
+         * active CGB channels so envelopeGoal reflects the new setting immediately.
+         * On the GBA, MPlayMain updates track->volMR/volML each tick and CgbSound
+         * calls CgbModVol which reads rightVolume/leftVolume — so they must stay
+         * current whenever the track volume or pan changes. */
+        m4a_track_vol_pit_set(track);
+        for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
+            M4ACGBChannel *ch = &engine->cgbChannels[i];
+            if ((ch->status & CHN_ON) && ch->trackIndex == channel) {
+                cgb_chn_vol_set(ch, track);
+                m4a_cgb_mod_vol(ch);
+            }
+        }
         break;
     case 123: /* All Notes Off */
         m4a_engine_all_notes_off(engine, channel);

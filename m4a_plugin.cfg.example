@@ -21,3 +21,6 @@ reverb=0
 
 # Master volume (0-15). 15 matches the GBA's default.
 master_volume=15
+
+# Song Master volume (0-127)
+song_master_volume=127

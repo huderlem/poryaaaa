@@ -8,6 +8,7 @@
 #define MAX_CGB_CHANNELS 4
 #define MAX_TRACKS 16
 #define VBLANK_RATE 59.7275f
+#define MAX_SONG_VOLUME 127 // called "mxv" in pokeemerald
 
 /* Voice types (matching GBA ToneData.type) */
 #define VOICE_DIRECTSOUND           0x00
@@ -192,6 +193,7 @@ struct M4AEngine {
     float tickAccumulator;
 
     uint8_t masterVolume;   /* 0-15 */
+    uint8_t songMasterVolume; /* 0-127 */
     uint8_t maxPcmChannels; /* active PCM channel count */
     uint8_t c15;            /* counter 0-14 for CGB envelope double-step */
 
