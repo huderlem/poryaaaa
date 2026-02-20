@@ -340,7 +340,7 @@ void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t vel
         }
 
         ch->midiKey = key;
-        ch->key = (uint8_t)finalKey;
+        ch->key = useKey;
         ch->velocity = velocity;
         ch->priority = combinedPriority;
         ch->trackIndex = channel;
@@ -381,7 +381,7 @@ void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t vel
         if (!ch) return;
 
         ch->midiKey = key;
-        ch->key = (uint8_t)finalKey;
+        ch->key = useKey;
         ch->velocity = velocity;
         ch->priority = combinedPriority;
         ch->trackIndex = channel;
@@ -475,6 +475,9 @@ void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value)
             track->lfoSpeedC = 0;
             track->modM = 0;
         }
+        break;
+    case 21: /* LFO speed */
+        track->lfoSpeed = value;
         break;
     case 7:  /* Volume */
         track->volume = value * engine->songMasterVolume / MAX_SONG_VOLUME;
