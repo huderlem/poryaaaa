@@ -207,12 +207,16 @@ static bool plugin_start_processing(const clap_plugin_t *plugin)
 
 static void plugin_stop_processing(const clap_plugin_t *plugin)
 {
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    m4a_engine_all_sound_off(&data->engine);
+    m4a_reverb_reset(&data->engine.reverb);
 }
 
 static void plugin_reset(const clap_plugin_t *plugin)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
     m4a_engine_all_sound_off(&data->engine);
+    m4a_reverb_reset(&data->engine.reverb);
 }
 
 /* ---- MIDI event processing ---- */

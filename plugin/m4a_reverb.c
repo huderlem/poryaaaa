@@ -45,6 +45,13 @@ void m4a_reverb_destroy(M4AReverb *reverb)
     reverb->bufferSize = 0;
 }
 
+void m4a_reverb_reset(M4AReverb *reverb)
+{
+    if (reverb->buffer)
+        memset(reverb->buffer, 0, reverb->bufferSize * 2 * sizeof(int8_t));
+    reverb->pos = 0;
+}
+
 void m4a_reverb_set_amount(M4AReverb *reverb, uint8_t amount)
 {
     reverb->amount = amount;

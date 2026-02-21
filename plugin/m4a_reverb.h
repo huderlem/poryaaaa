@@ -12,6 +12,7 @@ typedef struct {
 
 void m4a_reverb_init(M4AReverb *reverb, float sampleRate, uint8_t amount);
 void m4a_reverb_destroy(M4AReverb *reverb);
+void m4a_reverb_reset(M4AReverb *reverb);
 void m4a_reverb_set_amount(M4AReverb *reverb, uint8_t amount);
 void m4a_reverb_process(M4AReverb *reverb, int32_t *sampleL, int32_t *sampleR);
 
