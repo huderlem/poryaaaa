@@ -220,12 +220,12 @@ void m4a_engine_destroy(M4AEngine *engine);
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup);
 
 /* MIDI event handling */
-void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t velocity);
-void m4a_engine_note_off(M4AEngine *engine, int channel, uint8_t key);
-void m4a_engine_program_change(M4AEngine *engine, int channel, uint8_t program);
-void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value);
-void m4a_engine_pitch_bend(M4AEngine *engine, int channel, int16_t bend);
-void m4a_engine_all_notes_off(M4AEngine *engine, int channel);
+void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity);
+void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key);
+void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program);
+void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value);
+void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend);
+void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex);
 void m4a_engine_all_sound_off(M4AEngine *engine);
 
 /* Set tempo from DAW BPM.  The GBA relationship is tempoI ≈ BPM

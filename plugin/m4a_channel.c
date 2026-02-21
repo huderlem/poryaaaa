@@ -142,82 +142,52 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
  */
 void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
 {
-    if (!(ch->status & CHN_ON) || ch->status & CHN_START)
+    if (!(ch->status & CHN_ON) || (ch->status & CHN_START))
         return;
 
     int8_t *ptr = ch->currentPointer;
     uint32_t fw = ch->fw;
     int32_t count = ch->count;
+    int32_t sample;
 
     if (ch->type & VOICE_TYPE_FIX) {
-        /* Fixed-frequency (no resample): no interpolation.
-         * Advance via fw accumulator at GBA PCM rate - same mechanics as the
-         * interpolating path below, but reading only ptr[0]. */
-        int8_t sample = ptr[0];
-        int32_t ampR = (int32_t)sample * ch->envelopeVolumeRight;
-        int32_t ampL = (int32_t)sample * ch->envelopeVolumeLeft;
-        *mixR += ampR >> 8;
-        *mixL += ampL >> 8;
-
-        fw += ch->frequency;
-        uint32_t advance = fw >> 23;
-        if (advance) {
-            fw &= 0x7FFFFF;
-            count -= advance;
-            if (count <= 0) {
-                if (ch->isLoop && ch->loopLen > 0) {
-                    while (count <= 0)
-                        count += ch->loopLen;
-                    ptr = ch->loopStart + (ch->loopLen - count);
-                } else {
-                    ch->status = 0;
-                    goto done;
-                }
-            } else {
-                ptr += advance;
-            }
-        }
+        // Fixed-frequency (no resample): no interpolation.
+        sample = ptr[0];
     } else {
-        /* Interpolating mixer */
+        // Interpolating mixer
         int8_t s0 = ptr[0];
         int8_t s1 = ptr[1];
         int32_t diff = s1 - s0;
 
         /* Linear interpolation using top bits of fw as fraction */
-        int32_t sample = s0 + ((diff * (int32_t)(fw >> 15)) >> 8);
-        /* Note: the actual GBA uses fw bits [22:15] as an 8-bit fraction
-         * via: mul lr, r9, r1 / add lr, r0, lr, asr 23 */
-        /* Simpler equivalent: */
         sample = s0 + (int32_t)(((int64_t)diff * (int32_t)fw) >> 23);
+    }
 
-        int32_t ampR = sample * ch->envelopeVolumeRight;
-        int32_t ampL = sample * ch->envelopeVolumeLeft;
-        *mixR += ampR >> 8;
-        *mixL += ampL >> 8;
+    int32_t ampR = sample * ch->envelopeVolumeRight;
+    int32_t ampL = sample * ch->envelopeVolumeLeft;
+    *mixR += ampR >> 8;
+    *mixL += ampL >> 8;
 
-        /* Advance position */
-        fw += ch->frequency;
-        uint32_t advance = fw >> 23;
-        if (advance) {
-            fw &= 0x7FFFFF;  /* keep fractional part */
-            count -= advance;
-            if (count <= 0) {
-                if (ch->isLoop && ch->loopLen > 0) {
-                    /* Wrap around loop */
-                    while (count <= 0)
-                        count += ch->loopLen;
-                    ptr = ch->loopStart + (ch->loopLen - count);
-                } else {
-                    ch->status = 0;
-                    goto done;
-                }
+    /* Advance position */
+    fw += ch->frequency;
+    uint32_t advance = fw >> 23;
+    if (advance) {
+        fw &= 0x7FFFFF;  /* keep fractional part */
+        count -= advance;
+        if (count <= 0) {
+            if (ch->isLoop && ch->loopLen > 0) {
+                /* Wrap around loop */
+                while (count <= 0)
+                    count += ch->loopLen;
+                ptr = ch->loopStart + (ch->loopLen - count);
             } else {
-                ptr += advance;
+                ch->status = 0;
             }
+        } else {
+            ptr += advance;
         }
     }
 
-done:
     ch->currentPointer = ptr;
     ch->fw = fw;
     ch->count = count;

@@ -235,12 +235,12 @@ void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
 /*
  * Program Change - select instrument from voicegroup
  */
-void m4a_engine_program_change(M4AEngine *engine, int channel, uint8_t program)
+void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program)
 {
-    if (channel < 0 || channel >= MAX_TRACKS || !engine->voiceGroup)
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS || !engine->voiceGroup)
         return;
 
-    M4ATrack *track = &engine->tracks[channel];
+    M4ATrack *track = &engine->tracks[trackIndex];
     track->currentVoice = engine->voiceGroup[program];
 }
 
@@ -304,12 +304,12 @@ static M4APCMChannel *allocate_pcm_channel(M4AEngine *engine, uint8_t priority,
 /*
  * Note On
  */
-void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t velocity)
+void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity)
 {
-    if (channel < 0 || channel >= MAX_TRACKS)
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
         return;
 
-    M4ATrack *track = &engine->tracks[channel];
+    M4ATrack *track = &engine->tracks[trackIndex];
     ToneData *voice = resolve_voice(&track->currentVoice, key);
     if (!voice) return;
 
@@ -345,7 +345,7 @@ void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t vel
         if ((ch->status & CHN_ON) && !(ch->status & CHN_STOP)) {
             if (ch->priority > combinedPriority)
                 return;  /* can't steal */
-            if (ch->priority == combinedPriority && ch->trackIndex < channel)
+            if (ch->priority == combinedPriority && ch->trackIndex < trackIndex)
                 return;
         }
 
@@ -353,7 +353,7 @@ void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t vel
         ch->key = useKey;
         ch->velocity = velocity;
         ch->priority = combinedPriority;
-        ch->trackIndex = channel;
+        ch->trackIndex = trackIndex;
         ch->rhythmPan = rhythmPan;
         ch->attack = voice->attack;
         ch->decay = voice->decay;
@@ -387,14 +387,14 @@ void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t vel
         /* PCM DirectSound channel */
         if (!voice->wav) return;
 
-        M4APCMChannel *ch = allocate_pcm_channel(engine, combinedPriority, channel);
+        M4APCMChannel *ch = allocate_pcm_channel(engine, combinedPriority, trackIndex);
         if (!ch) return;
 
         ch->midiKey = key;
         ch->key = useKey;
         ch->velocity = velocity;
         ch->priority = combinedPriority;
-        ch->trackIndex = channel;
+        ch->trackIndex = trackIndex;
         ch->rhythmPan = rhythmPan;
         ch->attack = voice->attack;
         ch->decay = voice->decay;
@@ -444,16 +444,16 @@ void m4a_engine_note_on(M4AEngine *engine, int channel, uint8_t key, uint8_t vel
 /*
  * Note Off - transition matching channels to release
  */
-void m4a_engine_note_off(M4AEngine *engine, int channel, uint8_t key)
+void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key)
 {
-    if (channel < 0 || channel >= MAX_TRACKS)
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
         return;
 
     /* Stop matching PCM channels */
     for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
         M4APCMChannel *ch = &engine->pcmChannels[i];
         if ((ch->status & CHN_ON) && !(ch->status & CHN_STOP)
-            && ch->trackIndex == channel && ch->midiKey == key) {
+            && ch->trackIndex == trackIndex && ch->midiKey == key) {
             ch->status |= CHN_STOP;
         }
     }
@@ -462,8 +462,25 @@ void m4a_engine_note_off(M4AEngine *engine, int channel, uint8_t key)
     for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
         M4ACGBChannel *ch = &engine->cgbChannels[i];
         if ((ch->status & CHN_ON) && !(ch->status & CHN_STOP)
-            && ch->trackIndex == channel && ch->midiKey == key) {
+            && ch->trackIndex == trackIndex && ch->midiKey == key) {
             ch->status |= CHN_STOP;
+        }
+    }
+}
+
+/* Recalculate track vol/pan and push updated rightVolume/leftVolume into
+* active CGB channels so envelopeGoal reflects the new setting immediately.
+* On the GBA, MPlayMain updates track->volMR/volML each tick and CgbSound
+* calls CgbModVol which reads rightVolume/leftVolume — so they must stay
+* current whenever the track volume or pan changes. */
+static inline void refresh_cgb_volumes(M4AEngine *engine, M4ATrack *track, int trackIndex)
+{
+    m4a_track_vol_pit_set(track);
+    for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
+        M4ACGBChannel *ch = &engine->cgbChannels[i];
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
+            cgb_chn_vol_set(ch, track);
+            m4a_cgb_mod_vol(ch);
         }
     }
 }
@@ -471,12 +488,12 @@ void m4a_engine_note_off(M4AEngine *engine, int channel, uint8_t key)
 /*
  * Control Change
  */
-void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value)
+void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
 {
-    if (channel < 0 || channel >= MAX_TRACKS)
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
         return;
 
-    M4ATrack *track = &engine->tracks[channel];
+    M4ATrack *track = &engine->tracks[trackIndex];
 
     switch (cc) {
     case 0x1:  /* Mod wheel -> LFO depth */
@@ -488,10 +505,12 @@ void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value)
         break;
     case 0x7:  /* Volume */
         track->volume = value * engine->songMasterVolume / MAX_SONG_VOLUME;
-        goto refresh_cgb_volumes;
+        refresh_cgb_volumes(engine, track, trackIndex);
+        break;
     case 0xA: /* Pan */
         track->pan = (int8_t)(value - 64);
-        goto refresh_cgb_volumes;
+        refresh_cgb_volumes(engine, track, trackIndex);
+        break;
     case 0xC:
     case 0xD:
     case 0xE:
@@ -508,6 +527,15 @@ void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value)
     case 0x15: /* LFO speed (LFOS) */
         track->lfoSpeed = value;
         break;
+    case 0x16: /* Modulation type (MODT) */
+        // TODO: none of the pokemon emerald songs use MODT
+        break;
+    case 0x18: /* Micro tuning (TUNE) */
+        // TODO: none of the pokemon emerald songs use TUNE
+        break;
+    case 0x1A: /* LFO delay (LFODL) */
+        // TODO: none of the pokemon emerald songs use LFODL
+        break;
     refresh_cgb_volumes:
         /* Recalculate track vol/pan and push updated rightVolume/leftVolume into
          * active CGB channels so envelopeGoal reflects the new setting immediately.
@@ -517,14 +545,14 @@ void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value)
         m4a_track_vol_pit_set(track);
         for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
             M4ACGBChannel *ch = &engine->cgbChannels[i];
-            if ((ch->status & CHN_ON) && ch->trackIndex == channel) {
+            if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
                 cgb_chn_vol_set(ch, track);
                 m4a_cgb_mod_vol(ch);
             }
         }
         break;
     case 123: /* All Notes Off */
-        m4a_engine_all_notes_off(engine, channel);
+        m4a_engine_all_notes_off(engine, trackIndex);
         break;
     case 120: /* All Sound Off */
         m4a_engine_all_sound_off(engine);
@@ -537,28 +565,28 @@ void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value)
 /*
  * Pitch Bend (14-bit, -8192 to +8191)
  */
-void m4a_engine_pitch_bend(M4AEngine *engine, int channel, int16_t bend)
+void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend)
 {
-    if (channel < 0 || channel >= MAX_TRACKS)
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
         return;
 
     /* Scale 14-bit MIDI bend to m4a's -64..+63 range */
-    engine->tracks[channel].bend = (int8_t)(bend >> 7);
+    engine->tracks[trackIndex].bend = (int8_t)(bend >> 7);
 }
 
 /*
  * All Notes Off for a channel
  */
-void m4a_engine_all_notes_off(M4AEngine *engine, int channel)
+void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex)
 {
     for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
         M4APCMChannel *ch = &engine->pcmChannels[i];
-        if ((ch->status & CHN_ON) && ch->trackIndex == channel)
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex)
             ch->status |= CHN_STOP;
     }
     for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
         M4ACGBChannel *ch = &engine->cgbChannels[i];
-        if ((ch->status & CHN_ON) && ch->trackIndex == channel)
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex)
             ch->status |= CHN_STOP;
     }
 }
