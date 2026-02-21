@@ -536,25 +536,10 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
     case 0x1A: /* LFO delay (LFODL) */
         // TODO: none of the pokemon emerald songs use LFODL
         break;
-    refresh_cgb_volumes:
-        /* Recalculate track vol/pan and push updated rightVolume/leftVolume into
-         * active CGB channels so envelopeGoal reflects the new setting immediately.
-         * On the GBA, MPlayMain updates track->volMR/volML each tick and CgbSound
-         * calls CgbModVol which reads rightVolume/leftVolume — so they must stay
-         * current whenever the track volume or pan changes. */
-        m4a_track_vol_pit_set(track);
-        for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
-            M4ACGBChannel *ch = &engine->cgbChannels[i];
-            if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
-                cgb_chn_vol_set(ch, track);
-                m4a_cgb_mod_vol(ch);
-            }
-        }
-        break;
-    case 123: /* All Notes Off */
+    case 0x7B: /* All Notes Off */
         m4a_engine_all_notes_off(engine, trackIndex);
         break;
-    case 120: /* All Sound Off */
+    case 0x78: /* All Sound Off */
         m4a_engine_all_sound_off(engine);
         break;
     default:

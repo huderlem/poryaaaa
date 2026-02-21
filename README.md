@@ -6,7 +6,7 @@ A CLAP instrument plugin that emulates the GBA m4a sound engine, allowing compos
 
 Composing custom music for Pokemon Emerald normally requires a slow iteration loop: author MIDI in a DAW, export, build the ROM, and test in an emulator. The DAW plays back using standard MIDI voices that sound nothing like the GBA. This plugin eliminates that gap by reimplementing the m4a mixer natively and loading voicegroups and samples directly from the pokeemerald project tree.
 
-The plugin receives MIDI events from the DAW (note on/off, program change, CC, pitch bend) and processes them through a faithful reimplementation of the GBA's m4a sound engine, outputting stereo audio in real time.
+The plugin receives MIDI events from the DAW (note on/off, program change, CC, pitch bend,) and processes them through a reasonably faithful reimplementation of the GBA's m4a sound engine, outputting stereo audio in real time.
 
 ## Features
 
