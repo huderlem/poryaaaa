@@ -76,7 +76,7 @@ This loads the specified voicegroup, plays a test sequence through several progr
 2. Copy `m4a_plugin.cfg.example` to the **same directory** as the `.clap` file and rename it to `m4a_plugin.cfg`
 3. Edit `m4a_plugin.cfg` to set your pokeemerald project root and voicegroup name:
    ```
-   project_root=C:\Users\you\pokeemerald
+   project_root=C:\Users\you\pokeemerald  # also works with WSL paths
    voicegroup=petalburg
    ```
 4. Insert the plugin as an instrument on a MIDI track in your DAW
