@@ -375,14 +375,6 @@ void m4a_gui_tick(M4AGuiState *gui)
 
     /* ---- Audio Settings ---- */
     ImGui::SeparatorText("Audio Settings");
-
-    {
-        int v = (int)gui->settings.masterVolume;
-        if (ImGui::SliderInt("Master Volume (0-15)", &v, 0, 15)) {
-            gui->settings.masterVolume = (uint8_t)v;
-            gui->settingsChanged = true;
-        }
-    }
     {
         int v = (int)gui->settings.songMasterVolume;
         if (ImGui::SliderInt("Song Volume (0-127)", &v, 0, 127)) {
