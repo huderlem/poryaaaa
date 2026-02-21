@@ -22,10 +22,12 @@ The plugin receives MIDI events from the DAW (note on/off, program change, CC, p
 
 ## Building
 
-Requires CMake 3.16+ and a C11 compiler.
+Requires CMake 3.16+, a C11/C++17 compiler, and the following development libraries:
+
+- **Linux:** `libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev libgl-dev`
 
 ```bash
-cmake -B build
+cmake -B build -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
 cmake --build build
 ```
 
@@ -37,12 +39,12 @@ This produces three targets:
 | `m4a_test` | Standalone WAV export tool |
 | `m4a_unit_tests` | Unit test suite |
 
-### Cross-compiling for Windows (from WSL2)
+### Cross-compiling for Windows (from WSL2/Linux)
 
-Install the cross-compiler if not already present:
+Install the cross-compilers if not already present:
 
 ```bash
-sudo apt install gcc-mingw-w64-x86-64
+sudo apt install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 ```
 
 Then build using the provided toolchain file:
@@ -76,16 +78,27 @@ This loads the specified voicegroup, plays a test sequence through several progr
 2. Copy `m4a_plugin.cfg.example` to the **same directory** as the `.clap` file and rename it to `m4a_plugin.cfg`
 3. Edit `m4a_plugin.cfg` to set your pokeemerald project root and voicegroup name:
    ```
-   project_root=C:\Users\you\pokeemerald  # also works with WSL paths
+   project_root=C:\Users\you\pokeemerald
    voicegroup=petalburg
    ```
-4. Insert the plugin as an instrument on a MIDI track in your DAW
-5. Use Program Change messages to select instruments from the voicegroup
-6. Play MIDI notes to hear GBA-accurate audio
+4. Insert the plugin as an instrument on a MIDI track in your DAW and rescan if needed
+5. Open the plugin's GUI to adjust settings in real time (see below)
+6. Use Program Change messages to select instruments from the voicegroup
+7. Play MIDI notes to hear GBA-accurate audio
 
-The plugin reads `m4a_plugin.cfg` on startup (when the plugin is loaded). After editing the config file, remove and re-insert the plugin in your DAW (or save and reopen the project) for changes to take effect.
+The plugin reads `m4a_plugin.cfg` on startup as a source of initial defaults. All settings can also be changed live through the GUI and are saved in the DAW's project state, so they persist across sessions.
 
-The per-project voicegroup is also saved in the DAW's project state, so once you configure it, it persists in your saved project even without the config file.
+### GUI
+
+The plugin provides a settings panel built with [Dear ImGui](https://github.com/ocornut/imgui) and [GLFW](https://www.glfw.org/):
+
+- **Project Root** — path to your pokeemerald repository
+- **Voicegroup** — name of the voicegroup to load (e.g. `petalburg`). Press **Reload** to apply path changes and reload the instrument data.
+- **Master Volume** (0–15) — m4a engine master volume, applied immediately
+- **Song Volume** (0–127) — song-level volume multiplier, applied immediately
+- **Reverb** (0–127) — reverb wet level, applied immediately
+
+On Windows the GUI is embedded inside the DAW's FX window. On Linux/macOS it opens as a floating window.
 
 ### MIDI mapping
 
@@ -109,17 +122,32 @@ The per-project voicegroup is also saved in the DAW's project state, so once you
 
 ```
 plugin/
-  m4a_plugin.c/.h       CLAP entry point, MIDI event handling
+  m4a_plugin.c/.h        CLAP entry point, MIDI event handling, extension dispatch
+  m4a_gui.cpp/.h         Dear ImGui + GLFW settings GUI (C++ with C interface)
   m4a_engine.c/.h        Core engine: tick processing, channel allocation, MIDI routing
   m4a_channel.c/.h       PCM and CGB channel rendering, ADSR envelopes
   m4a_tables.c/.h        Frequency/scale tables (from m4a_tables.c)
   m4a_reverb.c/.h        Delay-based reverb effect
   voicegroup_loader.c/.h .inc file parser, sample loader
 
+imgui/                   Dear ImGui v1.92.6 (submodule)
+glfw/                    GLFW 3.4 (submodule)
+clap-sdk/                CLAP plugin SDK (submodule)
+
 test/
   test_engine.c          Unit tests for engine algorithms
   test_wav_export.c      Standalone WAV export test program
 ```
+
+### CLAP extensions
+
+| Extension | Purpose |
+|---|---|
+| `CLAP_EXT_AUDIO_PORTS` | Declares one stereo output port |
+| `CLAP_EXT_NOTE_PORTS` | Declares one MIDI input port |
+| `CLAP_EXT_STATE` | Saves/restores voicegroup path and audio settings in the DAW project |
+| `CLAP_EXT_GUI` | Settings GUI (Win32 embedded on Windows, floating on Linux/macOS) |
+| `CLAP_EXT_TIMER_SUPPORT` | 16 ms timer that drives GUI rendering and applies live parameter changes |
 
 ### How the engine works
 
