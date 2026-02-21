@@ -506,13 +506,16 @@ static void refresh_channel_pitches(M4AEngine *engine, M4ATrack *track, int trac
 }
 
 /* Recalculate track vol/pan and push updated rightVolume/leftVolume into
-* active CGB channels so envelopeGoal reflects the new setting immediately.
-* On the GBA, MPlayMain updates track->volMR/volML each tick and CgbSound
-* calls CgbModVol which reads rightVolume/leftVolume — so they must stay
-* current whenever the track volume or pan changes. */
-static inline void refresh_cgb_volumes(M4AEngine *engine, M4ATrack *track, int trackIndex)
+* all active channels on the track. Matches MPlayMain's behavior of calling
+* ChnVolSetAsm on every active channel when MPT_FLG_VOLCHG is set. */
+static inline void refresh_volumes(M4AEngine *engine, M4ATrack *track, int trackIndex)
 {
     m4a_track_vol_pit_set(track);
+    for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+        M4APCMChannel *ch = &engine->pcmChannels[i];
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex)
+            chn_vol_set(ch, track);
+    }
     for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
         M4ACGBChannel *ch = &engine->cgbChannels[i];
         if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
@@ -542,11 +545,11 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         break;
     case 0x7:  /* Volume */
         track->volume = value * engine->songMasterVolume / MAX_SONG_VOLUME;
-        refresh_cgb_volumes(engine, track, trackIndex);
+        refresh_volumes(engine, track, trackIndex);
         break;
     case 0xA: /* Pan */
         track->pan = (int8_t)(value - 64);
-        refresh_cgb_volumes(engine, track, trackIndex);
+        refresh_volumes(engine, track, trackIndex);
         break;
     case 0xC:
     case 0xD:
@@ -772,14 +775,15 @@ void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamp
                 m4a_pcm_channel_render(&engine->pcmChannels[ch], &mixL, &mixR);
         }
 
+        /* Apply reverb */
+        m4a_reverb_process(&engine->reverb, &mixL, &mixR);
+
         for (int ch = 0; ch < MAX_CGB_CHANNELS; ch++) {
             if (engine->cgbChannels[ch].status & CHN_ON)
                 m4a_cgb_channel_render(&engine->cgbChannels[ch], &mixL, &mixR,
                                        engine->sampleRate);
         }
 
-        /* Apply reverb */
-        m4a_reverb_process(&engine->reverb, &mixL, &mixR);
 
         /* Normalize to float (-1.0 to 1.0)
          * The GBA mixer accumulates (int8_sample * uint8_envVol) >> 8 per channel,
