@@ -197,6 +197,17 @@ struct M4AEngine {
     uint8_t maxPcmChannels; /* active PCM channel count */
     uint8_t c15;            /* counter 0-14 for CGB envelope double-step */
 
+    /* Tempo system (matches GBA MPlayMain tempo accumulator).
+     * tempoD = base tempo (ply_tempo param * 2), default 150.
+     * tempoU = user tempo multiplier (default 0x100 = 1.0x).
+     * tempoI = (tempoD * tempoU) >> 8, the effective tempo increment.
+     * tempoC = accumulator, incremented by tempoI each VBlank.
+     * When tempoC >= 150, one "tempo tick" fires (LFO advances). */
+    uint16_t tempoD;
+    uint16_t tempoU;
+    uint16_t tempoI;
+    uint16_t tempoC;
+
     /* Loaded voice data */
     ToneData *voiceGroup;   /* array of 128 ToneData entries */
 };
@@ -216,6 +227,10 @@ void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value);
 void m4a_engine_pitch_bend(M4AEngine *engine, int channel, int16_t bend);
 void m4a_engine_all_notes_off(M4AEngine *engine, int channel);
 void m4a_engine_all_sound_off(M4AEngine *engine);
+
+/* Set tempo from DAW BPM.  The GBA relationship is tempoI ≈ BPM
+ * (24 ticks per quarter note at ~59.7 Hz VBlank gives BPM ≈ tempoI). */
+void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm);
 
 /* Audio processing */
 void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamples);

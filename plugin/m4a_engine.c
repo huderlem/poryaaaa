@@ -187,6 +187,10 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     engine->songMasterVolume = MAX_SONG_VOLUME;
     engine->maxPcmChannels = 5;  /* default, matches Pokemon Emerald init */
     engine->c15 = 14;
+    engine->tempoD = 150;
+    engine->tempoU = 0x100;
+    engine->tempoI = 150;
+    engine->tempoC = 0;
 
     /* Initialize tracks with defaults */
     for (int i = 0; i < MAX_TRACKS; i++) {
@@ -215,6 +219,12 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
 void m4a_engine_destroy(M4AEngine *engine)
 {
     m4a_reverb_destroy(&engine->reverb);
+}
+
+void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm)
+{
+    if (bpm < 1.0) bpm = 1.0;
+    engine->tempoI = (uint16_t)(bpm + 0.5);
 }
 
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
@@ -469,22 +479,35 @@ void m4a_engine_cc(M4AEngine *engine, int channel, uint8_t cc, uint8_t value)
     M4ATrack *track = &engine->tracks[channel];
 
     switch (cc) {
-    case 1:  /* Mod wheel -> LFO depth */
+    case 0x1:  /* Mod wheel -> LFO depth */
         track->mod = value;
         if (value == 0) {
             track->lfoSpeedC = 0;
             track->modM = 0;
         }
         break;
-    case 21: /* LFO speed */
-        track->lfoSpeed = value;
-        break;
-    case 7:  /* Volume */
+    case 0x7:  /* Volume */
         track->volume = value * engine->songMasterVolume / MAX_SONG_VOLUME;
         goto refresh_cgb_volumes;
-    case 10: /* Pan */
+    case 0xA: /* Pan */
         track->pan = (int8_t)(value - 64);
         goto refresh_cgb_volumes;
+    case 0xC:
+    case 0xD:
+    case 0xE:
+    case 0xF:
+    case 0x10:
+        /* MEMACC-related -- we don't care about these. */
+        break;
+    case 0x11:
+        /* Label command --we don't care about these. */
+        break;
+    case 0x14: /* Bend range (BENDR) */
+        track->bendRange = value;
+        break;
+    case 0x15: /* LFO speed (LFOS) */
+        track->lfoSpeed = value;
+        break;
     refresh_cgb_volumes:
         /* Recalculate track vol/pan and push updated rightVolume/leftVolume into
          * active CGB channels so envelopeGoal reflects the new setting immediately.
@@ -552,45 +575,12 @@ void m4a_engine_all_sound_off(M4AEngine *engine)
 }
 
 /*
- * Engine tick - called at ~60Hz (VBlank rate)
- * Advances envelopes, LFO, and updates channel parameters
+ * Process one LFO tempo tick for all active tracks.
+ * In the GBA, this runs inside MPlayMain's tempo loop, so it fires
+ * at the tempo rate (tempoI/150 times per VBlank), not at a fixed 60Hz.
  */
-void m4a_engine_tick(M4AEngine *engine)
+static void m4a_lfo_tick(M4AEngine *engine)
 {
-    /* Advance c15 counter (0-14 cycle) */
-    if (engine->c15 > 0)
-        engine->c15--;
-    else
-        engine->c15 = 14;
-
-    /* Process PCM channel envelopes */
-    for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
-        M4APCMChannel *ch = &engine->pcmChannels[i];
-        if (ch->status & CHN_ON) {
-            /* Decrement gate time */
-            if (ch->gateTime > 0) {
-                ch->gateTime--;
-                if (ch->gateTime == 0)
-                    ch->status |= CHN_STOP;
-            }
-            m4a_pcm_channel_tick(ch, engine->masterVolume);
-        }
-    }
-
-    /* Process CGB channel envelopes */
-    for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
-        M4ACGBChannel *ch = &engine->cgbChannels[i];
-        if (ch->status & CHN_ON) {
-            if (ch->gateTime > 0) {
-                ch->gateTime--;
-                if (ch->gateTime == 0)
-                    ch->status |= CHN_STOP;
-            }
-            m4a_cgb_channel_tick(ch, engine->c15);
-        }
-    }
-
-    /* Process LFO for all active tracks */
     for (int i = 0; i < MAX_TRACKS; i++) {
         M4ATrack *track = &engine->tracks[i];
         if (track->lfoSpeed == 0 || track->mod == 0)
@@ -615,7 +605,6 @@ void m4a_engine_tick(M4AEngine *engine)
         int8_t newModM = (int8_t)((track->mod * lfoVal) >> 6);
         if (newModM != track->modM) {
             track->modM = newModM;
-            /* Flag that volume/pitch need recalculation */
             m4a_track_vol_pit_set(track);
 
             /* Update active channels for this track */
@@ -649,6 +638,55 @@ void m4a_engine_tick(M4AEngine *engine)
                 }
             }
         }
+    }
+}
+
+/*
+ * Engine tick - called at ~60Hz (VBlank rate)
+ * Advances envelopes at VBlank rate and LFO at tempo rate,
+ * matching the GBA's split between SoundMainRAM and MPlayMain.
+ */
+void m4a_engine_tick(M4AEngine *engine)
+{
+    /* Advance c15 counter (0-14 cycle) */
+    if (engine->c15 > 0)
+        engine->c15--;
+    else
+        engine->c15 = 14;
+
+    /* Process PCM channel envelopes (VBlank rate) */
+    for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+        M4APCMChannel *ch = &engine->pcmChannels[i];
+        if (ch->status & CHN_ON) {
+            /* Decrement gate time */
+            if (ch->gateTime > 0) {
+                ch->gateTime--;
+                if (ch->gateTime == 0)
+                    ch->status |= CHN_STOP;
+            }
+            m4a_pcm_channel_tick(ch, engine->masterVolume);
+        }
+    }
+
+    /* Process CGB channel envelopes (VBlank rate) */
+    for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
+        M4ACGBChannel *ch = &engine->cgbChannels[i];
+        if (ch->status & CHN_ON) {
+            if (ch->gateTime > 0) {
+                ch->gateTime--;
+                if (ch->gateTime == 0)
+                    ch->status |= CHN_STOP;
+            }
+            m4a_cgb_channel_tick(ch, engine->c15);
+        }
+    }
+
+    /* Tempo accumulator drives LFO ticks, matching MPlayMain's tempo loop.
+     * tempoC += tempoI each VBlank; fires one LFO tick per 150 accumulated. */
+    engine->tempoC += engine->tempoI;
+    while (engine->tempoC >= 150) {
+        engine->tempoC -= 150;
+        m4a_lfo_tick(engine);
     }
 }
 

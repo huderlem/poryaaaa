@@ -249,6 +249,12 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
     if (!data->activated)
         return CLAP_PROCESS_ERROR;
 
+    /* Read tempo from host transport (MIDI meta event tempo) */
+    if (process->transport
+        && (process->transport->flags & CLAP_TRANSPORT_HAS_TEMPO)) {
+        m4a_engine_set_tempo_bpm(&data->engine, process->transport->tempo);
+    }
+
     const uint32_t numFrames = process->frames_count;
     const uint32_t numEvents = process->in_events->size(process->in_events);
 
