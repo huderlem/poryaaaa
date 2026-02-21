@@ -6,6 +6,7 @@ This file tracks known issues and to-do items for the plugin.
 - Needs a GUI frontend so that the user can change settings on the fly in the DAW.
     - Dear Imgui seems fine for now?
 - Full midi -> .wav output regression tests
+- Properly simulate PCM channel limits.
 - Architecture document
 - Identify any performance issues/improvements
 - Read the .wav instrument sample files instead of .bin files
