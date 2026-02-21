@@ -1,13 +1,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #include <clap/clap.h>
+#include <clap/ext/gui.h>
+#include <clap/ext/timer-support.h>
 #include "m4a_plugin.h"
 #include "m4a_engine.h"
 #include "m4a_channel.h"
 #include "m4a_reverb.h"
 #include "voicegroup_loader.h"
+#include "m4a_gui.h"
 
 /*
  * M4A VSTi Plugin - CLAP implementation
@@ -45,6 +49,9 @@ static const clap_plugin_descriptor_t s_descriptor = {
  * Used to find m4a_plugin.cfg in the same directory as the plugin.
  */
 static char s_pluginDir[512] = {0};
+
+/* Optional diagnostic log path, set from config key "log=<path>" */
+static const char *s_pluginLogPath = NULL;
 
 /*
  * Load settings from m4a_plugin.cfg placed next to the .clap file.
@@ -88,7 +95,9 @@ static void load_config_file(M4APluginData *data)
         const char *key = line;
         const char *value = eq + 1;
 
-        if (strcmp(key, "project_root") == 0) {
+        if (strcmp(key, "log") == 0) {
+            s_pluginLogPath = strdup(value); /* leak is fine for a dev diagnostic */
+        } else if (strcmp(key, "project_root") == 0) {
             snprintf(data->projectRoot, sizeof(data->projectRoot), "%s", value);
         } else if (strcmp(key, "voicegroup") == 0) {
             snprintf(data->voicegroupName, sizeof(data->voicegroupName), "%s", value);
@@ -125,6 +134,8 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->voicegroupName[0] = '\0';
     data->loadedVg = NULL;
     data->activated = false;
+    data->gui = NULL;
+    data->guiTimerId = CLAP_INVALID_ID;
     /* Load defaults from config file placed next to the .clap */
     load_config_file(data);
     return true;
@@ -133,6 +144,7 @@ static bool plugin_init(const clap_plugin_t *plugin)
 static void plugin_destroy(const clap_plugin_t *plugin)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    /* GUI must already be destroyed by the host (gui->destroy before plugin->destroy) */
     if (data->loadedVg) {
         voicegroup_free(data->loadedVg);
         data->loadedVg = NULL;
@@ -164,6 +176,20 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     }
 
     data->activated = true;
+
+    /* Notify GUI of current voicegroup status */
+    if (data->gui) {
+        M4AGuiSettings gs;
+        memset(&gs, 0, sizeof(gs));
+        snprintf(gs.projectRoot,    sizeof(gs.projectRoot),    "%s", data->projectRoot);
+        snprintf(gs.voicegroupName, sizeof(gs.voicegroupName), "%s", data->voicegroupName);
+        gs.reverbAmount      = data->reverbAmount;
+        gs.masterVolume      = data->masterVolume;
+        gs.songMasterVolume  = data->songMasterVolume;
+        gs.voicegroupLoaded  = (data->loadedVg != NULL);
+        m4a_gui_update_settings(data->gui, &gs);
+    }
+
     return true;
 }
 
@@ -422,12 +448,273 @@ static const clap_plugin_state_t s_state = {
     .load = state_load,
 };
 
+/* ---- GUI extension ---- */
+
+static void plugin_log(const char *fmt, ...)
+{
+    if (!s_pluginLogPath) return;
+    FILE *f = fopen(s_pluginLogPath, "a");
+    if (!f) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
+static bool gui_is_api_supported(const clap_plugin_t *plugin, const char *api, bool is_floating)
+{
+    (void)plugin;
+#if defined(_WIN32)
+    /* Support Win32 embedded (preferred by Reaper) and all floating */
+    bool supported = is_floating ||
+                     (!is_floating && api && strcmp(api, CLAP_WINDOW_API_WIN32) == 0);
+#else
+    bool supported = is_floating;
+#endif
+    plugin_log("gui_is_api_supported: api=%s floating=%d -> %d",
+               api ? api : "(null)", is_floating, supported);
+    return supported;
+}
+
+static bool gui_get_preferred_api(const clap_plugin_t *plugin,
+                                  const char **api, bool *is_floating)
+{
+    (void)plugin;
+#if defined(_WIN32)
+    /* Prefer embedded on Windows so hosts like Reaper show us in-line */
+    *api = CLAP_WINDOW_API_WIN32;
+    *is_floating = false;
+#elif defined(__APPLE__)
+    *api = CLAP_WINDOW_API_COCOA;
+    *is_floating = true;
+#else
+    *api = CLAP_WINDOW_API_X11;
+    *is_floating = true;
+#endif
+    return true;
+}
+
+static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_floating)
+{
+    plugin_log("gui_create: api=%s floating=%d", api ? api : "(null)", is_floating);
+    (void)api;
+#if !defined(_WIN32)
+    /* On non-Windows platforms we only support floating windows */
+    if (!is_floating) {
+        plugin_log("gui_create: rejecting (not floating, non-Windows)");
+        return false;
+    }
+#endif
+
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+
+    M4AGuiSettings gs;
+    memset(&gs, 0, sizeof(gs));
+    snprintf(gs.projectRoot,    sizeof(gs.projectRoot),    "%s", data->projectRoot);
+    snprintf(gs.voicegroupName, sizeof(gs.voicegroupName), "%s", data->voicegroupName);
+    gs.reverbAmount     = data->reverbAmount;
+    gs.masterVolume     = data->masterVolume;
+    gs.songMasterVolume = data->songMasterVolume;
+    gs.voicegroupLoaded = (data->loadedVg != NULL);
+
+    data->gui = m4a_gui_create(data->host, &gs, s_pluginLogPath);
+    if (!data->gui) {
+        plugin_log("gui_create: m4a_gui_create() returned NULL");
+        return false;
+    }
+    plugin_log("gui_create: success");
+
+    /* Register a ~60 Hz timer to drive GUI rendering */
+    const clap_host_timer_support_t *timerExt =
+        (const clap_host_timer_support_t *)data->host->get_extension(
+            data->host, CLAP_EXT_TIMER_SUPPORT);
+    if (timerExt)
+        timerExt->register_timer(data->host, 16 /* ms */, &data->guiTimerId);
+
+    return true;
+}
+
+static void gui_destroy(const clap_plugin_t *plugin)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    if (!data->gui)
+        return;
+
+    /* Unregister the render timer */
+    if (data->guiTimerId != CLAP_INVALID_ID) {
+        const clap_host_timer_support_t *timerExt =
+            (const clap_host_timer_support_t *)data->host->get_extension(
+                data->host, CLAP_EXT_TIMER_SUPPORT);
+        if (timerExt)
+            timerExt->unregister_timer(data->host, data->guiTimerId);
+        data->guiTimerId = CLAP_INVALID_ID;
+    }
+
+    m4a_gui_destroy(data->gui);
+    data->gui = NULL;
+}
+
+static bool gui_set_scale(const clap_plugin_t *plugin, double scale)
+{
+    (void)plugin;
+    (void)scale;
+    return false; /* GLFW handles DPI internally */
+}
+
+static bool gui_get_size(const clap_plugin_t *plugin, uint32_t *width, uint32_t *height)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    m4a_gui_get_size(data->gui, width, height);
+    return true;
+}
+
+static bool gui_can_resize(const clap_plugin_t *plugin)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    return m4a_gui_can_resize(data->gui);
+}
+
+static bool gui_get_resize_hints(const clap_plugin_t *plugin,
+                                 clap_gui_resize_hints_t *hints)
+{
+    (void)plugin;
+    hints->can_resize_horizontally = true;
+    hints->can_resize_vertically   = true;
+    hints->preserve_aspect_ratio   = false;
+    return true;
+}
+
+static bool gui_adjust_size(const clap_plugin_t *plugin,
+                            uint32_t *width, uint32_t *height)
+{
+    /* Accept any size the host offers */
+    (void)plugin;
+    (void)width;
+    (void)height;
+    return true;
+}
+
+static bool gui_set_size(const clap_plugin_t *plugin, uint32_t width, uint32_t height)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    return m4a_gui_set_size(data->gui, width, height);
+}
+
+static bool gui_set_parent(const clap_plugin_t *plugin, const clap_window_t *window)
+{
+    plugin_log("gui_set_parent called");
+#if defined(_WIN32)
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    return m4a_gui_set_parent_win32(data->gui, window->win32);
+#else
+    (void)plugin;
+    (void)window;
+    return false;
+#endif
+}
+
+static bool gui_set_transient(const clap_plugin_t *plugin, const clap_window_t *window)
+{
+    (void)plugin;
+    (void)window;
+    return true;
+}
+
+static void gui_suggest_title(const clap_plugin_t *plugin, const char *title)
+{
+    (void)plugin;
+    (void)title;
+}
+
+static bool gui_show(const clap_plugin_t *plugin)
+{
+    plugin_log("gui_show called");
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    return m4a_gui_show(data->gui);
+}
+
+static bool gui_hide(const clap_plugin_t *plugin)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    return m4a_gui_hide(data->gui);
+}
+
+static const clap_plugin_gui_t s_gui = {
+    .is_api_supported  = gui_is_api_supported,
+    .get_preferred_api = gui_get_preferred_api,
+    .create            = gui_create,
+    .destroy           = gui_destroy,
+    .set_scale         = gui_set_scale,
+    .get_size          = gui_get_size,
+    .can_resize        = gui_can_resize,
+    .get_resize_hints  = gui_get_resize_hints,
+    .adjust_size       = gui_adjust_size,
+    .set_size          = gui_set_size,
+    .set_parent        = gui_set_parent,
+    .set_transient     = gui_set_transient,
+    .suggest_title     = gui_suggest_title,
+    .show              = gui_show,
+    .hide              = gui_hide,
+};
+
+/* ---- Timer support extension ---- */
+
+static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    if (!data->gui || timer_id != data->guiTimerId)
+        return;
+
+    /* Render one GUI frame */
+    m4a_gui_tick(data->gui);
+
+    /* Apply any settings the user changed */
+    M4AGuiSettings gs;
+    bool reloadVoicegroup = false;
+    if (!m4a_gui_poll_changes(data->gui, &gs, &reloadVoicegroup))
+        return;
+
+    /* Immediate audio settings - safe to write since they're byte-sized */
+    data->reverbAmount     = gs.reverbAmount;
+    data->masterVolume     = gs.masterVolume;
+    data->songMasterVolume = gs.songMasterVolume;
+
+    if (data->activated) {
+        data->engine.masterVolume     = gs.masterVolume;
+        data->engine.songMasterVolume = gs.songMasterVolume;
+        m4a_reverb_set_amount(&data->engine.reverb, gs.reverbAmount);
+    }
+
+    if (reloadVoicegroup) {
+        /* Update paths, then ask the host to deactivate/reactivate so the new
+         * voicegroup is loaded cleanly from the audio thread's perspective. */
+        snprintf(data->projectRoot,    sizeof(data->projectRoot),
+                 "%s", gs.projectRoot);
+        snprintf(data->voicegroupName, sizeof(data->voicegroupName),
+                 "%s", gs.voicegroupName);
+        data->host->request_restart(data->host);
+    }
+
+    /* Reflect updated status back into the GUI (voicegroupLoaded may change
+     * after request_restart completes, but update the rest immediately). */
+    gs.voicegroupLoaded = (data->loadedVg != NULL);
+    m4a_gui_update_settings(data->gui, &gs);
+}
+
+static const clap_plugin_timer_support_t s_timer_support = {
+    .on_timer = timer_on_timer,
+};
+
 /* Extension dispatcher */
 static const void *plugin_get_extension(const clap_plugin_t *plugin, const char *id)
 {
-    if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) return &s_audio_ports;
-    if (strcmp(id, CLAP_EXT_NOTE_PORTS) == 0) return &s_note_ports;
-    if (strcmp(id, CLAP_EXT_STATE) == 0) return &s_state;
+    if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0)   return &s_audio_ports;
+    if (strcmp(id, CLAP_EXT_NOTE_PORTS) == 0)    return &s_note_ports;
+    if (strcmp(id, CLAP_EXT_STATE) == 0)          return &s_state;
+    if (strcmp(id, CLAP_EXT_GUI) == 0)            return &s_gui;
+    if (strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0)  return &s_timer_support;
     return NULL;
 }
 
@@ -457,6 +744,8 @@ static const clap_plugin_t *factory_create_plugin(
 
     M4APluginData *data = calloc(1, sizeof(M4APluginData));
     if (!data) return NULL;
+
+    data->host = host;
 
     clap_plugin_t *plugin = calloc(1, sizeof(clap_plugin_t));
     if (!plugin) {

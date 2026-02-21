@@ -24,3 +24,8 @@ master_volume=15
 
 # Song Master volume (0-127)
 song_master_volume=127
+
+# Optional: diagnostic log file path. Uncomment to enable GUI debug logging.
+# Useful for diagnosing GUI problems (e.g. why the GUI window doesn't appear).
+# On Windows: use a path you can write to, e.g. your Desktop or C:\Temp.
+#log=C:\Users\you\Desktop\m4a_plugin.log
