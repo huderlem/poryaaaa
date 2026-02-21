@@ -113,10 +113,14 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
                 }
             }
         } else if (envState == CHN_ENV_ATTACK) {
-            envVol += ch->attack;
-            if (envVol >= 0xFF) {
+            /* Use 32-bit arithmetic to match GBA behavior (ldrb zero-extends,
+             * so the GBA does this addition in 32-bit registers, not 8-bit). */
+            uint32_t sum = (uint32_t)envVol + ch->attack;
+            if (sum >= 0xFF) {
                 envVol = 0xFF;
                 ch->status--;  /* attack -> decay */
+            } else {
+                envVol = (uint8_t)sum;
             }
         }
         /* sustain: envVol stays as-is */

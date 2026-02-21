@@ -468,6 +468,43 @@ void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key)
     }
 }
 
+/*
+ * Recalculate and push updated frequencies into every active PCM/CGB channel
+ * on the given track.  Called when pitch-related track state changes (pitch
+ * bend, LFO vibrato) so that already-playing notes follow the new pitch.
+ * Matches MPlayMain's per-tick note re-evaluation on real GBA hardware.
+ */
+static void refresh_channel_pitches(M4AEngine *engine, M4ATrack *track, int trackIndex)
+{
+    for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+        M4APCMChannel *ch = &engine->pcmChannels[i];
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex && ch->wav) {
+            int32_t finalKey = (int32_t)ch->key + track->keyM;
+            if (finalKey < 0) finalKey = 0;
+            uint32_t freq = m4a_midi_key_to_freq(ch->wav, (uint8_t)finalKey, track->pitM);
+            int32_t pcmSamplesPerVBlank = 224;
+            int32_t pcmFreq = (597275 * pcmSamplesPerVBlank + 5000) / 10000;
+            int32_t divFreq = (16777216 / pcmFreq + 1) >> 1;
+            float scale = (float)pcmFreq / engine->sampleRate;
+            ch->frequency = (uint32_t)((uint64_t)freq * divFreq * scale);
+        }
+    }
+    for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
+        M4ACGBChannel *ch = &engine->cgbChannels[i];
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
+            int32_t finalKey = (int32_t)ch->key + track->keyM;
+            if (finalKey < 0) finalKey = 0;
+            uint32_t newFreq = m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)finalKey, track->pitM);
+            /* Preserve NR43 bit 3 (7-bit LFSR mode) for noise channel.
+             * gNoiseTable entries always have bit 3 = 0; the period bit is
+             * ORed in at note-on time and must survive frequency updates. */
+            if (ch->type == 4)
+                newFreq |= ch->frequency & 0x08;
+            ch->frequency = newFreq;
+        }
+    }
+}
+
 /* Recalculate track vol/pan and push updated rightVolume/leftVolume into
 * active CGB channels so envelopeGoal reflects the new setting immediately.
 * On the GBA, MPlayMain updates track->volMR/volML each tick and CgbSound
@@ -555,8 +592,15 @@ void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend)
     if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
         return;
 
+    M4ATrack *track = &engine->tracks[trackIndex];
+
     /* Scale 14-bit MIDI bend to m4a's -64..+63 range */
-    engine->tracks[trackIndex].bend = (int8_t)(bend >> 7);
+    track->bend = (int8_t)(bend >> 7);
+
+    /* Recompute keyM/pitM and push the new pitch into every active channel
+     * on this track, matching MPlayMain's per-tick note re-evaluation. */
+    m4a_track_vol_pit_set(track);
+    refresh_channel_pitches(engine, track, trackIndex);
 }
 
 /*
@@ -646,7 +690,10 @@ static void m4a_lfo_tick(M4AEngine *engine)
                     if (track->modT == 0) {
                         int32_t finalKey = (int32_t)ch->key + track->keyM;
                         if (finalKey < 0) finalKey = 0;
-                        ch->frequency = m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)finalKey, track->pitM);
+                        uint32_t newFreq = m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)finalKey, track->pitM);
+                        if (ch->type == 4)
+                            newFreq |= ch->frequency & 0x08;
+                        ch->frequency = newFreq;
                     }
                 }
             }
