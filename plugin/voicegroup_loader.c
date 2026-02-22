@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 #ifdef _WIN32
 #define PATH_SEP '\\'
@@ -54,6 +55,7 @@ static KeySplitDef *keysplit_map_find(const KeySplitMap *map, const char *name);
 static int parse_direct_sound_data(const char *projectRoot, SymbolMap *map);
 static int parse_programmable_wave_data(const char *projectRoot, SymbolMap *map);
 static int parse_keysplit_tables(const char *projectRoot, KeySplitMap *map);
+static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *relativeBinPath);
 static WaveData *load_wave_data(const char *projectRoot, const char *relativePath);
 static uint32_t *load_prog_wave(const char *projectRoot, const char *relativePath);
 static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
@@ -372,6 +374,296 @@ static int parse_keysplit_tables(const char *projectRoot, KeySplitMap *map)
 }
 
 /*
+ * Load a PCM instrument sample from a .wav file.
+ * Derives the .wav path by replacing the .bin extension in relativeBinPath.
+ * Falls back to load_wave_data() if the .wav is not found.
+ * Parses fmt, smpl, agbp, agbl, and data RIFF chunks to populate WaveData,
+ * matching the wav2agb conversion logic exactly.
+ */
+static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *relativeBinPath)
+{
+    /* Derive .wav path: replace trailing .bin with .wav */
+    char relativeWavPath[MAX_PATH_LEN];
+    strncpy(relativeWavPath, relativeBinPath, MAX_PATH_LEN - 1);
+    relativeWavPath[MAX_PATH_LEN - 1] = '\0';
+
+    size_t pathLen = strlen(relativeWavPath);
+    char *ext = NULL;
+    if (pathLen >= 4 && strcmp(relativeWavPath + pathLen - 4, ".bin") == 0)
+        ext = relativeWavPath + pathLen - 4;
+
+    if (!ext) {
+        /* Not a .bin path — fall back to binary loader */
+        return load_wave_data(projectRoot, relativeBinPath);
+    }
+    ext[1] = 'w'; ext[2] = 'a'; ext[3] = 'v';
+
+    char fullPath[MAX_PATH_LEN];
+    build_path(fullPath, sizeof(fullPath), projectRoot, relativeWavPath);
+
+    FILE *f = fopen(fullPath, "rb");
+    if (!f) {
+        /* .wav not found — fall back to .bin loader */
+        return load_wave_data(projectRoot, relativeBinPath);
+    }
+
+    /* Read RIFF/WAVE header (12 bytes) */
+    uint8_t riffHdr[12];
+    if (fread(riffHdr, 1, 12, f) != 12 ||
+        memcmp(riffHdr, "RIFF", 4) != 0 ||
+        memcmp(riffHdr + 8, "WAVE", 4) != 0) {
+        fclose(f);
+        fprintf(stderr, "voicegroup_loader: invalid RIFF/WAVE header in %s\n", fullPath);
+        return NULL;
+    }
+    uint32_t riffSize = riffHdr[4] | ((uint32_t)riffHdr[5] << 8) |
+                        ((uint32_t)riffHdr[6] << 16) | ((uint32_t)riffHdr[7] << 24);
+    long fileEnd = 8 + (long)riffSize;
+
+    /* Chunk parsing state */
+    int fmtFound = 0, dataFound = 0;
+
+    /* fmt fields */
+    int fmtTag = 0;
+    uint32_t sampleRate = 0;
+    uint16_t blockAlign = 0, bitsPerSample = 0;
+
+    /* smpl fields */
+    uint32_t midiKey = 60, midiPitchFraction = 0;
+    uint32_t smplLoopStart = 0, smplLoopEnd = 0;
+    int loopEnabled = 0;
+
+    /* agbp / agbl custom chunk values */
+    uint32_t agbPitch = 0, agbLoopEnd = 0;
+
+    /* data chunk location */
+    long dataOffset = 0;
+    uint32_t dataLen = 0;
+
+    /* Iterate RIFF chunks */
+    while (1) {
+        long pos = ftell(f);
+        if (pos < 0 || pos + 8 > fileEnd)
+            break;
+
+        uint8_t chunkHdr[8];
+        if (fread(chunkHdr, 1, 8, f) != 8)
+            break;
+
+        uint32_t chunkLen = chunkHdr[4] | ((uint32_t)chunkHdr[5] << 8) |
+                            ((uint32_t)chunkHdr[6] << 16) | ((uint32_t)chunkHdr[7] << 24);
+        long chunkDataStart = ftell(f);
+
+        if (memcmp(chunkHdr, "fmt ", 4) == 0 && chunkLen >= 16) {
+            uint8_t d[16];
+            if (fread(d, 1, 16, f) == 16) {
+                fmtTag        = d[0] | (d[1] << 8);
+                sampleRate    = d[4]  | ((uint32_t)d[5]  << 8) |
+                                ((uint32_t)d[6]  << 16) | ((uint32_t)d[7]  << 24);
+                blockAlign    = (uint16_t)(d[12] | (d[13] << 8));
+                bitsPerSample = (uint16_t)(d[14] | (d[15] << 8));
+                fmtFound = 1;
+            }
+        } else if (memcmp(chunkHdr, "smpl", 4) == 0 && chunkLen >= 32) {
+            /* Read up to offset 52 to cover one loop point record */
+            uint32_t readLen = chunkLen < 52 ? chunkLen : 52;
+            uint8_t d[52];
+            if (fread(d, 1, readLen, f) == readLen) {
+                midiKey = d[12] | ((uint32_t)d[13] << 8) |
+                          ((uint32_t)d[14] << 16) | ((uint32_t)d[15] << 24);
+                if (midiKey > 127) midiKey = 127;
+                midiPitchFraction = d[16] | ((uint32_t)d[17] << 8) |
+                                    ((uint32_t)d[18] << 16) | ((uint32_t)d[19] << 24);
+                uint32_t numLoops = d[28] | ((uint32_t)d[29] << 8) |
+                                    ((uint32_t)d[30] << 16) | ((uint32_t)d[31] << 24);
+                if (numLoops == 1 && readLen >= 52) {
+                    /* Loop point record starts at offset 36; Start at +8, End at +12 */
+                    smplLoopStart = d[44] | ((uint32_t)d[45] << 8) |
+                                    ((uint32_t)d[46] << 16) | ((uint32_t)d[47] << 24);
+                    uint32_t loopEndIncl = d[48] | ((uint32_t)d[49] << 8) |
+                                          ((uint32_t)d[50] << 16) | ((uint32_t)d[51] << 24);
+                    smplLoopEnd = loopEndIncl + 1; /* smpl end is inclusive; convert to exclusive */
+                    loopEnabled = 1;
+                }
+            }
+        } else if (memcmp(chunkHdr, "agbp", 4) == 0 && chunkLen >= 4) {
+            uint8_t d[4];
+            if (fread(d, 1, 4, f) == 4)
+                agbPitch = d[0] | ((uint32_t)d[1] << 8) |
+                           ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
+        } else if (memcmp(chunkHdr, "agbl", 4) == 0 && chunkLen >= 4) {
+            uint8_t d[4];
+            if (fread(d, 1, 4, f) == 4)
+                agbLoopEnd = d[0] | ((uint32_t)d[1] << 8) |
+                             ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
+        } else if (memcmp(chunkHdr, "data", 4) == 0) {
+            dataOffset = chunkDataStart;
+            dataLen    = chunkLen;
+            dataFound  = 1;
+        }
+
+        /* Advance to next chunk (skip odd-length padding byte per RIFF spec) */
+        long nextChunk = chunkDataStart + (long)chunkLen;
+        if (chunkLen & 1) nextChunk++;
+        if (fseek(f, nextChunk, SEEK_SET) != 0)
+            break;
+    }
+
+    if (!fmtFound || !dataFound) {
+        fclose(f);
+        fprintf(stderr, "voicegroup_loader: missing fmt or data chunk in %s\n", fullPath);
+        return NULL;
+    }
+
+    /* Determine bytes per sample from fmt chunk */
+    uint32_t bytesPerSample;
+    if (fmtTag == 1) {
+        /* Integer PCM */
+        if      (blockAlign == 1 && bitsPerSample == 8)  bytesPerSample = 1; /* u8  */
+        else if (blockAlign == 2 && bitsPerSample == 16) bytesPerSample = 2; /* s16 */
+        else if (blockAlign == 3 && bitsPerSample == 24) bytesPerSample = 3; /* s24 */
+        else if (blockAlign == 4 && bitsPerSample == 32) bytesPerSample = 4; /* s32 */
+        else {
+            fclose(f);
+            fprintf(stderr, "voicegroup_loader: unsupported integer PCM format in %s\n", fullPath);
+            return NULL;
+        }
+    } else if (fmtTag == 3) {
+        /* Float PCM */
+        if      (blockAlign == 4 && bitsPerSample == 32) bytesPerSample = 4; /* f32 */
+        else if (blockAlign == 8 && bitsPerSample == 64) bytesPerSample = 8; /* f64 */
+        else {
+            fclose(f);
+            fprintf(stderr, "voicegroup_loader: unsupported float format in %s\n", fullPath);
+            return NULL;
+        }
+    } else {
+        fclose(f);
+        fprintf(stderr, "voicegroup_loader: unsupported audio format %d in %s\n", fmtTag, fullPath);
+        return NULL;
+    }
+
+    uint32_t numSamples = dataLen / bytesPerSample;
+
+    /* Compute loopEnd (stored as WaveData.size, doubles as loop end boundary) */
+    uint32_t loopEnd;
+    if (loopEnabled)
+        loopEnd = smplLoopEnd;
+    else
+        loopEnd = numSamples;
+    if (loopEnd > numSamples)
+        loopEnd = numSamples;
+    if (agbLoopEnd != 0)
+        loopEnd = agbLoopEnd; /* override: not capped again, matching wav2agb */
+
+    uint32_t size = loopEnd;
+
+    /* Compute GBA pitch frequency value (matching wav2agb converter.cpp) */
+    uint32_t freq;
+    if (agbPitch != 0) {
+        freq = agbPitch;
+    } else if (midiKey == 60 && midiPitchFraction == 0) {
+        freq = (uint32_t)((double)sampleRate * 1024.0);
+    } else {
+        double tuning = (double)midiPitchFraction / (4294967296.0 * 100.0);
+        double pitch  = (double)sampleRate *
+                        pow(2.0, (60.0 - (double)midiKey) / 12.0 + tuning / 1200.0);
+        freq = (uint32_t)(pitch * 1024.0);
+    }
+
+    /* Allocate WaveData with inline sample buffer (+1 for interpolation safety byte) */
+    WaveData *wd = malloc(sizeof(WaveData) + (size_t)size + 1);
+    if (!wd) {
+        fclose(f);
+        return NULL;
+    }
+    wd->type      = 0;
+    wd->status    = loopEnabled ? 0x4000 : 0;
+    wd->freq      = freq;
+    wd->loopStart = smplLoopStart;
+    wd->size      = size;
+    wd->data      = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+
+    /* Read raw sample bytes into a temporary buffer */
+    size_t rawBytes = (size_t)size * bytesPerSample;
+    uint8_t *rawData = NULL;
+    if (rawBytes > 0) {
+        rawData = malloc(rawBytes);
+        if (!rawData) {
+            free(wd);
+            fclose(f);
+            return NULL;
+        }
+        if (fseek(f, dataOffset, SEEK_SET) != 0) {
+            free(rawData);
+            free(wd);
+            fclose(f);
+            return NULL;
+        }
+        size_t bytesRead = fread(rawData, 1, rawBytes, f);
+        if (bytesRead < rawBytes)
+            memset(rawData + bytesRead, 0, rawBytes - bytesRead);
+    }
+    fclose(f);
+
+    /* Convert raw samples to int8_t, matching wav2agb clamp(floor(ds * 128.0), -128, 127) */
+    for (uint32_t i = 0; i < size; i++) {
+        uint8_t *sp = rawData + (size_t)i * bytesPerSample;
+        int8_t s;
+        if (fmtTag == 1) {
+            if (bytesPerSample == 1) {
+                /* u8: map [0, 255] → [-128, 127] */
+                s = (int8_t)((int)sp[0] - 128);
+            } else if (bytesPerSample == 2) {
+                /* s16: arithmetic right-shift by 8 */
+                int16_t v = (int16_t)((uint16_t)sp[0] | ((uint16_t)sp[1] << 8));
+                s = (int8_t)(v >> 8);
+            } else if (bytesPerSample == 3) {
+                /* s24: sign-extend from 24 bits, then arithmetic right-shift by 16 */
+                uint32_t raw = (uint32_t)sp[0] | ((uint32_t)sp[1] << 8) | ((uint32_t)sp[2] << 16);
+                int32_t v = (raw & 0x800000u) ? (int32_t)(raw | 0xFF000000u) : (int32_t)raw;
+                s = (int8_t)(v >> 16);
+            } else {
+                /* s32: arithmetic right-shift by 24 */
+                int32_t v = (int32_t)((uint32_t)sp[0] | ((uint32_t)sp[1] << 8) |
+                                      ((uint32_t)sp[2] << 16) | ((uint32_t)sp[3] << 24));
+                s = (int8_t)(v >> 24);
+            }
+        } else {
+            /* Float: convert to double, then clamp(floor(ds * 128.0), -128, 127) */
+            double ds;
+            if (bytesPerSample == 4) {
+                uint32_t bits = (uint32_t)sp[0] | ((uint32_t)sp[1] << 8) |
+                                ((uint32_t)sp[2] << 16) | ((uint32_t)sp[3] << 24);
+                float fv;
+                memcpy(&fv, &bits, sizeof(fv));
+                ds = (double)fv;
+            } else {
+                uint64_t bits = (uint64_t)sp[0] | ((uint64_t)sp[1] << 8) |
+                                ((uint64_t)sp[2] << 16) | ((uint64_t)sp[3] << 24) |
+                                ((uint64_t)sp[4] << 32) | ((uint64_t)sp[5] << 40) |
+                                ((uint64_t)sp[6] << 48) | ((uint64_t)sp[7] << 56);
+                double dv;
+                memcpy(&dv, &bits, sizeof(dv));
+                ds = dv;
+            }
+            int si = (int)floor(ds * 128.0);
+            if (si < -128) si = -128;
+            if (si >  127) si =  127;
+            s = (int8_t)si;
+        }
+        wd->data[i] = s;
+    }
+
+    free(rawData);
+
+    /* Safety byte for interpolation past end of sample */
+    wd->data[size] = (size > 0) ? wd->data[size - 1] : 0;
+
+    return wd;
+}
+
+/*
  * Load a .bin sample file (DirectSound wave data).
  * Binary format: 16-byte header + signed 8-bit PCM samples.
  * Header: u16 type, u16 status, u32 freq, u32 loopStart, u32 size
@@ -625,7 +917,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
 
                 const char *samplePath = symbol_map_find(dsMap, sampleSymbol);
                 if (samplePath) {
-                    WaveData *wd = load_wave_data(projectRoot, samplePath);
+                    WaveData *wd = load_wave_data_from_wav(projectRoot, samplePath);
                     if (wd) {
                         td->wav = wd;
                         vg_register_wavedata(vg, wd);
@@ -650,7 +942,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
 
                 const char *samplePath = symbol_map_find(dsMap, sampleSymbol);
                 if (samplePath) {
-                    WaveData *wd = load_wave_data(projectRoot, samplePath);
+                    WaveData *wd = load_wave_data_from_wav(projectRoot, samplePath);
                     if (wd) {
                         td->wav = wd;
                         vg_register_wavedata(vg, wd);
@@ -675,7 +967,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
 
                 const char *samplePath = symbol_map_find(dsMap, sampleSymbol);
                 if (samplePath) {
-                    WaveData *wd = load_wave_data(projectRoot, samplePath);
+                    WaveData *wd = load_wave_data_from_wav(projectRoot, samplePath);
                     if (wd) {
                         td->wav = wd;
                         vg_register_wavedata(vg, wd);

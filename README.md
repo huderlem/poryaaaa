@@ -13,7 +13,7 @@ The plugin receives MIDI events from the DAW (note on/off, program change, CC, p
 - **12 PCM channels** with linear-interpolating mixer matching `SoundMainRAM`
 - **4 CGB channels** (2 square wave, 1 programmable wave, 1 noise) with software synthesis
 - **ADSR envelopes** matching the GBA's per-tick (~60 Hz) envelope processing
-- **Voicegroup loader** that parses pokeemerald's `.inc` voice definitions and loads `.bin` samples at runtime
+- **Voicegroup loader** that parses pokeemerald's `.inc` voice definitions and loads `.wav` samples at runtime
 - **Keysplit and drumset support** with correct GBA offset handling
 - **LFO** (vibrato, tremolo, autopan) matching `MPlayMain`
 - **Reverb** (delay-based feedback matching GBA's 4-tap algorithm)
@@ -165,7 +165,7 @@ The voicegroup loader parses pokeemerald's assembly source files at runtime:
 2. `sound/programmable_wave_data.inc` - same for programmable wave samples
 3. `sound/keysplit_tables.inc` - builds note-to-voice-index lookup tables
 4. `sound/voicegroups/<name>.inc` - parses voice definitions (directsound, square, noise, keysplit, etc.)
-5. `.bin` sample files are loaded with their 16-byte headers (type, status, freq, loopStart, size)
+5. `.wav` sample files are loaded and properly processed into their m4a ".bin" representation (e.g. how the `wav2agb` tool handles them).
 
 Keysplit and drumset voicegroups are loaded recursively from `sound/voicegroups/keysplits/` and `sound/voicegroups/drumsets/`.
 

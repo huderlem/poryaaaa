@@ -58,6 +58,10 @@ set_target_properties(m4a_plugin PROPERTIES
 
 target_link_libraries(m4a_plugin PRIVATE glfw)
 
+if(UNIX AND NOT APPLE)
+    target_link_libraries(m4a_plugin PRIVATE m)
+endif()
+
 # OpenGL
 if(APPLE)
     target_link_libraries(m4a_plugin PRIVATE "-framework OpenGL")
