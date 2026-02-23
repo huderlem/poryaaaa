@@ -1,10 +1,10 @@
 # m4a_plugin
 
-A CLAP instrument plugin that emulates the GBA m4a sound engine, allowing composers to hear GBA-accurate audio directly in their DAW when writing music for pokeemerald.
+A CLAP instrument plugin that emulates the GBA m4a sound engine, allowing composers to hear GBA-accurate audio directly in their DAW when writing music for pokeemerald and pokefirered.
 
 ## Overview
 
-Composing custom music for Pokemon Emerald normally requires a slow iteration loop: author MIDI in a DAW, export, build the ROM, and test in an emulator. The DAW plays back using standard MIDI voices that sound nothing like the GBA. This plugin eliminates that gap by reimplementing the m4a mixer natively and loading voicegroups and samples directly from the pokeemerald project tree.
+Composing custom music for Pokemon GBA games normally requires a slow iteration loop: author MIDI in a DAW, export, build the ROM, and test in an emulator. The DAW plays back using standard MIDI voices that sound nothing like the GBA. This plugin eliminates that gap by reimplementing the m4a mixer natively and loading voicegroups and samples directly from the project tree. It auto-discovers the project structure and works with pokeemerald, pokefirered, and forks (including those with custom sound directories).
 
 The plugin receives MIDI events from the DAW (note on/off, program change, CC, pitch bend,) and processes them through a reasonably faithful reimplementation of the GBA's m4a sound engine, outputting stereo audio in real time.
 
@@ -13,7 +13,7 @@ The plugin receives MIDI events from the DAW (note on/off, program change, CC, p
 - **12 PCM channels** with linear-interpolating mixer matching `SoundMainRAM`
 - **4 CGB channels** (2 square wave, 1 programmable wave, 1 noise) with software synthesis
 - **ADSR envelopes** matching the GBA's per-tick (~60 Hz) envelope processing
-- **Voicegroup loader** that parses pokeemerald's `.inc` voice definitions and loads `.wav` samples at runtime
+- **Voicegroup loader** that auto-discovers project structure and parses `.inc`/`.s` voice definitions, supporting both individual voicegroup files and monolithic voice group files with labeled sections
 - **Keysplit and drumset support** with correct GBA offset handling
 - **LFO** (vibrato, tremolo, autopan) matching `MPlayMain`
 - **Reverb** (delay-based feedback matching GBA's 4-tap algorithm)
@@ -76,11 +76,12 @@ This loads the specified voicegroup, plays a test sequence through several progr
 
 1. Copy `m4a_plugin.clap` to your DAW's CLAP plugin directory (e.g. `%APPDATA%\CLAP`)
 2. Copy `m4a_plugin.cfg.example` to the **same directory** as the `.clap` file and rename it to `m4a_plugin.cfg`
-3. Edit `m4a_plugin.cfg` to set your pokeemerald project root and voicegroup name:
+3. Edit `m4a_plugin.cfg` to set your project root and voicegroup name:
    ```
    project_root=C:\Users\you\pokeemerald
    voicegroup=petalburg
    ```
+   The loader auto-discovers the project structure. For projects with custom sound directories, you can optionally specify additional search paths via `sound_data_paths`, `voicegroup_paths`, and `sample_dirs` (see the example config for details).
 4. Insert the plugin as an instrument on a MIDI track in your DAW and rescan if needed
 5. Open the plugin's GUI to adjust settings in real time (see below)
 6. Use Program Change messages to select instruments from the voicegroup
@@ -92,8 +93,8 @@ The plugin reads `m4a_plugin.cfg` on startup as a source of initial defaults. Al
 
 The plugin provides a settings panel built with [Dear ImGui](https://github.com/ocornut/imgui) and [GLFW](https://www.glfw.org/):
 
-- **Project Root** — path to your pokeemerald repository
-- **Voicegroup** — name of the voicegroup to load (e.g. `petalburg`). Press **Reload** to apply path changes and reload the instrument data.
+- **Project Root** — path to your project repository
+- **Voicegroup** — name of the voicegroup to load (e.g. `petalburg`, `voicegroup000`). Press **Reload** to apply path changes and reload the instrument data.
 - **Master Volume** (0–15) — m4a engine master volume, applied immediately
 - **Song Volume** (0–127) — song-level volume multiplier, applied immediately
 - **Reverb** (0–127) — reverb wet level, applied immediately
@@ -128,7 +129,7 @@ plugin/
   m4a_channel.c/.h       PCM and CGB channel rendering, ADSR envelopes
   m4a_tables.c/.h        Frequency/scale tables (from m4a_tables.c)
   m4a_reverb.c/.h        Delay-based reverb effect
-  voicegroup_loader.c/.h .inc file parser, sample loader
+  voicegroup_loader.c/.h Project discovery, .inc/.s parser, sample loader
 
 imgui/                   Dear ImGui v1.92.6 (submodule)
 glfw/                    GLFW 3.4 (submodule)
@@ -159,15 +160,15 @@ The engine runs a **tick** at the GBA's VBlank rate (~59.7 Hz) to advance envelo
 
 ### Voicegroup loading
 
-The voicegroup loader parses pokeemerald's assembly source files at runtime:
+The voicegroup loader auto-discovers and parses project assembly source files at runtime:
 
-1. `sound/direct_sound_data.inc` - builds a symbol-to-file mapping for PCM samples
-2. `sound/programmable_wave_data.inc` - same for programmable wave samples
-3. `sound/keysplit_tables.inc` - builds note-to-voice-index lookup tables
-4. `sound/voicegroups/<name>.inc` - parses voice definitions (directsound, square, noise, keysplit, etc.)
-5. `.wav` sample files are loaded and properly processed into their m4a ".bin" representation (e.g. how the `wav2agb` tool handles them).
+1. **Project discovery** — scans the `sound/` directory tree to locate symbol definition files, voicegroup directories, monolithic voicegroup files, and `.wav` sample directories. Works with pokeemerald's individual-file layout (`sound/voicegroups/<name>.inc`) and pokefirered's monolithic layout (`sound/voice_groups.inc` with labeled sections).
+2. **Symbol maps** — parses `direct_sound_data.inc` and `programmable_wave_data.inc` files to build symbol-to-file mappings for PCM and programmable wave samples.
+3. **Keysplit tables** — parses `keysplit_tables.inc`, supporting both pokeemerald's macro format (`keysplit name, startNote`) and pokefirered's raw format (`.set`/`.byte` directives).
+4. **Voice definitions** — parses voice macros (directsound, square, noise, keysplit, etc.) from the discovered voicegroup file.
+5. **Sample loading** — loads `.wav` samples with a deduplication cache. When a sample symbol isn't found in the symbol map, the loader falls back to searching discovered `.wav` directories.
 
-Keysplit and drumset voicegroups are loaded recursively from `sound/voicegroups/keysplits/` and `sound/voicegroups/drumsets/`.
+Keysplit and drumset sub-voicegroups are resolved recursively across all discovered voicegroup directories. Additional search paths can be configured via `sound_data_paths`, `voicegroup_paths`, and `sample_dirs` in the config file for projects with non-standard layouts.
 
 ## GBA source reference
 

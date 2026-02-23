@@ -116,6 +116,43 @@ static void load_config_file(M4APluginData *data)
             if (v < 0) v = 0;
             if (v > MAX_SONG_VOLUME) v = MAX_SONG_VOLUME;
             data->songMasterVolume = (uint8_t)v;
+        } else if (strcmp(key, "sound_data_paths") == 0) {
+            /* Semicolon-separated list of extra .inc files, relative to project_root */
+            char tmp[600];
+            strncpy(tmp, value, sizeof(tmp) - 1);
+            tmp[sizeof(tmp) - 1] = '\0';
+            char *tok = strtok(tmp, ";");
+            while (tok && data->loaderConfig.soundDataPathCount < 8) {
+                while (*tok == ' ') tok++;
+                int idx = data->loaderConfig.soundDataPathCount++;
+                snprintf(data->loaderConfig.soundDataPaths[idx],
+                         sizeof(data->loaderConfig.soundDataPaths[idx]), "%s", tok);
+                tok = strtok(NULL, ";");
+            }
+        } else if (strcmp(key, "voicegroup_paths") == 0) {
+            char tmp[600];
+            strncpy(tmp, value, sizeof(tmp) - 1);
+            tmp[sizeof(tmp) - 1] = '\0';
+            char *tok = strtok(tmp, ";");
+            while (tok && data->loaderConfig.voicegroupPathCount < 8) {
+                while (*tok == ' ') tok++;
+                int idx = data->loaderConfig.voicegroupPathCount++;
+                snprintf(data->loaderConfig.voicegroupPaths[idx],
+                         sizeof(data->loaderConfig.voicegroupPaths[idx]), "%s", tok);
+                tok = strtok(NULL, ";");
+            }
+        } else if (strcmp(key, "sample_dirs") == 0) {
+            char tmp[600];
+            strncpy(tmp, value, sizeof(tmp) - 1);
+            tmp[sizeof(tmp) - 1] = '\0';
+            char *tok = strtok(tmp, ";");
+            while (tok && data->loaderConfig.sampleDirCount < 8) {
+                while (*tok == ' ') tok++;
+                int idx = data->loaderConfig.sampleDirCount++;
+                snprintf(data->loaderConfig.sampleDirs[idx],
+                         sizeof(data->loaderConfig.sampleDirs[idx]), "%s", tok);
+                tok = strtok(NULL, ";");
+            }
         }
     }
 
@@ -138,6 +175,8 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->guiTimerId = CLAP_INVALID_ID;
     /* Load defaults from config file placed next to the .clap */
     load_config_file(data);
+    /* Forward the log path into the voicegroup loader so it can emit diagnostics */
+    voicegroup_loader_set_log_path(s_pluginLogPath);
     return true;
 }
 
@@ -169,7 +208,8 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
             voicegroup_free(data->loadedVg);
             data->loadedVg = NULL;
         }
-        data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName);
+        data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName,
+                                         &data->loaderConfig);
         if (data->loadedVg) {
             m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
         }
@@ -435,7 +475,8 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
             voicegroup_free(data->loadedVg);
             data->loadedVg = NULL;
         }
-        data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName);
+        data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName,
+                                         &data->loaderConfig);
         if (data->loadedVg) {
             m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
         }
@@ -686,8 +727,8 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
     data->songMasterVolume = gs.songMasterVolume;
 
     if (data->activated) {
-        data->engine.masterVolume     = gs.masterVolume;
-        data->engine.songMasterVolume = gs.songMasterVolume;
+        data->engine.masterVolume = gs.masterVolume;
+        m4a_engine_set_song_volume(&data->engine, gs.songMasterVolume);
         m4a_reverb_set_amount(&data->engine.reverb, gs.reverbAmount);
     }
 

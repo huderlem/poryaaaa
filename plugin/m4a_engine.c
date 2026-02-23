@@ -197,6 +197,7 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
         M4ATrack *track = &engine->tracks[i];
         track->bendRange = 2;
         track->volX = 64;
+        track->rawVolume = 127;
         track->volume = 127;
         track->lfoSpeed = 22;
         track->pan = 0;
@@ -317,8 +318,11 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
     int8_t rhythmPan = 0;
     uint8_t useKey = key;
 
-    /* For rhythm voices, check for per-note pan */
+    /* For rhythm (keysplit_all) voices: the MIDI note selects which drum voice
+     * to play, but the playback pitch is fixed to the drum voice's own key --
+     * not the note the player pressed.  Apply per-note pan while we're here. */
     if (track->currentVoice.type & VOICE_KEYSPLIT_ALL) {
+        useKey = voice->key;
         if (voice->panSweep & 0x80) {
             rhythmPan = (int8_t)((voice->panSweep - 0xC0) * 2);
         }
@@ -544,6 +548,7 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         }
         break;
     case 0x7:  /* Volume */
+        track->rawVolume = value;
         track->volume = value * engine->songMasterVolume / MAX_SONG_VOLUME;
         refresh_volumes(engine, track, trackIndex);
         break;
@@ -563,6 +568,8 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         break;
     case 0x14: /* Bend range (BENDR) */
         track->bendRange = value;
+        m4a_track_vol_pit_set(track);
+        refresh_channel_pitches(engine, track, trackIndex);
         break;
     case 0x15: /* LFO speed (LFOS) */
         track->lfoSpeed = value;
@@ -632,6 +639,16 @@ void m4a_engine_all_sound_off(M4AEngine *engine)
         engine->pcmChannels[i].status = 0;
     for (int i = 0; i < MAX_CGB_CHANNELS; i++)
         engine->cgbChannels[i].status = 0;
+}
+
+void m4a_engine_set_song_volume(M4AEngine *engine, uint8_t volume)
+{
+    engine->songMasterVolume = volume;
+    for (int i = 0; i < MAX_TRACKS; i++) {
+        M4ATrack *track = &engine->tracks[i];
+        track->volume = track->rawVolume * volume / MAX_SONG_VOLUME;
+        refresh_volumes(engine, track, i);
+    }
 }
 
 /*

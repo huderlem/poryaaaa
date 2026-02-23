@@ -75,7 +75,8 @@ typedef struct {
 /* Track state (per MIDI channel) */
 typedef struct {
     uint8_t flags;
-    uint8_t volume;         /* track volume (0-127) */
+    uint8_t volume;         /* track volume scaled by songMasterVolume (0-127) */
+    uint8_t rawVolume;      /* raw CC 0x7 volume before songMasterVolume scaling */
     uint8_t volX;           /* external volume multiplier (0-64) */
     int8_t pan;             /* track pan (-64 to +63) */
     int8_t panX;            /* external pan adjustment */
@@ -227,6 +228,7 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
 void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend);
 void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex);
 void m4a_engine_all_sound_off(M4AEngine *engine);
+void m4a_engine_set_song_volume(M4AEngine *engine, uint8_t volume);
 
 /* Set tempo from DAW BPM.  The GBA relationship is tempoI ≈ BPM
  * (24 ticks per quarter note at ~59.7 Hz VBlank gives BPM ≈ tempoI). */

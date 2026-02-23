@@ -233,7 +233,7 @@ int main(int argc, char *argv[])
     printf("Loading voicegroup '%s' from %s...\n", vgName, projectRoot);
     fflush(stdout);
 
-    LoadedVoiceGroup *vg = voicegroup_load(projectRoot, vgName);
+    LoadedVoiceGroup *vg = voicegroup_load(projectRoot, vgName, NULL);
     if (!vg) {
         fprintf(stderr, "Failed to load voicegroup '%s'\n", vgName);
         return 1;
