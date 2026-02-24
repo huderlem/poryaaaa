@@ -8,23 +8,26 @@
  * The GBA's reverb works on the PCM DMA buffer (1584 bytes per channel).
  * The algorithm (from SoundMainRAM_Reverb in m4a_1.s):
  *   For each sample position:
- *     r0 = pcmBuffer[pos + bufSize]  (right channel, previous frame)
- *     r0 += pcmBuffer[pos]           (left channel, previous frame)
- *     r0 += nextBuf[pos + bufSize]   (right channel, next frame area)
- *     r0 += nextBuf[pos]             (left channel, next frame area)
- *     r0 = (r0 * reverbAmount) >> 9  (with rounding)
- *     Write r0 to both channels
+ *     sum  = pcmBuffer_L[pos]           (left channel, current frame)
+ *     sum += pcmBuffer_R[pos]           (right channel, current frame)
+ *     sum += pcmBuffer_L[otherPos]      (left channel, other frame area)
+ *     sum += pcmBuffer_R[otherPos]      (right channel, other frame area)
+ *     result = (sum * reverbAmount) >> 9  (with rounding toward zero)
+ *     Write result to BOTH L and R channels (mono reverb)
  *
- * This is effectively a 4-tap feedback delay where the delay length equals
- * the PCM buffer size (1584 samples at the GBA's sample rate).
+ * The 4-tap sum with >>9 means partial cancellation between taps dampens
+ * the reverb compared to a naive per-channel approach. The mono write
+ * prevents stereo differences from accumulating across feedback iterations.
  *
  * For the plugin, we scale the delay length proportionally to the DAW sample rate:
  *   delayLen = 1584 * (daw_rate / gba_rate)
- * where gba_rate defaults to 13379 Hz (SOUND_MODE_FREQ_13379, the most common).
+ * and the "other" tap offset equals one VBlank frame:
+ *   frameSize = delayLen / pcmDmaPeriod
  */
 
-#define GBA_PCM_BUF_SIZE 1584
-#define GBA_SAMPLE_RATE  13379.0f
+#define GBA_PCM_BUF_SIZE    1584
+#define GBA_SAMPLE_RATE     13379.0f
+#define GBA_PCM_DMA_PERIOD  7       /* 1584 / 224 for 13379 Hz */
 
 void m4a_reverb_init(M4AReverb *reverb, float sampleRate, uint8_t amount)
 {
@@ -33,6 +36,8 @@ void m4a_reverb_init(M4AReverb *reverb, float sampleRate, uint8_t amount)
     if (delayLen < 1) delayLen = 1;
 
     reverb->bufferSize = delayLen;
+    reverb->frameSize = delayLen / GBA_PCM_DMA_PERIOD;
+    if (reverb->frameSize < 1) reverb->frameSize = 1;
     reverb->buffer = (int8_t *)calloc(delayLen * 2, sizeof(int8_t)); /* stereo */
     reverb->pos = 0;
     reverb->amount = amount;
@@ -59,8 +64,13 @@ void m4a_reverb_set_amount(M4AReverb *reverb, uint8_t amount)
 
 /*
  * Process reverb for one stereo sample pair.
- * The GBA algorithm averages 4 taps and multiplies by reverb amount.
- * We simplify: read delayed sample, mix with input, write back.
+ *
+ * Matches the GBA's 4-tap reverb algorithm:
+ *   - Read L and R from current delay position
+ *   - Read L and R from "other" position (one frame offset)
+ *   - Sum all 4 taps, multiply by reverb amount, >>9
+ *   - Add the same mono reverb value to both output channels
+ *   - Write combined output back to delay buffer
  */
 void m4a_reverb_process(M4AReverb *reverb, int32_t *sampleL, int32_t *sampleR)
 {
@@ -70,19 +80,23 @@ void m4a_reverb_process(M4AReverb *reverb, int32_t *sampleL, int32_t *sampleR)
     int pos = reverb->pos;
     int idx = pos * 2;
 
-    /* Read delayed samples */
-    int32_t delayedL = reverb->buffer[idx];
-    int32_t delayedR = reverb->buffer[idx + 1];
+    /* "Other" position: one frame ahead in the circular buffer */
+    int otherPos = (pos + reverb->frameSize) % reverb->bufferSize;
+    int otherIdx = otherPos * 2;
 
-    /* Mix: apply reverb feedback
-     * Matching GBA: (sum_of_4_taps * reverbAmount) >> 9
-     * Since we only have 2 taps (L+R) in our simplified model,
-     * we use: delayed * reverbAmount >> 7 as a close approximation */
-    int32_t wetL = (delayedL * reverb->amount) >> 7;
-    int32_t wetR = (delayedR * reverb->amount) >> 7;
+    /* Read 4 taps (matching GBA's SoundMainRAM_Reverb) */
+    int32_t sum = reverb->buffer[idx]           /* L at current pos */
+                + reverb->buffer[idx + 1]       /* R at current pos */
+                + reverb->buffer[otherIdx]      /* L at other pos */
+                + reverb->buffer[otherIdx + 1]; /* R at other pos */
 
-    *sampleL += wetL;
-    *sampleR += wetR;
+    /* Apply reverb scaling: (sum * amount) >> 9
+     * Use arithmetic shift with rounding toward zero (matching GBA) */
+    int32_t wet = (sum * reverb->amount) >> 9;
+
+    /* GBA writes the same mono reverb value to both channels */
+    *sampleL += wet;
+    *sampleR += wet;
 
     /* Clamp to int8_t range and write back to delay buffer */
     int32_t writeL = *sampleL;

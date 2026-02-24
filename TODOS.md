@@ -9,5 +9,5 @@ This file tracks known issues and to-do items for the plugin.
 - Properly simulate PCM channel limits.
 - Architecture document
 - Identify any performance issues/improvements
-- Support more flexible loading the various sound data from disk
-    - Currently it's very rigid to pokeemerald's directory structure.
+- Rustboro City's track #3 (programmable wave 01) sounds different than in-game. This appears to be due to mgba's hardware emulation causing the resulting wave to be quite different from the raw pcm values (this plugin outputs the raw pcm values and doesn't do any hardware emulation). I think the GBA has kind of a built-in low pass filter, for example, but not really sure.
+    - We'll have to take a look at mgba's source to see what kind of hardware emulation we might want to do.

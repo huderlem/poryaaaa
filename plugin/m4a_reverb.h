@@ -6,6 +6,7 @@
 typedef struct {
     int8_t *buffer;     /* stereo interleaved: L,R,L,R,... */
     int bufferSize;     /* total buffer size in samples (per channel) */
+    int frameSize;      /* samples per VBlank, scaled to DAW rate (for 2nd tap pair) */
     int pos;
     uint8_t amount;     /* 0-127 */
 } M4AReverb;
