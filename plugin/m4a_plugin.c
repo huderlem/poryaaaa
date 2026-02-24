@@ -6,6 +6,7 @@
 #include <clap/clap.h>
 #include <clap/ext/gui.h>
 #include <clap/ext/timer-support.h>
+#include <clap/ext/draft/undo.h>
 #include "m4a_plugin.h"
 #include "m4a_engine.h"
 #include "m4a_channel.h"
@@ -453,6 +454,12 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
 
+    /* Snapshot current voicegroup identity to detect changes after load */
+    char prevRoot[sizeof(data->projectRoot)];
+    char prevName[sizeof(data->voicegroupName)];
+    memcpy(prevRoot, data->projectRoot,    sizeof(prevRoot));
+    memcpy(prevName, data->voicegroupName, sizeof(prevName));
+
     uint32_t rootLen, nameLen;
 
     if (stream->read(stream, &rootLen, sizeof(rootLen)) != sizeof(rootLen)) return false;
@@ -469,20 +476,36 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (stream->read(stream, &data->masterVolume, 1) != 1) return false;
     if (stream->read(stream, &data->songMasterVolume, 1) != 1) return false;
 
-    /* If activated, reload voicegroup */
-    if (data->activated && data->projectRoot[0] && data->voicegroupName[0]) {
-        if (data->loadedVg) {
-            voicegroup_free(data->loadedVg);
-            data->loadedVg = NULL;
-        }
-        data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName,
-                                         &data->loaderConfig);
-        if (data->loadedVg) {
-            m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
+    if (data->activated) {
+        /* Only reload voicegroup if the project root or name actually changed */
+        bool vgChanged = strcmp(data->projectRoot,    prevRoot) != 0 ||
+                         strcmp(data->voicegroupName, prevName) != 0;
+        if (vgChanged && data->projectRoot[0] && data->voicegroupName[0]) {
+            if (data->loadedVg) {
+                voicegroup_free(data->loadedVg);
+                data->loadedVg = NULL;
+            }
+            data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName,
+                                             &data->loaderConfig);
+            if (data->loadedVg)
+                m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
         }
         data->engine.masterVolume = data->masterVolume;
         data->engine.songMasterVolume = data->songMasterVolume;
         m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
+    }
+
+    /* Push restored values into the GUI so it reflects the loaded state */
+    if (data->gui) {
+        M4AGuiSettings gs;
+        memset(&gs, 0, sizeof(gs));
+        snprintf(gs.projectRoot,    sizeof(gs.projectRoot),    "%s", data->projectRoot);
+        snprintf(gs.voicegroupName, sizeof(gs.voicegroupName), "%s", data->voicegroupName);
+        gs.reverbAmount     = data->reverbAmount;
+        gs.masterVolume     = data->masterVolume;
+        gs.songMasterVolume = data->songMasterVolume;
+        gs.voicegroupLoaded = (data->loadedVg != NULL);
+        m4a_gui_update_settings(data->gui, &gs);
     }
 
     return true;
@@ -740,6 +763,27 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
         snprintf(data->voicegroupName, sizeof(data->voicegroupName),
                  "%s", gs.voicegroupName);
         data->host->request_restart(data->host);
+    }
+
+    /* Register this change with the host's undo stack.
+     *
+     * Prefer the CLAP undo draft extension when available: pass no delta so
+     * the host snapshots state via state->save()/state->load().
+     *
+     * Fall back to mark_dirty() for hosts (e.g. Reaper) that don't implement
+     * the draft extension. Per the CLAP spec, mark_dirty() creates an implicit
+     * undo step as long as the plugin hasn't opted into CLAP_EXT_UNDO. */
+    const clap_host_undo_t *hostUndo =
+        (const clap_host_undo_t *)data->host->get_extension(data->host, CLAP_EXT_UNDO);
+    if (hostUndo && hostUndo->change_made) {
+        const char *name = reloadVoicegroup ? "M4A: Reload Voicegroup"
+                                            : "M4A: Settings Change";
+        hostUndo->change_made(data->host, name, NULL, 0, false);
+    } else {
+        const clap_host_state_t *hostState =
+            (const clap_host_state_t *)data->host->get_extension(data->host, CLAP_EXT_STATE);
+        if (hostState && hostState->mark_dirty)
+            hostState->mark_dirty(data->host);
     }
 
     /* Reflect updated status back into the GUI (voicegroupLoaded may change

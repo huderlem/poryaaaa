@@ -1,12 +1,9 @@
 This file tracks known issues and to-do items for the plugin.
 
-- Clicking on the left-side keyboard in Reaper doesn't produce noise (most of the time?), which is super annoying
-    - Only produces noise when drawing an actual note?
 - GUI implemented via Dear ImGui + GLFW (floating window). Known gaps:
     - High-DPI / scale-aware window sizing not yet implemented.
     - File browser dialog for Project Root not yet implemented.
 - Full midi -> .wav output regression tests
-- Properly simulate PCM channel limits.
 - Architecture document
 - Identify any performance issues/improvements
 - Rustboro City's track #3 (programmable wave 01) sounds different than in-game. This appears to be due to mgba's hardware emulation causing the resulting wave to be quite different from the raw pcm values (this plugin outputs the raw pcm values and doesn't do any hardware emulation). I think the GBA has kind of a built-in low pass filter, for example, but not really sure.

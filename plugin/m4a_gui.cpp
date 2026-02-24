@@ -54,6 +54,7 @@ static void gui_log(const char *fmt, ...)
 
 /* CLAP GUI extension (for notifying host when floating window closes) */
 #include <clap/ext/gui.h>
+#include <clap/ext/draft/undo.h>
 
 /* ---- Constants ---- */
 
@@ -108,6 +109,17 @@ struct M4AGuiState {
 
     /* True after set_parent_win32() — host drives sizing and visibility */
     bool isEmbedded;
+
+#if defined(_WIN32)
+    HHOOK  msgHook;         /* WH_GETMESSAGE hook handle, or NULL */
+    bool   pendingPaste;    /* Ctrl+V intercepted, inject on next tick */
+    bool   pendingCopy;     /* Ctrl+C */
+    bool   pendingCut;      /* Ctrl+X */
+    bool   pendingSelectAll;/* Ctrl+A */
+    bool   pendingUndo;          /* Ctrl+Z intercepted */
+    bool   pendingRedo;          /* Ctrl+Y or Ctrl+Shift+Z intercepted */
+    bool   wantTextInput;        /* WantTextInput from previous frame */
+#endif
 };
 
 /* ---- Internal helpers ---- */
@@ -120,6 +132,52 @@ static void sync_buffers(M4AGuiState *gui)
     snprintf(gui->voicegroupBuf, sizeof(gui->voicegroupBuf),
              "%s", gui->settings.voicegroupName);
 }
+
+#if defined(_WIN32)
+static LRESULT CALLBACK m4a_get_msg_hook(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION && wParam == PM_REMOVE)
+    {
+        MSG *msg = reinterpret_cast<MSG *>(lParam);
+        if (msg->message == WM_KEYDOWN)
+        {
+            M4AGuiState *gui =
+                static_cast<M4AGuiState *>(::GetPropA(msg->hwnd, "M4A_GUI_STATE"));
+            if (gui && (::GetKeyState(VK_CONTROL) & 0x8000))
+            {
+                bool consumed = true;
+                switch (msg->wParam)
+                {
+                case 'V': gui->pendingPaste      = true; break;
+                case 'C': gui->pendingCopy       = true; break;
+                case 'X': gui->pendingCut        = true; break;
+                case 'A': gui->pendingSelectAll  = true; break;
+                case 'Z':
+                    if (gui->wantTextInput) {
+                        if (::GetKeyState(VK_SHIFT) & 0x8000)
+                            gui->pendingRedo = true;
+                        else
+                            gui->pendingUndo = true;
+                    } else {
+                        consumed = false;
+                    }
+                    break;
+                case 'Y':
+                    if (gui->wantTextInput)
+                        gui->pendingRedo = true;
+                    else
+                        consumed = false;
+                    break;
+                default:  consumed = false;              break;
+                }
+                if (consumed)
+                    msg->message = WM_NULL;  /* prevents TranslateAcceleratorW match */
+            }
+        }
+    }
+    return ::CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+#endif
 
 /* ---- Public C interface ---- */
 
@@ -193,6 +251,17 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
     gui->reloadRequested  = false;
     gui->isEmbedded       = false;
 
+#if defined(_WIN32)
+    gui->msgHook          = NULL;
+    gui->pendingPaste     = false;
+    gui->pendingCopy      = false;
+    gui->pendingCut       = false;
+    gui->pendingSelectAll = false;
+    gui->pendingUndo      = false;
+    gui->pendingRedo      = false;
+    gui->wantTextInput    = false;
+#endif
+
     if (initial) {
         gui->settings = *initial;
     } else {
@@ -233,6 +302,18 @@ void m4a_gui_destroy(M4AGuiState *gui)
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext(gui->imguiCtx);
+
+#if defined(_WIN32)
+    {
+        HWND hwnd = glfwGetWin32Window(gui->window);
+        if (gui->msgHook) {
+            ::UnhookWindowsHookEx(gui->msgHook);
+            gui->msgHook = NULL;
+        }
+        if (hwnd)
+            ::RemovePropA(hwnd, "M4A_GUI_STATE");
+    }
+#endif
 
     glfwDestroyWindow(gui->window);
     glfw_release();
@@ -304,6 +385,34 @@ void m4a_gui_tick(M4AGuiState *gui)
 
     glfwMakeContextCurrent(gui->window);
     ImGui::SetCurrentContext(gui->imguiCtx);
+
+#if defined(_WIN32)
+    if (gui->isEmbedded) {
+        ImGuiIO &io = ImGui::GetIO();
+        const bool ctrlNowHeld = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
+
+        auto inject_ctrl_key = [&](ImGuiKey key) {
+            io.AddKeyEvent(ImGuiMod_Ctrl, true);
+            io.AddKeyEvent(key, true);
+            io.AddKeyEvent(key, false);
+            if (!ctrlNowHeld)
+                io.AddKeyEvent(ImGuiMod_Ctrl, false);
+        };
+
+        if (gui->pendingPaste)     { inject_ctrl_key(ImGuiKey_V); gui->pendingPaste     = false; }
+        if (gui->pendingCopy)      { inject_ctrl_key(ImGuiKey_C); gui->pendingCopy      = false; }
+        if (gui->pendingCut)       { inject_ctrl_key(ImGuiKey_X); gui->pendingCut       = false; }
+        if (gui->pendingSelectAll) { inject_ctrl_key(ImGuiKey_A); gui->pendingSelectAll = false; }
+
+        /* Cache WantTextInput for the hook to use next frame.
+           The hook only intercepts Z/Y when this is true, so if pendingUndo/Redo
+           is set, a text field was active — always inject into ImGui. */
+        gui->wantTextInput = ImGui::GetIO().WantTextInput;
+
+        if (gui->pendingUndo) { inject_ctrl_key(ImGuiKey_Z); gui->pendingUndo = false; }
+        if (gui->pendingRedo) { inject_ctrl_key(ImGuiKey_Y); gui->pendingRedo = false; }
+    }
+#endif
 
     /* ---- New frame ---- */
     ImGui_ImplOpenGL3_NewFrame();
@@ -451,6 +560,16 @@ bool m4a_gui_set_parent_win32(M4AGuiState *gui, void *parentHwnd)
     SetParent(hwnd, (HWND)parentHwnd);
     SetWindowPos(hwnd, nullptr, 0, 0, GUI_W, GUI_H,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+    ::SetPropA(hwnd, "M4A_GUI_STATE", gui);
+
+    gui->msgHook = ::SetWindowsHookExW(
+        WH_GETMESSAGE, m4a_get_msg_hook,
+        NULL, ::GetCurrentThreadId());
+    if (!gui->msgHook)
+        gui_log("m4a_gui_set_parent: SetWindowsHookExW failed (err=%lu)", ::GetLastError());
+    else
+        gui_log("m4a_gui_set_parent: WH_GETMESSAGE hook installed");
 
     gui->isEmbedded = true;
     gui_log("m4a_gui_set_parent: success (embedded)");
