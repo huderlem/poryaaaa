@@ -498,6 +498,8 @@ void m4a_gui_tick(M4AGuiState *gui)
             gui->settingsChanged = true;
         }
     }
+    if (ImGui::Checkbox("GBA Analog Filter", &gui->settings.analogFilter))
+        gui->settingsChanged = true;
 
     ImGui::End();
 

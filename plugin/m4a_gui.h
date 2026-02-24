@@ -19,6 +19,7 @@ typedef struct {
     uint8_t reverbAmount;
     uint8_t masterVolume;
     uint8_t songMasterVolume;
+    bool analogFilter;
     bool voicegroupLoaded;
 } M4AGuiSettings;
 

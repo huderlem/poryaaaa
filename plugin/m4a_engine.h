@@ -198,6 +198,11 @@ struct M4AEngine {
     uint8_t maxPcmChannels; /* active PCM channel count */
     uint8_t c15;            /* counter 0-14 for CGB envelope double-step */
 
+    /* GBA analog output emulation: IIR low-pass filter */
+    bool analogFilter;      /* enable/disable the hardware output filter */
+    float lowPassLeft;
+    float lowPassRight;
+
     /* Tempo system (matches GBA MPlayMain tempo accumulator).
      * tempoD = base tempo (ply_tempo param * 2), default 150.
      * tempoU = user tempo multiplier (default 0x100 = 1.0x).
