@@ -462,21 +462,23 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
                 nibble = waveData[pos >> 1] & 0x0F;
             else
                 nibble = (waveData[pos >> 1] >> 4) & 0x0F;
-            sample = ((int32_t)nibble - 8) * 8;  /* center and scale */
-
-            /* Volume control: gCgb3Vol maps envelope to an NR32 register value.
-             * NR32 bits 6:5 encode a right-shift: 01=0, 10=1, 11=2.
-             * Bit 7 is GBA-only 75% mode. */
+            /* Volume control: apply shift to raw 4-bit nibble to match
+             * GBA hardware quantization (NR32 register).
+             * On real hardware, the right-shift is lossy on the small
+             * 4-bit value, creating quantized "plateaus" in the output. */
+            int32_t shifted = (int32_t)nibble;
             int nr32 = gCgb3Vol[ch->envelopeVolume];
             if (nr32 == 0) {
-                sample = 0;
+                shifted = 0;
             } else if (nr32 & 0x80) {
-                sample = (sample * 3) >> 2;  /* GBA 75% mode */
+                /* GBA 75% mode: (nibble * 3) >> 2 */
+                shifted = (shifted + (shifted << 1)) >> 2;
             } else {
-                /* Bits 5-6 of NR32 indicate volume: 0=Mute, 1=100%, 2=50%, 3=25% */
                 int shift = ((nr32 >> 5) & 3) - 1;
-                sample >>= shift;
+                shifted >>= shift;
             }
+            /* Center around midpoint and scale */
+            sample = (shifted - 8) * 8;
 
             /* Advance phase */
             int32_t freqReg = ch->frequency;
