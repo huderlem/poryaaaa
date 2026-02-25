@@ -900,6 +900,30 @@ static bool entry_init(const char *plugin_path)
             memcpy(s_pluginDir, plugin_path, dirLen);
             s_pluginDir[dirLen] = '\0';
         }
+
+#ifdef __APPLE__
+        /* On macOS the binary lives at <bundle>.clap/Contents/MacOS/<binary>.
+         * The cfg file should sit next to the bundle, not inside it, so
+         * navigate up two levels: Contents/MacOS -> Contents -> bundle root,
+         * then one more to the directory that contains the bundle. */
+        {
+            char *p = s_pluginDir;
+            size_t len = strlen(p);
+            /* Check suffix .../Contents/MacOS (case-sensitive on macOS) */
+            const char *suffix = "/Contents/MacOS";
+            size_t slen = strlen(suffix);
+            if (len > slen && strcmp(p + len - slen, suffix) == 0) {
+                /* Strip /Contents/MacOS to get the bundle root */
+                p[len - slen] = '\0';
+                /* Strip the bundle name (.clap dir) to get the install dir */
+                char *last = p + strlen(p);
+                while (last > p && *last != '/')
+                    last--;
+                if (last > p)
+                    *last = '\0';
+            }
+        }
+#endif
     }
     return true;
 }

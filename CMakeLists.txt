@@ -78,6 +78,7 @@ elseif(APPLE)
     set_target_properties(m4a_plugin PROPERTIES
         BUNDLE TRUE
         BUNDLE_EXTENSION "clap"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/plugin/Info.plist"
     )
 endif()
 
