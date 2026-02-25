@@ -12,10 +12,10 @@
  * Loads a voicegroup from the pokeemerald project, plays a sequence of notes,
  * and writes the output to a WAV file.
  *
- * Usage: m4a_test <project_root> <voicegroup_name> [output.wav]
+ * Usage: poryaaaa_test <project_root> <voicegroup_name> [output.wav]
  *
  * Example:
- *   ./m4a_test /path/to/pokeemerald petalburg output.wav
+ *   ./poryaaaa_test /path/to/pokeemerald petalburg output.wav
  */
 
 #define SAMPLE_RATE 44100

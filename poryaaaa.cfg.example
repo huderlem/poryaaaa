@@ -1,6 +1,6 @@
-# M4A Plugin Configuration
+# poryaaaa Configuration
 #
-# Copy this file to m4a_plugin.cfg (same directory as m4a_plugin.clap)
+# Copy this file to poryaaaa.cfg (same directory as poryaaaa.clap)
 # and edit the values below.
 #
 # The plugin reads this file on startup. To apply changes after editing,
@@ -44,4 +44,4 @@ song_master_volume=127
 # Optional: diagnostic log file path. Uncomment to enable GUI debug logging.
 # Useful for diagnosing GUI problems (e.g. why the GUI window doesn't appear).
 # On Windows: use a path you can write to, e.g. your Desktop or C:\Temp.
-#log=C:\Users\you\Desktop\m4a_plugin.log
+#log=C:\Users\you\Desktop\poryaaaa.log

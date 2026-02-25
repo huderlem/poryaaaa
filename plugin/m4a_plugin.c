@@ -32,14 +32,14 @@ static const char *s_features[] = {
 
 static const clap_plugin_descriptor_t s_descriptor = {
     .clap_version = CLAP_VERSION,
-    .id = "com.pokeemerald.m4a-plugin",
-    .name = "M4A GBA Sound Engine",
+    .id = "com.huderlem.poryaaaa",
+    .name = "poryaaaa",
     .vendor = "pokeemerald",
     .url = "",
     .manual_url = "",
     .support_url = "",
     .version = "0.1.0",
-    .description = "GBA m4a sound engine plugin for pokeemerald music preview",
+    .description = "GBA M4A sound engine plugin for pokeemerald music preview",
     .features = s_features,
 };
 
@@ -47,7 +47,7 @@ static const clap_plugin_descriptor_t s_descriptor = {
 
 /*
  * Directory of the loaded .clap file, set during entry_init.
- * Used to find m4a_plugin.cfg in the same directory as the plugin.
+ * Used to find poryaaaa.cfg in the same directory as the plugin.
  */
 static char s_pluginDir[512] = {0};
 
@@ -55,7 +55,7 @@ static char s_pluginDir[512] = {0};
 static const char *s_pluginLogPath = NULL;
 
 /*
- * Load settings from m4a_plugin.cfg placed next to the .clap file.
+ * Load settings from poryaaaa.cfg placed next to the .clap file.
  *
  * The config file uses simple key=value lines, one per line.
  * Lines starting with '#' are comments and are ignored.
@@ -73,7 +73,7 @@ static void load_config_file(M4APluginData *data)
         return;
 
     char configPath[600];
-    snprintf(configPath, sizeof(configPath), "%s/m4a_plugin.cfg", s_pluginDir);
+    snprintf(configPath, sizeof(configPath), "%s/poryaaaa.cfg", s_pluginDir);
 
     FILE *f = fopen(configPath, "r");
     if (!f)

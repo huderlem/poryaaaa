@@ -27,7 +27,7 @@
 /* ---- Debug logging ---- */
 /*
  * Set M4A_GUI_LOG to a writable file path to enable diagnostic logging.
- * On Windows: "C:/Users/Public/m4a_plugin.log" or similar.
+ * On Windows: "C:/Users/Public/poryaaaa_plugin.log" or similar.
  * Leave as nullptr to disable.
  */
 static const char *s_logPath = nullptr;
@@ -74,7 +74,7 @@ static bool glfw_acquire()
     if (s_glfwRefCount == 0) {
         glfwSetErrorCallback([](int code, const char *msg) {
             (void)code;
-            fprintf(stderr, "[m4a_plugin] GLFW error %d: %s\n", code, msg);
+            fprintf(stderr, "[poryaaaa] GLFW error %d: %s\n", code, msg);
         });
         if (!glfwInit())
             return false;
@@ -207,7 +207,7 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
     glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
 
     GLFWwindow *window = glfwCreateWindow(
-        GUI_W, GUI_H, "M4A GBA Sound Engine", nullptr, nullptr);
+        GUI_W, GUI_H, "poryaaaa", nullptr, nullptr);
     if (!window) {
         gui_log("m4a_gui_create: glfwCreateWindow() failed");
         glfw_release();
@@ -437,7 +437,7 @@ void m4a_gui_tick(M4AGuiState *gui)
     ImGui::Begin("##Main", nullptr, wflags);
 
     /* ---- Plugin title ---- */
-    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "M4A GBA Sound Engine");
+    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "poryaaaa");
     ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 160.0f);
     ImGui::TextDisabled("pokeemerald");
     ImGui::Separator();

@@ -1,7 +1,7 @@
 /*
- * m4a_render - Standalone M4A MIDI renderer
+ * poryaaaa_render - Standalone M4A MIDI renderer
  *
- * Usage: m4a_render <project_root> <voicegroup> --midi <file.mid> [options]
+ * Usage: poryaaaa_render <project_root> <voicegroup> --midi <file.mid> [options]
  *
  * Parses a Standard MIDI File (Type 0 or Type 1), renders it through the
  * M4A engine using a specified voicegroup, and writes a WAV file and/or

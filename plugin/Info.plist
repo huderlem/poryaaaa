@@ -5,13 +5,13 @@
     <key>CFBundleName</key>
     <string>M4A GBA Sound Engine</string>
     <key>CFBundleIdentifier</key>
-    <string>com.m4a-plugin.m4a-plugin</string>
+    <string>com.huderlem.poryaaaa</string>
     <key>CFBundleVersion</key>
     <string>1.0.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0.0</string>
     <key>CFBundleExecutable</key>
-    <string>m4a_plugin</string>
+    <string>poryaaaa</string>
     <key>CFBundlePackageType</key>
     <string>BNDL</string>
     <key>CFBundleSignature</key>

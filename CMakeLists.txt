@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(m4a_plugin C CXX)
+project(poryaaaa C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -35,14 +35,14 @@ set(ENGINE_SOURCES
 )
 
 # ---- CLAP Plugin ----
-add_library(m4a_plugin MODULE
+add_library(poryaaaa MODULE
     plugin/m4a_plugin.c
     plugin/m4a_gui.cpp
     ${ENGINE_SOURCES}
     ${IMGUI_SOURCES}
 )
 
-target_include_directories(m4a_plugin PRIVATE
+target_include_directories(poryaaaa PRIVATE
     clap-sdk/include
     plugin
     ${IMGUI_DIR}
@@ -50,32 +50,32 @@ target_include_directories(m4a_plugin PRIVATE
 )
 
 # Use C++ linker (required because we mix C and C++ sources)
-set_target_properties(m4a_plugin PROPERTIES
+set_target_properties(poryaaaa PROPERTIES
     PREFIX ""
     SUFFIX ".clap"
     LINKER_LANGUAGE CXX
 )
 
-target_link_libraries(m4a_plugin PRIVATE glfw)
+target_link_libraries(poryaaaa PRIVATE glfw)
 
 if(UNIX AND NOT APPLE)
-    target_link_libraries(m4a_plugin PRIVATE m)
+    target_link_libraries(poryaaaa PRIVATE m)
 endif()
 
 # OpenGL
 if(APPLE)
-    target_link_libraries(m4a_plugin PRIVATE "-framework OpenGL")
+    target_link_libraries(poryaaaa PRIVATE "-framework OpenGL")
 elseif(WIN32)
-    target_link_libraries(m4a_plugin PRIVATE opengl32)
+    target_link_libraries(poryaaaa PRIVATE opengl32)
 else()
-    target_link_libraries(m4a_plugin PRIVATE GL)
+    target_link_libraries(poryaaaa PRIVATE GL)
 endif()
 
 # Platform-specific settings
 if(WIN32)
-    target_link_libraries(m4a_plugin PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(poryaaaa PRIVATE -static-libgcc -static-libstdc++)
 elseif(APPLE)
-    set_target_properties(m4a_plugin PROPERTIES
+    set_target_properties(poryaaaa PROPERTIES
         BUNDLE TRUE
         BUNDLE_EXTENSION "clap"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/plugin/Info.plist"
@@ -83,42 +83,42 @@ elseif(APPLE)
 endif()
 
 # ---- Standalone Test (WAV export) ----
-add_executable(m4a_test
+add_executable(poryaaaa_test
     test/test_wav_export.c
     ${ENGINE_SOURCES}
 )
 
-target_include_directories(m4a_test PRIVATE
+target_include_directories(poryaaaa_test PRIVATE
     plugin
 )
 
-target_link_libraries(m4a_test PRIVATE m)
+target_link_libraries(poryaaaa_test PRIVATE m)
 
 # ---- Standalone Renderer ----
-add_executable(m4a_render
+add_executable(poryaaaa_render
     cmd/m4a_render.c
     ${ENGINE_SOURCES}
 )
-target_include_directories(m4a_render PRIVATE plugin third_party)
-target_link_libraries(m4a_render PRIVATE m)
+target_include_directories(poryaaaa_render PRIVATE plugin third_party)
+target_link_libraries(poryaaaa_render PRIVATE m)
 if(UNIX AND NOT APPLE)
-    target_link_libraries(m4a_render PRIVATE pthread dl)
+    target_link_libraries(poryaaaa_render PRIVATE pthread dl)
 endif()
 if(APPLE)
-    target_link_libraries(m4a_render PRIVATE "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation")
+    target_link_libraries(poryaaaa_render PRIVATE "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation")
 endif()
 if(WIN32)
-    target_link_libraries(m4a_render PRIVATE -static-libgcc)
+    target_link_libraries(poryaaaa_render PRIVATE -static-libgcc)
 endif()
 
 # ---- Unit Tests ----
-add_executable(m4a_unit_tests
+add_executable(poryaaaa_unit_tests
     test/test_engine.c
     ${ENGINE_SOURCES}
 )
 
-target_include_directories(m4a_unit_tests PRIVATE
+target_include_directories(poryaaaa_unit_tests PRIVATE
     plugin
 )
 
-target_link_libraries(m4a_unit_tests PRIVATE m)
+target_link_libraries(poryaaaa_unit_tests PRIVATE m)
