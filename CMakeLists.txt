@@ -93,6 +93,23 @@ target_include_directories(m4a_test PRIVATE
 
 target_link_libraries(m4a_test PRIVATE m)
 
+# ---- Standalone Renderer ----
+add_executable(m4a_render
+    cmd/m4a_render.c
+    ${ENGINE_SOURCES}
+)
+target_include_directories(m4a_render PRIVATE plugin third_party)
+target_link_libraries(m4a_render PRIVATE m)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(m4a_render PRIVATE pthread dl)
+endif()
+if(APPLE)
+    target_link_libraries(m4a_render PRIVATE "-framework CoreAudio" "-framework AudioToolbox")
+endif()
+if(WIN32)
+    target_link_libraries(m4a_render PRIVATE -static-libgcc)
+endif()
+
 # ---- Unit Tests ----
 add_executable(m4a_unit_tests
     test/test_engine.c
