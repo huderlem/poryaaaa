@@ -253,8 +253,8 @@ static M4APCMChannel *allocate_pcm_channel(M4AEngine *engine, uint8_t priority,
                                             int trackIndex)
 {
     M4APCMChannel *best = NULL;
-    uint8_t bestPriority = 0xFF;
-    int bestTrackIndex = -1;
+    uint8_t bestPriority = priority;
+    int bestTrackIndex = trackIndex;
     int bestIsStopping = 0;
 
     for (int i = 0; i < engine->maxPcmChannels; i++) {
@@ -330,7 +330,6 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
 
     /* Calculate combined priority */
     uint8_t combinedPriority = track->priority;
-    if ((int)combinedPriority + 0 > 0xFF) combinedPriority = 0xFF;
 
     /* Calculate track volumes */
     m4a_track_vol_pit_set(track);

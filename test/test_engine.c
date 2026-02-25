@@ -256,6 +256,163 @@ static void test_basic_audio(void)
     free(wd);
 }
 
+/* Test PCM channel stealing / polyphony behavior */
+static void test_polyphony_stealing(void)
+{
+    printf("Testing polyphony channel stealing...\n");
+
+    /* Minimal WaveData for PCM tests */
+    int dataSize = 4;
+    WaveData *wd = calloc(1, sizeof(WaveData) + dataSize + 1);
+    wd->type = 0;
+    wd->freq = 0x01000000;
+    wd->loopStart = 0;
+    wd->size = dataSize;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    wd->data[dataSize] = 0;  /* safety sample */
+
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].decay = 0;
+    voices[0].sustain = 0xFF;
+    voices[0].release = 0;
+
+    /* Status value for an active (non-stopping) PCM channel */
+    const uint8_t ACTIVE = CHN_START | CHN_ENV_SUSTAIN;
+    /* Status value for a stopping PCM channel */
+    const uint8_t STOPPING = CHN_STOP | CHN_START;
+
+    M4AEngine engine;
+
+    /* ---- Test 1: Free channel used immediately (baseline) ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    engine.tracks[0].priority = 5;
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    ASSERT(engine.pcmChannels[0].status & CHN_ON, "free channel: ch0 allocated");
+    ASSERT_EQ(engine.pcmChannels[0].trackIndex, 0, "free channel: ch0 trackIndex");
+    ASSERT_EQ(engine.pcmChannels[0].priority, 5, "free channel: ch0 priority");
+    m4a_engine_destroy(&engine);
+
+    /* ---- Test 2: Higher-priority note steals lower-priority active channel ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 1, 0);
+    engine.tracks[1].priority = 7;
+    for (int i = 0; i < 5; i++) {
+        engine.pcmChannels[i].status = ACTIVE;
+        engine.pcmChannels[i].priority = 3;
+        engine.pcmChannels[i].trackIndex = 0;
+    }
+    m4a_engine_note_on(&engine, 1, 60, 100);
+    {
+        int stolen = 0;
+        for (int i = 0; i < 5; i++)
+            if (engine.pcmChannels[i].trackIndex == 1) { stolen = 1; break; }
+        ASSERT(stolen, "higher priority: steals lower-priority channel");
+    }
+    m4a_engine_destroy(&engine);
+
+    /* ---- Test 3: Lower-priority note cannot steal higher-priority channel ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 2, 0);
+    engine.tracks[2].priority = 3;
+    for (int i = 0; i < 5; i++) {
+        engine.pcmChannels[i].status = ACTIVE;
+        engine.pcmChannels[i].priority = 7;
+        engine.pcmChannels[i].trackIndex = 0;
+    }
+    m4a_engine_note_on(&engine, 2, 60, 100);
+    for (int i = 0; i < 5; i++)
+        ASSERT_EQ(engine.pcmChannels[i].trackIndex, 0, "lower priority: no steal");
+    m4a_engine_destroy(&engine);
+
+    /* ---- Test 4: Equal-priority note steals channel with higher trackIndex ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 3, 0);
+    engine.tracks[3].priority = 5;
+    for (int i = 0; i < 5; i++) {
+        engine.pcmChannels[i].status = ACTIVE;
+        engine.pcmChannels[i].priority = 5;
+        engine.pcmChannels[i].trackIndex = 7;
+    }
+    m4a_engine_note_on(&engine, 3, 60, 100);  /* trackIndex=3, priority=5 */
+    /* ch.trackIndex=7 >= new.trackIndex=3 → qualifies → steal */
+    {
+        int stolen = 0;
+        for (int i = 0; i < 5; i++)
+            if (engine.pcmChannels[i].trackIndex == 3) { stolen = 1; break; }
+        ASSERT(stolen, "equal priority: steals channel with higher trackIndex");
+    }
+    m4a_engine_destroy(&engine);
+
+    /* ---- Test 5: Equal-priority note cannot steal channel with lower trackIndex ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 5, 0);
+    engine.tracks[5].priority = 5;
+    for (int i = 0; i < 5; i++) {
+        engine.pcmChannels[i].status = ACTIVE;
+        engine.pcmChannels[i].priority = 5;
+        engine.pcmChannels[i].trackIndex = 1;
+    }
+    m4a_engine_note_on(&engine, 5, 60, 100);  /* trackIndex=5, priority=5 */
+    /* ch.trackIndex=1 < new.trackIndex=5 → does not qualify → dropped */
+    for (int i = 0; i < 5; i++)
+        ASSERT_EQ(engine.pcmChannels[i].trackIndex, 1, "equal priority: no steal when ch.trackIndex < new.trackIndex");
+    m4a_engine_destroy(&engine);
+
+    /* ---- Test 6: Stopping channel is always stolen regardless of priority ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    engine.tracks[0].priority = 1;  /* very low priority */
+    /* 4 active channels at high priority */
+    for (int i = 0; i < 4; i++) {
+        engine.pcmChannels[i].status = ACTIVE;
+        engine.pcmChannels[i].priority = 10;
+        engine.pcmChannels[i].trackIndex = 9;
+    }
+    /* Channel 4 is stopping (releasing) */
+    engine.pcmChannels[4].status = STOPPING;
+    engine.pcmChannels[4].priority = 10;
+    engine.pcmChannels[4].trackIndex = 9;
+    m4a_engine_note_on(&engine, 0, 60, 100);  /* priority=1, trackIndex=0 */
+    /* Stopping channel (index 4) should be stolen */
+    ASSERT_EQ(engine.pcmChannels[4].trackIndex, 0, "stopping channel: always stolen");
+    /* Active channels untouched */
+    for (int i = 0; i < 4; i++)
+        ASSERT_EQ(engine.pcmChannels[i].trackIndex, 9, "stopping channel: active channels untouched");
+    m4a_engine_destroy(&engine);
+
+    /* ---- Test 7: Concrete bug case — all 5 slots at equal priority, new note dropped ---- */
+    /* All 5 channels at priority 5, owned by tracks 1–5.
+     * New note from track 7 at priority 5.
+     * ch.trackIndex (1..5) < new.trackIndex (7) for all → no victim → dropped. */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 7, 0);
+    engine.tracks[7].priority = 5;
+    for (int i = 0; i < 5; i++) {
+        engine.pcmChannels[i].status = ACTIVE;
+        engine.pcmChannels[i].priority = 5;
+        engine.pcmChannels[i].trackIndex = i + 1;  /* tracks 1..5 */
+    }
+    m4a_engine_note_on(&engine, 7, 60, 100);
+    for (int i = 0; i < 5; i++)
+        ASSERT_EQ(engine.pcmChannels[i].trackIndex, i + 1, "all slots: note dropped when no valid victim");
+    m4a_engine_destroy(&engine);
+
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -267,6 +424,7 @@ int main(void)
     test_trk_vol_pit_set();
     test_engine_init();
     test_basic_audio();
+    test_polyphony_stealing();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
