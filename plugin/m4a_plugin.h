@@ -16,6 +16,7 @@ typedef struct {
     uint8_t masterVolume; // The m4a-level master volume (0-15)
     uint8_t songMasterVolume; // The song-level master volume (0-127)
     bool analogFilter;
+    uint8_t maxPcmChannels;
     bool activated;
 
     /* GUI */

@@ -631,6 +631,7 @@ static void print_usage(const char *prog)
         "  --song-volume <0-127>       Song master volume (default: 127)\n"
         "  --reverb <0-127>            Reverb amount (default: 0)\n"
         "  --analog-filter             Enable GBA analog low-pass filter (default: off)\n"
+        "  --polyphony <1-12>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
         "  --tail <seconds>            Silence after last event, no loop markers (default: 3.0)\n"
         "\n"
@@ -696,6 +697,7 @@ int main(int argc, char *argv[])
     int         songVolume    = 127;
     int         reverbAmount  = 0;
     bool        analogFilter  = false;
+    int         maxChannels   = 5;
     int         sampleRateHz  = 44100;
     double      tailSeconds   = 3.0;
     int         loopCount     = 2;
@@ -719,6 +721,10 @@ int main(int argc, char *argv[])
             if (reverbAmount > 127) reverbAmount = 127;
         } else if (strcmp(argv[i], "--analog-filter") == 0) {
             analogFilter = true;
+        } else if (strcmp(argv[i], "--polyphony") == 0 && i + 1 < argc) {
+            maxChannels = atoi(argv[++i]);
+            if (maxChannels < 1) maxChannels = 1;
+            if (maxChannels > MAX_PCM_CHANNELS) maxChannels = MAX_PCM_CHANNELS;
         } else if (strcmp(argv[i], "--sample-rate") == 0 && i + 1 < argc) {
             sampleRateHz = atoi(argv[++i]);
             if (sampleRateHz < 8000) sampleRateHz = 8000;
@@ -902,6 +908,7 @@ oom:
     m4a_engine_set_song_volume(&engine, (uint8_t)songVolume);
     m4a_reverb_set_amount(&engine.reverb, (uint8_t)reverbAmount);
     engine.analogFilter = analogFilter;
+    engine.maxPcmChannels = (uint8_t)maxChannels;
 
     /* ---- Allocate output buffers ---- */
     float *outL = calloc(totalSamples, sizeof(float));

@@ -120,6 +120,11 @@ static void load_config_file(M4APluginData *data)
             data->songMasterVolume = (uint8_t)v;
         } else if (strcmp(key, "analog_filter") == 0) {
             data->analogFilter = (atoi(value) != 0);
+        } else if (strcmp(key, "max_channels") == 0) {
+            int v = atoi(value);
+            if (v < 1) v = 1;
+            if (v > MAX_PCM_CHANNELS) v = MAX_PCM_CHANNELS;
+            data->maxPcmChannels = (uint8_t)v;
         } else if (strcmp(key, "sound_data_paths") == 0) {
             /* Semicolon-separated list of extra .inc files, relative to project_root */
             char tmp[600];
@@ -171,7 +176,8 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->masterVolume = 15;
     data->songMasterVolume = MAX_SONG_VOLUME;
     data->reverbAmount = 0;
-    data->analogFilter = true;
+    data->analogFilter = false;
+    data->maxPcmChannels = 5;
     data->projectRoot[0] = '\0';
     data->voicegroupName[0] = '\0';
     data->loadedVg = NULL;
@@ -206,6 +212,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     data->engine.masterVolume = data->masterVolume;
     data->engine.songMasterVolume = data->songMasterVolume;
     data->engine.analogFilter = data->analogFilter;
+    data->engine.maxPcmChannels = data->maxPcmChannels;
     m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
 
     /* If voicegroup is configured, load it */
@@ -233,6 +240,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
         gs.masterVolume      = data->masterVolume;
         gs.songMasterVolume  = data->songMasterVolume;
         gs.analogFilter      = data->analogFilter;
+        gs.maxPcmChannels    = data->maxPcmChannels;
         gs.voicegroupLoaded  = (data->loadedVg != NULL);
         m4a_gui_update_settings(data->gui, &gs);
     }
@@ -458,6 +466,7 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     if (stream->write(stream, &data->songMasterVolume, 1) != 1) return false;
     uint8_t analogFilterByte = data->analogFilter ? 1 : 0;
     if (stream->write(stream, &analogFilterByte, 1) != 1) return false;
+    if (stream->write(stream, &data->maxPcmChannels, 1) != 1) return false;
 
     return true;
 }
@@ -491,6 +500,12 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     uint8_t analogFilterByte = 1;
     stream->read(stream, &analogFilterByte, 1);
     data->analogFilter = (analogFilterByte != 0);
+    /* maxPcmChannels byte is optional (not present in older saves); default to 5 */
+    uint8_t maxChannelsByte = 5;
+    stream->read(stream, &maxChannelsByte, 1);
+    if (maxChannelsByte < 1) maxChannelsByte = 1;
+    if (maxChannelsByte > MAX_PCM_CHANNELS) maxChannelsByte = MAX_PCM_CHANNELS;
+    data->maxPcmChannels = maxChannelsByte;
 
     if (data->activated) {
         /* Only reload voicegroup if the project root or name actually changed */
@@ -509,6 +524,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         data->engine.masterVolume = data->masterVolume;
         data->engine.songMasterVolume = data->songMasterVolume;
         data->engine.analogFilter = data->analogFilter;
+        data->engine.maxPcmChannels = data->maxPcmChannels;
         m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
     }
 
@@ -522,6 +538,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         gs.masterVolume     = data->masterVolume;
         gs.songMasterVolume = data->songMasterVolume;
         gs.analogFilter     = data->analogFilter;
+        gs.maxPcmChannels   = data->maxPcmChannels;
         gs.voicegroupLoaded = (data->loadedVg != NULL);
         m4a_gui_update_settings(data->gui, &gs);
     }
@@ -603,6 +620,8 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
     gs.reverbAmount     = data->reverbAmount;
     gs.masterVolume     = data->masterVolume;
     gs.songMasterVolume = data->songMasterVolume;
+    gs.analogFilter     = data->analogFilter;
+    gs.maxPcmChannels   = data->maxPcmChannels;
     gs.voicegroupLoaded = (data->loadedVg != NULL);
 
     data->gui = m4a_gui_create(data->host, &gs, s_pluginLogPath);
@@ -767,12 +786,14 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
     data->masterVolume     = gs.masterVolume;
     data->songMasterVolume = gs.songMasterVolume;
     data->analogFilter     = gs.analogFilter;
+    data->maxPcmChannels   = gs.maxPcmChannels;
 
     if (data->activated) {
         data->engine.masterVolume = gs.masterVolume;
         m4a_engine_set_song_volume(&data->engine, gs.songMasterVolume);
         m4a_reverb_set_amount(&data->engine.reverb, gs.reverbAmount);
         data->engine.analogFilter = gs.analogFilter;
+        data->engine.maxPcmChannels = gs.maxPcmChannels;
     }
 
     if (reloadVoicegroup) {

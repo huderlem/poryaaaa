@@ -28,6 +28,10 @@ master_volume=15
 # Song Master volume (0-127)
 song_master_volume=127
 
+# Maximum number of simultaneous PCM (DirectSound) channels (1-12).
+# Default: 5 (matches Pokemon Emerald's engine configuration).
+#max_channels=5
+
 # Additional .inc files for sample symbol definitions (semicolon-separated, relative to project_root).
 # Normally auto-discovered from sound/direct_sound_data.inc.
 #sound_data_paths=

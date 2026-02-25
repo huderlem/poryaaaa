@@ -96,7 +96,7 @@ target_link_libraries(poryaaaa_test PRIVATE m)
 
 # ---- Standalone Renderer ----
 add_executable(poryaaaa_render
-    cmd/m4a_render.c
+    cmd/poryaaaa_render.c
     ${ENGINE_SOURCES}
 )
 target_include_directories(poryaaaa_render PRIVATE plugin third_party)

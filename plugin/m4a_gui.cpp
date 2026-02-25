@@ -51,6 +51,7 @@ static void gui_log(const char *fmt, ...)
 
 /* Our C interface */
 #include "m4a_gui.h"
+#include "m4a_engine.h"
 
 /* CLAP GUI extension (for notifying host when floating window closes) */
 #include <clap/ext/gui.h>
@@ -495,6 +496,13 @@ void m4a_gui_tick(M4AGuiState *gui)
         int v = (int)gui->settings.reverbAmount;
         if (ImGui::SliderInt("Reverb (0-127)", &v, 0, 127)) {
             gui->settings.reverbAmount = (uint8_t)v;
+            gui->settingsChanged = true;
+        }
+    }
+    {
+        int v = (int)gui->settings.maxPcmChannels;
+        if (ImGui::SliderInt("Polyphony (1-12)", &v, 1, MAX_PCM_CHANNELS)) {
+            gui->settings.maxPcmChannels = (uint8_t)v;
             gui->settingsChanged = true;
         }
     }
