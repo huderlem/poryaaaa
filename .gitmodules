@@ -7,3 +7,6 @@
 [submodule "glfw"]
 	path = glfw
 	url = https://github.com/glfw/glfw.git
+[submodule "clap-wrapper"]
+	path = clap-wrapper
+	url = https://github.com/free-audio/clap-wrapper.git

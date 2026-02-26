@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.24)
 project(poryaaaa C CXX)
 
 set(CMAKE_C_STANDARD 11)
@@ -13,6 +13,23 @@ set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
 # the compiled plugin will still use whichever display server the DAW runs on.
 set(GLFW_BUILD_WAYLAND  OFF CACHE BOOL "" FORCE)
 add_subdirectory(glfw)
+
+# ---- CLAP SDK ----
+set(CLAP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(clap-sdk)
+
+# ---- clap-wrapper (standalone support) ----
+set(CLAP_WRAPPER_DOWNLOAD_DEPENDENCIES TRUE CACHE BOOL "" FORCE)
+add_subdirectory(clap-wrapper)
+# clap-wrapper enables -Werror but its own fsutil.cpp triggers -Wreturn-type
+# with MinGW cross-compilation, so relax that specific warning.
+# Also ensure _WIN32_WINNT targets Vista+ for SHGetKnownFolderPath.
+if(TARGET clap-wrapper-compile-options)
+    target_compile_options(clap-wrapper-compile-options INTERFACE -Wno-error=return-type)
+    if(WIN32 AND MINGW)
+        target_compile_definitions(clap-wrapper-compile-options INTERFACE _WIN32_WINNT=0x0600)
+    endif()
+endif()
 
 # ---- Dear ImGui ----
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/imgui)
@@ -43,7 +60,6 @@ add_library(poryaaaa MODULE
 )
 
 target_include_directories(poryaaaa PRIVATE
-    clap-sdk/include
     plugin
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
@@ -56,7 +72,7 @@ set_target_properties(poryaaaa PROPERTIES
     LINKER_LANGUAGE CXX
 )
 
-target_link_libraries(poryaaaa PRIVATE glfw)
+target_link_libraries(poryaaaa PRIVATE clap glfw)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(poryaaaa PRIVATE m)
@@ -122,3 +138,49 @@ target_include_directories(poryaaaa_unit_tests PRIVATE
 )
 
 target_link_libraries(poryaaaa_unit_tests PRIVATE m)
+
+# ---- Standalone (clap-wrapper) ----
+add_executable(poryaaaa-standalone
+    plugin/m4a_plugin.c
+    plugin/m4a_gui.cpp
+    ${ENGINE_SOURCES}
+    ${IMGUI_SOURCES}
+)
+target_include_directories(poryaaaa-standalone PRIVATE
+    plugin
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+)
+set_target_properties(poryaaaa-standalone PROPERTIES
+    LINKER_LANGUAGE CXX
+)
+target_link_libraries(poryaaaa-standalone PRIVATE clap glfw)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(poryaaaa-standalone PRIVATE m GL)
+elseif(APPLE)
+    target_link_libraries(poryaaaa-standalone PRIVATE "-framework OpenGL")
+elseif(WIN32)
+    target_link_libraries(poryaaaa-standalone PRIVATE opengl32 -static-libgcc -static-libstdc++)
+endif()
+
+target_add_standalone_wrapper(
+    TARGET poryaaaa-standalone
+    OUTPUT_NAME "poryaaaa_standalone"
+    STATICALLY_LINKED_CLAP_ENTRY TRUE
+    PLUGIN_ID "com.huderlem.poryaaaa"
+)
+set_target_properties(poryaaaa-standalone PROPERTIES OUTPUT_NAME "poryaaaa_standalone")
+
+# clap-wrapper's native Win32 standalone requires WinRT/WIL (MSVC/Clang only).
+# For MinGW, replace the generic wrapasstandalone.cpp with our own lightweight
+# Win32 entry point that handles GUI hosting and timer firing.
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    get_target_property(_sa_sources poryaaaa-standalone SOURCES)
+    list(FILTER _sa_sources EXCLUDE REGEX "wrapasstandalone\\.cpp$")
+    set_target_properties(poryaaaa-standalone PROPERTIES SOURCES "${_sa_sources}")
+    target_sources(poryaaaa-standalone PRIVATE plugin/standalone_main_win32.cpp)
+    target_include_directories(poryaaaa-standalone PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/clap-wrapper/src
+    )
+endif()

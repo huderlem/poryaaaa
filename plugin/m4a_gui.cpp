@@ -111,6 +111,9 @@ struct M4AGuiState {
     /* True after set_parent_win32() — host drives sizing and visibility */
     bool isEmbedded;
 
+    /* True after the user closes the floating window */
+    bool wasClosed;
+
 #if defined(_WIN32)
     HHOOK  msgHook;         /* WH_GETMESSAGE hook handle, or NULL */
     bool   pendingPaste;    /* Ctrl+V intercepted, inject on next tick */
@@ -280,11 +283,14 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
         glfwSetWindowShouldClose(w, GLFW_FALSE);
         glfwHideWindow(w);
         auto *g = static_cast<M4AGuiState *>(glfwGetWindowUserPointer(w));
-        if (g && g->host) {
-            auto *hostGui = static_cast<const clap_host_gui_t *>(
-                g->host->get_extension(g->host, CLAP_EXT_GUI));
-            if (hostGui)
-                hostGui->closed(g->host, false /* was_destroyed */);
+        if (g) {
+            g->wasClosed = true;
+            if (g->host) {
+                auto *hostGui = static_cast<const clap_host_gui_t *>(
+                    g->host->get_extension(g->host, CLAP_EXT_GUI));
+                if (hostGui)
+                    hostGui->closed(g->host, false /* was_destroyed */);
+            }
         }
     });
 
@@ -370,6 +376,11 @@ bool m4a_gui_poll_changes(M4AGuiState *gui, M4AGuiSettings *out, bool *reload_vo
     gui->settingsChanged  = false;
     gui->reloadRequested  = false;
     return true;
+}
+
+bool m4a_gui_was_closed(M4AGuiState *gui)
+{
+    return gui && gui->wasClosed;
 }
 
 void m4a_gui_tick(M4AGuiState *gui)

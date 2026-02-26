@@ -65,6 +65,11 @@ bool m4a_gui_set_parent_win32(M4AGuiState *gui, void *parentHwnd);
 void m4a_gui_tick(M4AGuiState *gui);
 
 /*
+ * Returns true if the GUI window has been closed by the user.
+ */
+bool m4a_gui_was_closed(M4AGuiState *gui);
+
+/*
  * Push new settings into the GUI (e.g. after voicegroup reload).
  * Only the displayed values are updated; text input buffers are refreshed.
  */

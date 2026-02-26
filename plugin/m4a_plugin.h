@@ -23,6 +23,10 @@ typedef struct {
     const clap_host_t *host;
     M4AGuiState *gui;
     clap_id guiTimerId;
+
+    /* Set when the plugin calls request_restart (e.g. after Reload).
+     * The standalone polls this to perform the actual restart cycle. */
+    bool restartRequested;
 } M4APluginData;
 
 #endif /* M4A_PLUGIN_H */

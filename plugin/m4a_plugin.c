@@ -769,7 +769,12 @@ static const clap_plugin_gui_t s_gui = {
 static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
-    if (!data->gui || timer_id != data->guiTimerId)
+    if (!data->gui)
+        return;
+    /* If the host supports timers, only respond to our registered timer.
+     * If not (e.g. standalone without native timer support), accept any id
+     * so an external driver can call on_timer to pump the GUI. */
+    if (data->guiTimerId != CLAP_INVALID_ID && timer_id != data->guiTimerId)
         return;
 
     /* Render one GUI frame */
@@ -803,6 +808,7 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
                  "%s", gs.projectRoot);
         snprintf(data->voicegroupName, sizeof(data->voicegroupName),
                  "%s", gs.voicegroupName);
+        data->restartRequested = true;
         data->host->request_restart(data->host);
     }
 
@@ -836,6 +842,24 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
 static const clap_plugin_timer_support_t s_timer_support = {
     .on_timer = timer_on_timer,
 };
+
+/* Standalone helper: check and clear the restart-requested flag */
+bool m4a_plugin_take_restart_request(const clap_plugin_t *plugin)
+{
+    if (!plugin) return false;
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    if (!data->restartRequested) return false;
+    data->restartRequested = false;
+    return true;
+}
+
+/* Standalone helper: check if the plugin's GUI window was closed by the user */
+bool m4a_plugin_gui_was_closed(const clap_plugin_t *plugin)
+{
+    if (!plugin) return false;
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    return data->gui && m4a_gui_was_closed(data->gui);
+}
 
 /* Extension dispatcher */
 static const void *plugin_get_extension(const clap_plugin_t *plugin, const char *id)
