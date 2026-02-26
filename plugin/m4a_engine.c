@@ -795,9 +795,8 @@ void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamp
         m4a_reverb_process(&engine->reverb, &mixL, &mixR);
 
         for (int ch = 0; ch < MAX_CGB_CHANNELS; ch++) {
-            if (engine->cgbChannels[ch].status & CHN_ON)
-                m4a_cgb_channel_render(&engine->cgbChannels[ch], &mixL, &mixR,
-                                       engine->sampleRate);
+            m4a_cgb_channel_render(&engine->cgbChannels[ch], &mixL, &mixR,
+                                   engine->sampleRate);
         }
 
 

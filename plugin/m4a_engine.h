@@ -175,6 +175,11 @@ typedef struct {
     uint16_t lfsr;          /* noise LFSR state */
 
     int trackIndex;
+
+    /* Wave channel (type 3) declick: avoids a pop when the note ends by
+     * smoothly fading the last sample to zero over DECLICK_SAMPLES frames. */
+    int32_t declickSample;           /* last rendered sample, pre-pan, post-scale */
+    int32_t declickSamplesRemaining; /* countdown; 0 = no declick active */
 } M4ACGBChannel;
 
 /* Forward declaration */

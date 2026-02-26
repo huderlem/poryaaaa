@@ -2,6 +2,10 @@
 #include "m4a_tables.h"
 #include <string.h>
 
+/* Number of samples over which the wave channel (type 3) fades to zero on
+ * note-off, preventing a DC-offset pop. ~5.8 ms at 44100 Hz. */
+#define DECLICK_SAMPLES 256
+
 /*
  * PCM Channel Implementation
  * Matches the SoundMainRAM mixer in m4a_1.s
@@ -226,6 +230,10 @@ void m4a_cgb_channel_start(M4ACGBChannel *ch)
         ch->envelopeVolume = 0;
     }
 
+    /* Cancel any in-progress declick so the new note starts cleanly. */
+    ch->declickSample = 0;
+    ch->declickSamplesRemaining = 0;
+
     /* Initialize LFSR for noise channel.
      * Bit 3 of frequency is the period/mode bit (NR43 bit 3):
      * 0 = 15-bit LFSR, 1 = 7-bit short-period LFSR. */
@@ -239,6 +247,8 @@ void m4a_cgb_channel_start(M4ACGBChannel *ch)
 
 void m4a_cgb_channel_stop(M4ACGBChannel *ch)
 {
+    if (ch->type == 3)
+        ch->declickSamplesRemaining = DECLICK_SAMPLES;
     ch->status = 0;
 }
 
@@ -299,6 +309,8 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15)
 
     if (ch->status & CHN_START) {
         if (ch->status & CHN_STOP) {
+            if (ch->type == 3)
+                ch->declickSamplesRemaining = DECLICK_SAMPLES;
             ch->status = 0;
             return;
         }
@@ -327,6 +339,8 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15)
     if (ch->status & CHN_IEC) {
         ch->pseudoEchoLength--;
         if ((int8_t)ch->pseudoEchoLength <= 0) {
+            if (ch->type == 3)
+                ch->declickSamplesRemaining = DECLICK_SAMPLES;
             ch->status = 0;
             return;
         }
@@ -363,6 +377,8 @@ step_repeat:
                         ch->modify |= 0x01;
                         goto envelope_complete;
                     } else {
+                        if (ch->type == 3)
+                            ch->declickSamplesRemaining = DECLICK_SAMPLES;
                         ch->status = 0;
                         return;
                     }
@@ -428,7 +444,18 @@ envelope_complete:
 void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
                             float sampleRate)
 {
-    if (!(ch->status & CHN_ON) || (ch->status & CHN_START))
+    if (!(ch->status & CHN_ON)) {
+        /* Wave channel declick: linearly fade the last sample to zero over
+         * DECLICK_SAMPLES frames to prevent a pop caused by the DC offset. */
+        if (ch->type == 3 && ch->declickSamplesRemaining > 0) {
+            ch->declickSamplesRemaining--;
+            int32_t faded = (ch->declickSample * (int32_t)ch->declickSamplesRemaining) / DECLICK_SAMPLES;
+            if (ch->pan & 0x0F) *mixR += faded;
+            if (ch->pan & 0xF0) *mixL += faded;
+        }
+        return;
+    }
+    if (ch->status & CHN_START)
         return;
 
     int32_t sample = 0;
@@ -462,23 +489,37 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
                 nibble = waveData[pos >> 1] & 0x0F;
             else
                 nibble = (waveData[pos >> 1] >> 4) & 0x0F;
+            /* Compute the sum of all 32 raw nibbles for DC offset removal.
+             * The wave mean varies per waveform, so using a fixed midpoint
+             * of 8 leaves a DC offset that causes clicks at note start/end. */
+            int32_t waveSum = 0;
+            for (int i = 0; i < 16; i++) {
+                waveSum += (waveData[i] >> 4) & 0x0F;
+                waveSum += waveData[i] & 0x0F;
+            }
+
             /* Volume control: apply shift to raw 4-bit nibble to match
              * GBA hardware quantization (NR32 register).
              * On real hardware, the right-shift is lossy on the small
-             * 4-bit value, creating quantized "plateaus" in the output. */
+             * 4-bit value, creating quantized "plateaus" in the output.
+             * Apply the same volume logic to the mean for accurate DC removal. */
             int32_t shifted = (int32_t)nibble;
             int nr32 = gCgb3Vol[ch->envelopeVolume];
+            int32_t meanShifted;
             if (nr32 == 0) {
                 shifted = 0;
+                meanShifted = 0;
             } else if (nr32 & 0x80) {
-                /* GBA 75% mode: (nibble * 3) >> 2 */
+                /* GBA 75% mode: (nibble * 3) >> 2; mean = (waveSum * 3) >> 7 */
                 shifted = (shifted + (shifted << 1)) >> 2;
+                meanShifted = (waveSum * 3) >> 7;
             } else {
                 int shift = ((nr32 >> 5) & 3) - 1;
                 shifted >>= shift;
+                meanShifted = waveSum >> (5 + shift);
             }
-            /* Center around midpoint and scale */
-            sample = (shifted - 8) * 8;
+            /* Center around the waveform's actual mean to remove DC offset */
+            sample = (shifted - meanShifted) * 8;
 
             /* Advance phase */
             int32_t freqReg = ch->frequency;
@@ -532,6 +573,10 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
      * the PCM mixer which already incorporates the << 2 implicitly through its
      * larger sample values (~±127 vs CGB's ~±60). */
     sample >>= 1;
+
+    /* Track last sample for wave channel declick on note-off. */
+    if (cgbType == 3)
+        ch->declickSample = sample;
 
     /* Route to left/right using NR51-style pan bits in ch->pan.
      * Panning is binary on the GBA (NR51 enable bits), not a level multiplier. */
