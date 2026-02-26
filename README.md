@@ -6,12 +6,13 @@ Poryaaaa is an audio synthesizer that emulates the GBA's m4a sound engine.  It's
 
 Composing custom music for Pokémon GBA games normally requires a slow iteration loop: write notes in a DAW, export midi file, build the ROM, and test in an emulator.  Without a synth like poryaaaa, the DAW's audio will sound very different from how it sounds in-game on the GBA. This project eliminates that painful gap by emulating the m4a mixer and loading audio data (e.g. voicegroups, samples) directly from the decomp project's files.
 
-These are the two available poryaaaa tools:
+These are the available poryaaaa tools:
 
 - **`poryaaaa.clap`**: a CLAP instrument plugin. Insert it on a MIDI track in your DAW and hear the GBA-accurate audio in real time as you compose.
+- **`poryaaaa_standalone(.exe)`**: a standalone GUI that wraps the CLAP plugin. It receives MIDI from any connected device or virtual cable and plays audio through your speakers.
 - **`poryaaaa_render(.exe)`**: a standalone command-line renderer. Feed it a MIDI file and a voicegroup name; it outputs a WAV file and/or plays audio through your speakers. Supports looping with configurable repeat count and fadeout.
 
-Both tools auto-discover the project structure and work with [pokeemerald](https://github.com/pret/pokeemerald), [pokefirered](https://github.com/pret/pokefirered), and forked projects (including those with custom sound data directories).
+All tools auto-discover the project structure and work with [pokeemerald](https://github.com/pret/pokeemerald), [pokefirered](https://github.com/pret/pokefirered), and forked projects (including those with custom sound data directories).
 
 ## Usage
 
@@ -78,6 +79,50 @@ When the MIDI file contains text events (Meta type 0x01) or marker events (Meta 
 
 `--total-duration-seconds` overrides `--loop-count` and sets the exact total render length. The fadeout still occupies the last `--fadeout` seconds of that duration.
 
+### Standalone executable
+
+`poryaaaa_standalone(.exe)` wraps the CLAP plugin as a self-contained application with its own audio output (via RtAudio) and MIDI input (via RtMidi). It presents the same ImGui settings GUI as the DAW plugin.  No DAW or config file is needed to run it.
+
+#### Running
+
+Simply launch the executable. The GUI window opens immediately:
+
+```bash
+# Linux
+./poryaaaa_standalone
+
+# Windows (or double click on it)
+poryaaaa_standalone.exe
+```
+
+- Edit **Project Root** and **Voicegroup** and press **Reload** to load a voicegroup.
+- Adjust **Song Volume** and **Reverb** live.
+- Close the window to exit.
+
+The app reads `poryaaaa.cfg` (located next to the executable) on startup as initial defaults, using the same format as the plugin. See the [Plugin config reference](#plugin-config-reference) below.
+
+#### Sending MIDI on Windows
+
+RtMidi uses the WinMM MIDI backend. Any device or virtual MIDI port visible in Windows will be detected on startup.
+
+To route MIDI from software (e.g. [Sekaiju](https://openmidiproject.osdn.jp/Sekaiju_en.html), a DAW, or other sequencer):
+
+1. Install [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html) and create a virtual port (e.g. `loopMIDI Port`).
+2. In your sequencer, set the MIDI output to the loopMIDI port.
+3. Launch `poryaaaa_standalone.exe` — it will automatically open all available MIDI inputs (e.g. loopMIDI ports).
+4. Play notes or send program changes from your sequencer.
+
+#### Sending MIDI on Linux
+
+RtMidi uses the ALSA sequencer backend. Create a virtual MIDI port with any tool and connect it to `poryaaaa_standalone`'s input:
+
+```bash
+# Example using aconnect (part of alsa-utils)
+aconnect <source_port> <poryaaaa_port>
+```
+
+Caveat: I haven't actually tested this on Linux.  It theoretically works...
+
 ### CLAP plugin in a DAW
 
 1. Copy `poryaaaa.clap` to your DAW's CLAP plugin directory.
@@ -88,7 +133,7 @@ When the MIDI file contains text events (Meta type 0x01) or marker events (Meta 
    project_root=C:\Users\you\pokeemerald
    voicegroup=petalburg
    ```
-4. Insert the plugin as an instrument on a MIDI track and rescan plugins or reluanch your DAW so it sees the new plugin.
+4. Insert the plugin as an instrument on a MIDI track and rescan plugins or relaunch your DAW so it sees the new plugin.
 5. Use Program Change (PC) midi messages to select instruments from the voicegroup.
 6. Play MIDI notes. You should hear GBA-accurate audio.
 
@@ -135,13 +180,15 @@ This produces the following targets:
 | Target | Output | Description |
 |--------|--------|-------------|
 | `poryaaaa` | `poryaaaa.clap` | CLAP instrument plugin |
+| `poryaaaa-standalone` | `poryaaaa_standalone(.exe)` | Standalone GUI |
 | `poryaaaa_render` | `poryaaaa_render(.exe)` | Standalone MIDI renderer |
 | `poryaaaa_test` | `poryaaaa` | Quick WAV export test (hardcoded sequence) |
 | `poryaaaa_unit_tests` | `poryaaaa_unit_tests` | Engine unit test suite |
 
-To build only the renderer:
+To build a single target:
 
 ```bash
+cmake --build build --target poryaaaa-standalone
 cmake --build build --target poryaaaa_render
 ```
 
@@ -168,13 +215,14 @@ cmd/
   poryaaaa_render.c           Standalone MIDI renderer (CLI tool)
 
 plugin/
-  m4a_plugin.c/.h        CLAP entry point, MIDI event handling, extension dispatch
-  m4a_gui.cpp/.h         Dear ImGui + GLFW settings GUI (C++ with C interface)
-  m4a_engine.c/.h        Core engine: tick processing, channel allocation, MIDI routing
-  m4a_channel.c/.h       PCM and CGB channel rendering, ADSR envelopes
-  m4a_tables.c/.h        Frequency/scale tables (from m4a_tables.c)
-  m4a_reverb.c/.h        Delay-based reverb effect
-  voicegroup_loader.c/.h Project discovery, .inc/.s parser, sample loader
+  m4a_plugin.c/.h             CLAP entry point, MIDI event handling, extension dispatch
+  m4a_gui.cpp/.h              Dear ImGui + GLFW settings GUI (C++ with C interface)
+  m4a_engine.c/.h             Core engine: tick processing, channel allocation, MIDI routing
+  m4a_channel.c/.h            PCM and CGB channel rendering, ADSR envelopes
+  m4a_tables.c/.h             Frequency/scale tables (from m4a_tables.c)
+  m4a_reverb.c/.h             Delay-based reverb effect
+  voicegroup_loader.c/.h      Project discovery, .inc/.s parser, sample loader
+  standalone_main_win32.cpp   Custom Win32 entry point for the standalone executable
 
 test/
   test_engine.c          Unit tests for engine algorithms
@@ -184,6 +232,7 @@ third_party/
   miniaudio.h            Single-header audio I/O library (used by poryaaaa_render)
 
 clap-sdk/                CLAP plugin SDK (submodule)
+clap-wrapper/            Wraps the CLAP plugin as a standalone app (submodule)
 glfw/                    GLFW 3.4 (submodule)
 imgui/                   Dear ImGui (submodule)
 ```
