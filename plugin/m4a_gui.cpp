@@ -1,5 +1,5 @@
 /*
- * m4a_gui.cpp - Dear ImGui + GLFW floating window GUI for the M4A plugin.
+ * m4a_gui.cpp - Dear ImGui + Pugl GUI for the M4A plugin.
  *
  * Provides a simple settings panel where the user can change the project
  * root, voicegroup, reverb, and volume levels in real time from the DAW.
@@ -7,29 +7,18 @@
  * Thread-safety: all functions must be called from the main thread.
  */
 
-/* GLFW (includes <GL/gl.h> on Linux/Windows, <OpenGL/gl.h> on macOS) */
-#include <GLFW/glfw3.h>
-#if defined(_WIN32)
-#  define GLFW_EXPOSE_NATIVE_WIN32
-#  include <GLFW/glfw3native.h>
-#endif
+#include <pugl/pugl.h>
+#include <pugl/gl.h>
 
-/* Dear ImGui core */
 #include "imgui.h"
-#include "imgui_impl_glfw.h"
+#include "imgui_impl_pugl.h"
 #include "imgui_impl_opengl3.h"
 
-/* C standard library */
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
 
 /* ---- Debug logging ---- */
-/*
- * Set M4A_GUI_LOG to a writable file path to enable diagnostic logging.
- * On Windows: "C:/Users/Public/poryaaaa_plugin.log" or similar.
- * Leave as nullptr to disable.
- */
 static const char *s_logPath = nullptr;
 
 static void gui_log(const char *fmt, ...)
@@ -55,47 +44,26 @@ static void gui_log(const char *fmt, ...)
 
 /* CLAP GUI extension (for notifying host when floating window closes) */
 #include <clap/ext/gui.h>
-#include <clap/ext/draft/undo.h>
 
 /* ---- Constants ---- */
 
 static const int GUI_W = 540;
 static const int GUI_H = 350;
 
-/* ---- GLFW global reference count ---- */
-/*
- * glfwInit/glfwTerminate are called once globally. We ref-count them so that
- * multiple plugin instances each calling create/destroy works correctly.
- * Only ever accessed from the main thread (CLAP guarantee), so no locking needed.
- */
-static int s_glfwRefCount = 0;
-
-static bool glfw_acquire()
-{
-    if (s_glfwRefCount == 0) {
-        glfwSetErrorCallback([](int code, const char *msg) {
-            (void)code;
-            fprintf(stderr, "[poryaaaa] GLFW error %d: %s\n", code, msg);
-        });
-        if (!glfwInit())
-            return false;
-    }
-    s_glfwRefCount++;
-    return true;
-}
-
-static void glfw_release()
-{
-    if (s_glfwRefCount > 0 && --s_glfwRefCount == 0)
-        glfwTerminate();
-}
-
 /* ---- GUI state ---- */
 
 struct M4AGuiState {
-    GLFWwindow    *window;
+    PuglWorld     *world;
+    PuglView      *view;
     ImGuiContext  *imguiCtx;
     const clap_host_t *host;
+
+    bool           realized;   /* true after puglRealize succeeds */
+    bool           glInited;   /* true after ImGui_ImplOpenGL3_Init */
+
+    /* Cached size from PUGL_CONFIGURE */
+    uint32_t       cachedWidth;
+    uint32_t       cachedHeight;
 
     /* Currently displayed settings */
     M4AGuiSettings settings;
@@ -108,27 +76,15 @@ struct M4AGuiState {
     bool settingsChanged;
     bool reloadRequested;
 
-    /* True after set_parent_win32() — host drives sizing and visibility */
+    /* True after set_parent() — host drives sizing and visibility */
     bool isEmbedded;
 
     /* True after the user closes the floating window */
     bool wasClosed;
-
-#if defined(_WIN32)
-    HHOOK  msgHook;         /* WH_GETMESSAGE hook handle, or NULL */
-    bool   pendingPaste;    /* Ctrl+V intercepted, inject on next tick */
-    bool   pendingCopy;     /* Ctrl+C */
-    bool   pendingCut;      /* Ctrl+X */
-    bool   pendingSelectAll;/* Ctrl+A */
-    bool   pendingUndo;          /* Ctrl+Z intercepted */
-    bool   pendingRedo;          /* Ctrl+Y or Ctrl+Shift+Z intercepted */
-    bool   wantTextInput;        /* WantTextInput from previous frame */
-#endif
 };
 
 /* ---- Internal helpers ---- */
 
-/* Sync text buffers from settings (called on create and update_settings) */
 static void sync_buffers(M4AGuiState *gui)
 {
     snprintf(gui->projectRootBuf, sizeof(gui->projectRootBuf),
@@ -137,303 +93,17 @@ static void sync_buffers(M4AGuiState *gui)
              "%s", gui->settings.voicegroupName);
 }
 
-#if defined(_WIN32)
-static LRESULT CALLBACK m4a_get_msg_hook(int nCode, WPARAM wParam, LPARAM lParam)
+/* Render a single ImGui frame — called from PUGL_EXPOSE. */
+static void render_frame(M4AGuiState *gui)
 {
-    if (nCode == HC_ACTION && wParam == PM_REMOVE)
-    {
-        MSG *msg = reinterpret_cast<MSG *>(lParam);
-        if (msg->message == WM_KEYDOWN)
-        {
-            M4AGuiState *gui =
-                static_cast<M4AGuiState *>(::GetPropA(msg->hwnd, "M4A_GUI_STATE"));
-            if (gui && (::GetKeyState(VK_CONTROL) & 0x8000))
-            {
-                bool consumed = true;
-                switch (msg->wParam)
-                {
-                case 'V': gui->pendingPaste      = true; break;
-                case 'C': gui->pendingCopy       = true; break;
-                case 'X': gui->pendingCut        = true; break;
-                case 'A': gui->pendingSelectAll  = true; break;
-                case 'Z':
-                    if (gui->wantTextInput) {
-                        if (::GetKeyState(VK_SHIFT) & 0x8000)
-                            gui->pendingRedo = true;
-                        else
-                            gui->pendingUndo = true;
-                    } else {
-                        consumed = false;
-                    }
-                    break;
-                case 'Y':
-                    if (gui->wantTextInput)
-                        gui->pendingRedo = true;
-                    else
-                        consumed = false;
-                    break;
-                default:  consumed = false;              break;
-                }
-                if (consumed)
-                    msg->message = WM_NULL;  /* prevents TranslateAcceleratorW match */
-            }
-        }
-    }
-    return ::CallNextHookEx(NULL, nCode, wParam, lParam);
-}
-#endif
-
-/* ---- Public C interface ---- */
-
-extern "C" {
-
-M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initial,
-                             const char *log_path)
-{
-    s_logPath = log_path;
-    gui_log("m4a_gui_create: begin");
-
-    if (!glfw_acquire()) {
-        gui_log("m4a_gui_create: glfwInit() failed");
-        return nullptr;
-    }
-    gui_log("m4a_gui_create: glfwInit() OK (refcount=%d)", s_glfwRefCount);
-
-    /* Request an OpenGL 3.3 core context */
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#ifdef __APPLE__
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-#endif
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);   /* hidden until show() */
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
-
-    GLFWwindow *window = glfwCreateWindow(
-        GUI_W, GUI_H, "poryaaaa", nullptr, nullptr);
-    if (!window) {
-        gui_log("m4a_gui_create: glfwCreateWindow() failed");
-        glfw_release();
-        return nullptr;
-    }
-    gui_log("m4a_gui_create: glfwCreateWindow() OK");
-
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1); /* vsync */
-
-    /* Set up Dear ImGui with a fresh context per instance */
-    ImGuiContext *ctx = ImGui::CreateContext();
-    ImGui::SetCurrentContext(ctx);
-
-    ImGuiIO &io = ImGui::GetIO();
-    io.IniFilename = nullptr;                      /* no .ini persistence */
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.FontGlobalScale = 1.2f;                     /* slightly larger text */
-
-    ImGui::StyleColorsDark();
-
-    /* Tweak style for a cleaner look */
-    ImGuiStyle &style = ImGui::GetStyle();
-    style.WindowPadding    = ImVec2(12, 12);
-    style.ItemSpacing      = ImVec2(8, 6);
-    style.FramePadding     = ImVec2(6, 4);
-    style.GrabMinSize      = 10.0f;
-    style.WindowRounding   = 4.0f;
-    style.FrameRounding    = 3.0f;
-    style.GrabRounding     = 3.0f;
-
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init("#version 330 core");
-
-    /* Allocate and populate state */
-    M4AGuiState *gui = new M4AGuiState();
-    gui->window       = window;
-    gui->imguiCtx     = ctx;
-    gui->host         = host;
-    gui->settingsChanged  = false;
-    gui->reloadRequested  = false;
-    gui->isEmbedded       = false;
-
-#if defined(_WIN32)
-    gui->msgHook          = NULL;
-    gui->pendingPaste     = false;
-    gui->pendingCopy      = false;
-    gui->pendingCut       = false;
-    gui->pendingSelectAll = false;
-    gui->pendingUndo      = false;
-    gui->pendingRedo      = false;
-    gui->wantTextInput    = false;
-#endif
-
-    if (initial) {
-        gui->settings = *initial;
-    } else {
-        memset(&gui->settings, 0, sizeof(gui->settings));
-        gui->settings.masterVolume     = 15;
-        gui->settings.songMasterVolume = 127;
-    }
-    sync_buffers(gui);
-
-    /* Store back-pointer for the close callback */
-    glfwSetWindowUserPointer(window, gui);
-
-    /* Intercept window close: hide instead of destroying, notify host */
-    glfwSetWindowCloseCallback(window, [](GLFWwindow *w) {
-        glfwSetWindowShouldClose(w, GLFW_FALSE);
-        glfwHideWindow(w);
-        auto *g = static_cast<M4AGuiState *>(glfwGetWindowUserPointer(w));
-        if (g) {
-            g->wasClosed = true;
-            if (g->host) {
-                auto *hostGui = static_cast<const clap_host_gui_t *>(
-                    g->host->get_extension(g->host, CLAP_EXT_GUI));
-                if (hostGui)
-                    hostGui->closed(g->host, false /* was_destroyed */);
-            }
-        }
-    });
-
-    gui_log("m4a_gui_create: success");
-    return gui;
-}
-
-void m4a_gui_destroy(M4AGuiState *gui)
-{
-    if (!gui)
-        return;
-
-    glfwMakeContextCurrent(gui->window);
     ImGui::SetCurrentContext(gui->imguiCtx);
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext(gui->imguiCtx);
-
-#if defined(_WIN32)
-    {
-        HWND hwnd = glfwGetWin32Window(gui->window);
-        if (gui->msgHook) {
-            ::UnhookWindowsHookEx(gui->msgHook);
-            gui->msgHook = NULL;
-        }
-        if (hwnd)
-            ::RemovePropA(hwnd, "M4A_GUI_STATE");
-    }
-#endif
-
-    glfwDestroyWindow(gui->window);
-    glfw_release();
-
-    delete gui;
-}
-
-bool m4a_gui_show(M4AGuiState *gui)
-{
-    gui_log("m4a_gui_show called (gui=%p)", (void*)gui);
-    if (!gui) return false;
-    glfwShowWindow(gui->window);
-    glfwFocusWindow(gui->window);
-    gui_log("m4a_gui_show: window shown");
-    return true;
-}
-
-bool m4a_gui_hide(M4AGuiState *gui)
-{
-    gui_log("m4a_gui_hide called");
-    if (!gui) return false;
-    glfwHideWindow(gui->window);
-    return true;
-}
-
-void m4a_gui_get_size(M4AGuiState *gui, uint32_t *width, uint32_t *height)
-{
-    if (!gui) {
-        *width  = (uint32_t)GUI_W;
-        *height = (uint32_t)GUI_H;
-        return;
-    }
-    int w, h;
-    glfwGetWindowSize(gui->window, &w, &h);
-    *width  = (uint32_t)w;
-    *height = (uint32_t)h;
-}
-
-void m4a_gui_update_settings(M4AGuiState *gui, const M4AGuiSettings *settings)
-{
-    if (!gui || !settings) return;
-    gui->settings = *settings;
-    sync_buffers(gui);
-}
-
-bool m4a_gui_poll_changes(M4AGuiState *gui, M4AGuiSettings *out, bool *reload_voicegroup)
-{
-    if (!gui || !gui->settingsChanged)
-        return false;
-
-    *out              = gui->settings;
-    *reload_voicegroup = gui->reloadRequested;
-    gui->settingsChanged  = false;
-    gui->reloadRequested  = false;
-    return true;
-}
-
-bool m4a_gui_was_closed(M4AGuiState *gui)
-{
-    return gui && gui->wasClosed;
-}
-
-void m4a_gui_tick(M4AGuiState *gui)
-{
-    if (!gui || !gui->window)
-        return;
-
-    /* Always pump GLFW events so OS messages are handled */
-    glfwPollEvents();
-
-    /* Skip rendering when window is hidden */
-    if (!glfwGetWindowAttrib(gui->window, GLFW_VISIBLE))
-        return;
-
-    glfwMakeContextCurrent(gui->window);
-    ImGui::SetCurrentContext(gui->imguiCtx);
-
-#if defined(_WIN32)
-    if (gui->isEmbedded) {
-        ImGuiIO &io = ImGui::GetIO();
-        const bool ctrlNowHeld = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
-
-        auto inject_ctrl_key = [&](ImGuiKey key) {
-            io.AddKeyEvent(ImGuiMod_Ctrl, true);
-            io.AddKeyEvent(key, true);
-            io.AddKeyEvent(key, false);
-            if (!ctrlNowHeld)
-                io.AddKeyEvent(ImGuiMod_Ctrl, false);
-        };
-
-        if (gui->pendingPaste)     { inject_ctrl_key(ImGuiKey_V); gui->pendingPaste     = false; }
-        if (gui->pendingCopy)      { inject_ctrl_key(ImGuiKey_C); gui->pendingCopy      = false; }
-        if (gui->pendingCut)       { inject_ctrl_key(ImGuiKey_X); gui->pendingCut       = false; }
-        if (gui->pendingSelectAll) { inject_ctrl_key(ImGuiKey_A); gui->pendingSelectAll = false; }
-
-        /* Cache WantTextInput for the hook to use next frame.
-           The hook only intercepts Z/Y when this is true, so if pendingUndo/Redo
-           is set, a text field was active — always inject into ImGui. */
-        gui->wantTextInput = ImGui::GetIO().WantTextInput;
-
-        if (gui->pendingUndo) { inject_ctrl_key(ImGuiKey_Z); gui->pendingUndo = false; }
-        if (gui->pendingRedo) { inject_ctrl_key(ImGuiKey_Y); gui->pendingRedo = false; }
-    }
-#endif
-
-    /* ---- New frame ---- */
     ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
+    ImGui_ImplPugl_NewFrame();
     ImGui::NewFrame();
 
-    /* Fill the entire GLFW window with a single ImGui window */
-    int fbW, fbH;
-    glfwGetFramebufferSize(gui->window, &fbW, &fbH);
+    uint32_t fbW = gui->cachedWidth;
+    uint32_t fbH = gui->cachedHeight;
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2((float)fbW, (float)fbH));
@@ -524,11 +194,284 @@ void m4a_gui_tick(M4AGuiState *gui)
 
     /* ---- Render ---- */
     ImGui::Render();
-    glViewport(0, 0, fbW, fbH);
+    glViewport(0, 0, (int)fbW, (int)fbH);
     glClearColor(0.12f, 0.12f, 0.12f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    glfwSwapBuffers(gui->window);
+    /* Pugl handles buffer swap */
+}
+
+/* ---- Pugl event handler ---- */
+
+static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
+{
+    M4AGuiState *gui = (M4AGuiState *)puglGetHandle(view);
+    if (!gui)
+        return PUGL_SUCCESS;
+
+    ImGui::SetCurrentContext(gui->imguiCtx);
+
+    switch (event->type)
+    {
+    case PUGL_REALIZE:
+        /* GL context is now current — initialize OpenGL ImGui backend */
+        if (!gui->glInited) {
+            ImGui_ImplOpenGL3_Init("#version 330 core");
+            gui->glInited = true;
+            gui_log("pugl_event_handler: PUGL_REALIZE, ImGui_ImplOpenGL3_Init done");
+        }
+        break;
+
+    case PUGL_UNREALIZE:
+        /* GL context is current — shut down OpenGL backend if still active.
+         * NOTE: puglFreeView() on Windows does NOT dispatch PUGL_UNREALIZE,
+         * so the explicit shutdown in m4a_gui_destroy() handles the normal
+         * teardown path.  This case handles any other unrealize scenario. */
+        if (gui->glInited) {
+            ImGui_ImplOpenGL3_Shutdown();
+            gui->glInited = false;
+            gui_log("pugl_event_handler: PUGL_UNREALIZE, ImGui_ImplOpenGL3_Shutdown done");
+        }
+        break;
+
+    case PUGL_CONFIGURE:
+        gui->cachedWidth  = event->configure.width;
+        gui->cachedHeight = event->configure.height;
+        break;
+
+    case PUGL_UPDATE:
+        /* Request a redraw on every update so we render continuously */
+        puglObscureView(view);
+        break;
+
+    case PUGL_EXPOSE:
+        /* GL context active and drawing is allowed */
+        if (gui->glInited)
+            render_frame(gui);
+        break;
+
+    case PUGL_CLOSE:
+        gui->wasClosed = true;
+        gui_log("pugl_event_handler: PUGL_CLOSE");
+        if (gui->host) {
+            const clap_host_gui_t *hostGui =
+                (const clap_host_gui_t *)gui->host->get_extension(gui->host, CLAP_EXT_GUI);
+            if (hostGui)
+                hostGui->closed(gui->host, false /* was_destroyed */);
+        }
+        break;
+
+    case PUGL_BUTTON_PRESS:
+        /* Claim keyboard focus so that subsequent key/text events are routed
+         * to our child window.  In embedded mode the host's message pump does
+         * not automatically give the child focus on click. */
+        puglGrabFocus(view);
+        ImGui_ImplPugl_ProcessEvent(event);
+        break;
+
+    default:
+        /* Forward all other input events to ImGui */
+        ImGui_ImplPugl_ProcessEvent(event);
+        break;
+    }
+
+    return PUGL_SUCCESS;
+}
+
+/* ---- Public C interface ---- */
+
+extern "C" {
+
+M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initial,
+                             const char *log_path)
+{
+    s_logPath = log_path;
+    gui_log("m4a_gui_create: begin");
+
+    M4AGuiState *gui = new M4AGuiState();
+    memset(gui, 0, sizeof(*gui));
+    gui->host         = host;
+    gui->cachedWidth  = (uint32_t)GUI_W;
+    gui->cachedHeight = (uint32_t)GUI_H;
+
+    if (initial) {
+        gui->settings = *initial;
+    } else {
+        memset(&gui->settings, 0, sizeof(gui->settings));
+        gui->settings.masterVolume     = 15;
+        gui->settings.songMasterVolume = 127;
+    }
+    sync_buffers(gui);
+
+    /* Create Pugl world and view */
+    gui->world = puglNewWorld(PUGL_MODULE, 0);
+    if (!gui->world) {
+        gui_log("m4a_gui_create: puglNewWorld failed");
+        delete gui;
+        return nullptr;
+    }
+    puglSetWorldString(gui->world, PUGL_CLASS_NAME, "poryaaaa");
+
+    gui->view = puglNewView(gui->world);
+    if (!gui->view) {
+        gui_log("m4a_gui_create: puglNewView failed");
+        puglFreeWorld(gui->world);
+        delete gui;
+        return nullptr;
+    }
+
+    /* Configure the view */
+    puglSetBackend(gui->view, puglGlBackend());
+    puglSetViewHint(gui->view, PUGL_CONTEXT_API,           PUGL_OPENGL_API);
+    puglSetViewHint(gui->view, PUGL_CONTEXT_VERSION_MAJOR, 3);
+    puglSetViewHint(gui->view, PUGL_CONTEXT_VERSION_MINOR, 3);
+    puglSetViewHint(gui->view, PUGL_CONTEXT_PROFILE,       PUGL_OPENGL_CORE_PROFILE);
+    puglSetViewHint(gui->view, PUGL_DOUBLE_BUFFER,         1);
+    puglSetViewHint(gui->view, PUGL_RESIZABLE,             1);
+    puglSetSizeHint(gui->view, PUGL_DEFAULT_SIZE, (PuglSpan)GUI_W, (PuglSpan)GUI_H);
+    puglSetSizeHint(gui->view, PUGL_MIN_SIZE,     (PuglSpan)200,   (PuglSpan)150);
+    puglSetViewString(gui->view, PUGL_WINDOW_TITLE, "poryaaaa");
+
+    puglSetHandle(gui->view, gui);
+    puglSetEventFunc(gui->view, pugl_event_handler);
+
+    /* Create ImGui context per instance */
+    ImGuiContext *ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(ctx);
+
+    ImGuiIO &io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.FontGlobalScale = 1.2f;
+
+    ImGui::StyleColorsDark();
+
+    ImGuiStyle &style = ImGui::GetStyle();
+    style.WindowPadding    = ImVec2(12, 12);
+    style.ItemSpacing      = ImVec2(8, 6);
+    style.FramePadding     = ImVec2(6, 4);
+    style.GrabMinSize      = 10.0f;
+    style.WindowRounding   = 4.0f;
+    style.FrameRounding    = 3.0f;
+    style.GrabRounding     = 3.0f;
+
+    ImGui_ImplPugl_Init(gui->view);
+
+    gui->imguiCtx = ctx;
+
+    /* Do NOT realize yet — that happens in set_parent() or show() */
+    gui_log("m4a_gui_create: success");
+    return gui;
+}
+
+void m4a_gui_destroy(M4AGuiState *gui)
+{
+    if (!gui)
+        return;
+
+    gui_log("m4a_gui_destroy: begin");
+
+    ImGui::SetCurrentContext(gui->imguiCtx);
+
+    /* puglFreeView() on Windows calls puglFreeViewInternals() which destroys
+     * the GL context WITHOUT dispatching PUGL_UNREALIZE first.  Explicitly
+     * enter the GL context and shut down the OpenGL backend before the view
+     * (and its context) are freed. */
+    if (gui->view && gui->glInited) {
+        puglEnterContext(gui->view);
+        ImGui_ImplOpenGL3_Shutdown();
+        gui->glInited = false;
+        puglLeaveContext(gui->view);
+        gui_log("m4a_gui_destroy: ImGui_ImplOpenGL3_Shutdown done");
+    }
+
+    ImGui_ImplPugl_Shutdown();
+
+    if (gui->view) {
+        puglFreeView(gui->view);
+        gui->view = nullptr;
+    }
+
+    ImGui::DestroyContext(gui->imguiCtx);
+    gui->imguiCtx = nullptr;
+
+    if (gui->world) {
+        puglFreeWorld(gui->world);
+        gui->world = nullptr;
+    }
+
+    delete gui;
+    gui_log("m4a_gui_destroy: done");
+}
+
+bool m4a_gui_set_parent(M4AGuiState *gui, uintptr_t native_parent)
+{
+    gui_log("m4a_gui_set_parent: parent=0x%zx", (size_t)native_parent);
+    if (!gui || !gui->view) return false;
+    if (gui->realized) {
+        gui_log("m4a_gui_set_parent: already realized");
+        return false;
+    }
+
+    puglSetParent(gui->view, (PuglNativeView)native_parent);
+
+    PuglStatus st = puglRealize(gui->view);
+    if (st != PUGL_SUCCESS) {
+        gui_log("m4a_gui_set_parent: puglRealize failed (%d)", (int)st);
+        return false;
+    }
+    gui->realized   = true;
+    gui->isEmbedded = true;
+    gui_log("m4a_gui_set_parent: success");
+    return true;
+}
+
+bool m4a_gui_show(M4AGuiState *gui)
+{
+    gui_log("m4a_gui_show called");
+    if (!gui || !gui->view) return false;
+
+    if (!gui->realized) {
+        /* Floating mode: realize now (no parent) */
+        PuglStatus st = puglRealize(gui->view);
+        if (st != PUGL_SUCCESS) {
+            gui_log("m4a_gui_show: puglRealize failed (%d)", (int)st);
+            return false;
+        }
+        gui->realized = true;
+        gui_log("m4a_gui_show: realized as floating");
+    }
+
+    puglShow(gui->view, PUGL_SHOW_RAISE);
+    gui_log("m4a_gui_show: shown");
+    return true;
+}
+
+bool m4a_gui_hide(M4AGuiState *gui)
+{
+    gui_log("m4a_gui_hide called");
+    if (!gui || !gui->view) return false;
+    puglHide(gui->view);
+    return true;
+}
+
+void m4a_gui_get_size(M4AGuiState *gui, uint32_t *width, uint32_t *height)
+{
+    if (!gui) {
+        *width  = (uint32_t)GUI_W;
+        *height = (uint32_t)GUI_H;
+        return;
+    }
+    *width  = gui->cachedWidth;
+    *height = gui->cachedHeight;
+}
+
+bool m4a_gui_set_size(M4AGuiState *gui, uint32_t width, uint32_t height)
+{
+    if (!gui || !gui->view) return false;
+    gui_log("m4a_gui_set_size: %ux%u", width, height);
+    puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE, (PuglSpan)width, (PuglSpan)height);
+    return true;
 }
 
 bool m4a_gui_can_resize(M4AGuiState *gui)
@@ -536,66 +479,40 @@ bool m4a_gui_can_resize(M4AGuiState *gui)
     return gui && gui->isEmbedded;
 }
 
-bool m4a_gui_set_size(M4AGuiState *gui, uint32_t width, uint32_t height)
+void m4a_gui_update_settings(M4AGuiState *gui, const M4AGuiSettings *settings)
 {
-    if (!gui) return false;
-    gui_log("m4a_gui_set_size: %ux%u", width, height);
-#if defined(_WIN32)
-    if (gui->isEmbedded) {
-        HWND hwnd = glfwGetWin32Window(gui->window);
-        if (hwnd) {
-            SetWindowPos(hwnd, nullptr, 0, 0, (int)width, (int)height,
-                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
-            return true;
-        }
-    }
-#endif
-    glfwSetWindowSize(gui->window, (int)width, (int)height);
-    return true;
+    if (!gui || !settings) return;
+    gui->settings = *settings;
+    sync_buffers(gui);
 }
 
-#if defined(_WIN32)
-bool m4a_gui_set_parent_win32(M4AGuiState *gui, void *parentHwnd)
+bool m4a_gui_poll_changes(M4AGuiState *gui, M4AGuiSettings *out, bool *reload_voicegroup)
 {
-    if (!gui || !parentHwnd) return false;
-
-    HWND hwnd = glfwGetWin32Window(gui->window);
-    if (!hwnd) {
-        gui_log("m4a_gui_set_parent: glfwGetWin32Window returned NULL");
+    if (!gui || !gui->settingsChanged)
         return false;
-    }
-    gui_log("m4a_gui_set_parent: hwnd=%p parent=%p", (void *)hwnd, parentHwnd);
 
-    /* Convert from a top-level window to a child window */
-    LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
-    style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
-               WS_SYSMENU | WS_POPUP);
-    style |= WS_CHILD;
-    SetWindowLongPtr(hwnd, GWL_STYLE, style);
-
-    LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
-    exStyle &= ~(WS_EX_APPWINDOW | WS_EX_OVERLAPPEDWINDOW | WS_EX_TOPMOST);
-    SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle);
-
-    /* Re-parent and position at origin of the host's client area */
-    SetParent(hwnd, (HWND)parentHwnd);
-    SetWindowPos(hwnd, nullptr, 0, 0, GUI_W, GUI_H,
-                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-
-    ::SetPropA(hwnd, "M4A_GUI_STATE", gui);
-
-    gui->msgHook = ::SetWindowsHookExW(
-        WH_GETMESSAGE, m4a_get_msg_hook,
-        NULL, ::GetCurrentThreadId());
-    if (!gui->msgHook)
-        gui_log("m4a_gui_set_parent: SetWindowsHookExW failed (err=%lu)", ::GetLastError());
-    else
-        gui_log("m4a_gui_set_parent: WH_GETMESSAGE hook installed");
-
-    gui->isEmbedded = true;
-    gui_log("m4a_gui_set_parent: success (embedded)");
+    *out               = gui->settings;
+    *reload_voicegroup = gui->reloadRequested;
+    gui->settingsChanged  = false;
+    gui->reloadRequested  = false;
     return true;
 }
-#endif
+
+bool m4a_gui_was_closed(M4AGuiState *gui)
+{
+    return gui && gui->wasClosed;
+}
+
+void m4a_gui_tick(M4AGuiState *gui)
+{
+    if (!gui || !gui->world)
+        return;
+
+    /* Schedule a redraw, then process events (non-blocking) */
+    if (gui->view && gui->realized)
+        puglObscureView(gui->view);
+
+    puglUpdate(gui->world, 0.0);
+}
 
 } /* extern "C" */

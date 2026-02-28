@@ -6,9 +6,9 @@
  * lightweight alternative that:
  *
  *   1. Uses clap-wrapper's mainCreatePlugin / mainStartAudio for audio & MIDI.
- *   2. Creates the plugin's CLAP GUI (GLFW/ImGui) as a floating window.
+ *   2. Creates the plugin's CLAP GUI (Pugl/ImGui) as a floating window.
  *   3. Drives GUI rendering via a Win32 timer that calls on_timer directly.
- *   4. Runs a standard Windows message pump until the GLFW window is closed.
+ *   4. Runs a standard Windows message pump until the Pugl window is closed.
  */
 
 #include <windows.h>
@@ -97,10 +97,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* --- 4. Create and show the plugin GUI --- */
+    /* --- 4. Create and show the plugin GUI as a floating window --- */
     if (plugin->_ext._gui)
     {
-        plugin->_ext._gui->create(plugin->_plugin, CLAP_WINDOW_API_WIN32, false);
+        plugin->_ext._gui->create(plugin->_plugin, CLAP_WINDOW_API_WIN32, true);
 
         uint32_t w = 0, h = 0;
         plugin->_ext._gui->get_size(plugin->_plugin, &w, &h);

@@ -4,16 +4,6 @@ project(poryaaaa C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-# ---- GLFW ----
-set(GLFW_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
-# Disable Wayland on Linux to avoid requiring wayland-scanner at build time;
-# the compiled plugin will still use whichever display server the DAW runs on.
-set(GLFW_BUILD_WAYLAND  OFF CACHE BOOL "" FORCE)
-add_subdirectory(glfw)
-
 # ---- CLAP SDK ----
 set(CLAP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(clap-sdk)
@@ -31,6 +21,36 @@ if(TARGET clap-wrapper-compile-options)
     endif()
 endif()
 
+# ---- Pugl ----
+set(PUGL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pugl)
+
+# Platform-specific Pugl sources
+if(WIN32)
+    set(PUGL_PLATFORM_SOURCES
+        ${PUGL_DIR}/src/win.c
+        ${PUGL_DIR}/src/win_gl.c
+        ${PUGL_DIR}/src/win_stub.c
+    )
+elseif(APPLE)
+    set(PUGL_PLATFORM_SOURCES
+        ${PUGL_DIR}/src/mac.m
+        ${PUGL_DIR}/src/mac_gl.m
+        ${PUGL_DIR}/src/mac_stub.m
+    )
+else()
+    set(PUGL_PLATFORM_SOURCES
+        ${PUGL_DIR}/src/x11.c
+        ${PUGL_DIR}/src/x11_gl.c
+        ${PUGL_DIR}/src/x11_stub.c
+    )
+endif()
+
+set(PUGL_SOURCES
+    ${PUGL_DIR}/src/common.c
+    ${PUGL_DIR}/src/internal.c
+    ${PUGL_PLATFORM_SOURCES}
+)
+
 # ---- Dear ImGui ----
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/imgui)
 set(IMGUI_SOURCES
@@ -38,8 +58,8 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
     ${IMGUI_DIR}/imgui_widgets.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
     ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    plugin/imgui_impl_pugl.cpp
 )
 
 # Common source files (shared between plugin and test)
@@ -57,13 +77,18 @@ add_library(poryaaaa MODULE
     plugin/m4a_gui.cpp
     ${ENGINE_SOURCES}
     ${IMGUI_SOURCES}
+    ${PUGL_SOURCES}
 )
 
 target_include_directories(poryaaaa PRIVATE
     plugin
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
+    ${PUGL_DIR}/include
 )
+
+# Build Pugl as a static library (not a DLL) on all platforms
+target_compile_definitions(poryaaaa PRIVATE PUGL_STATIC)
 
 # Use C++ linker (required because we mix C and C++ sources)
 set_target_properties(poryaaaa PROPERTIES
@@ -72,15 +97,15 @@ set_target_properties(poryaaaa PROPERTIES
     LINKER_LANGUAGE CXX
 )
 
-target_link_libraries(poryaaaa PRIVATE clap glfw)
+target_link_libraries(poryaaaa PRIVATE clap)
 
 if(UNIX AND NOT APPLE)
-    target_link_libraries(poryaaaa PRIVATE m)
+    target_link_libraries(poryaaaa PRIVATE m X11 Xcursor Xrandr Xext)
 endif()
 
 # OpenGL
 if(APPLE)
-    target_link_libraries(poryaaaa PRIVATE "-framework OpenGL")
+    target_link_libraries(poryaaaa PRIVATE "-framework OpenGL" "-framework Cocoa")
 elseif(WIN32)
     target_link_libraries(poryaaaa PRIVATE opengl32)
 else()
@@ -89,7 +114,7 @@ endif()
 
 # Platform-specific settings
 if(WIN32)
-    target_link_libraries(poryaaaa PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(poryaaaa PRIVATE dwmapi -static-libgcc -static-libstdc++)
 elseif(APPLE)
     set_target_properties(poryaaaa PROPERTIES
         BUNDLE TRUE
@@ -145,23 +170,28 @@ add_executable(poryaaaa-standalone
     plugin/m4a_gui.cpp
     ${ENGINE_SOURCES}
     ${IMGUI_SOURCES}
+    ${PUGL_SOURCES}
 )
 target_include_directories(poryaaaa-standalone PRIVATE
     plugin
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
+    ${PUGL_DIR}/include
 )
 set_target_properties(poryaaaa-standalone PROPERTIES
     LINKER_LANGUAGE CXX
 )
-target_link_libraries(poryaaaa-standalone PRIVATE clap glfw)
+
+# Build Pugl as a static library (not a DLL) on all platforms
+target_compile_definitions(poryaaaa-standalone PRIVATE PUGL_STATIC)
+target_link_libraries(poryaaaa-standalone PRIVATE clap)
 
 if(UNIX AND NOT APPLE)
-    target_link_libraries(poryaaaa-standalone PRIVATE m GL)
+    target_link_libraries(poryaaaa-standalone PRIVATE m GL X11 Xcursor Xrandr Xext)
 elseif(APPLE)
-    target_link_libraries(poryaaaa-standalone PRIVATE "-framework OpenGL")
+    target_link_libraries(poryaaaa-standalone PRIVATE "-framework OpenGL" "-framework Cocoa")
 elseif(WIN32)
-    target_link_libraries(poryaaaa-standalone PRIVATE opengl32 -static-libgcc -static-libstdc++)
+    target_link_libraries(poryaaaa-standalone PRIVATE opengl32 dwmapi -static-libgcc -static-libstdc++)
 endif()
 
 target_add_standalone_wrapper(

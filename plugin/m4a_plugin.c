@@ -569,13 +569,18 @@ static void plugin_log(const char *fmt, ...)
 static bool gui_is_api_supported(const clap_plugin_t *plugin, const char *api, bool is_floating)
 {
     (void)plugin;
+    bool supported = false;
+    if (is_floating) {
+        supported = true;
+    } else if (api) {
 #if defined(_WIN32)
-    /* Support Win32 embedded (preferred by Reaper) and all floating */
-    bool supported = is_floating ||
-                     (!is_floating && api && strcmp(api, CLAP_WINDOW_API_WIN32) == 0);
+        supported = (strcmp(api, CLAP_WINDOW_API_WIN32) == 0);
+#elif defined(__APPLE__)
+        supported = (strcmp(api, CLAP_WINDOW_API_COCOA) == 0);
 #else
-    bool supported = is_floating;
+        supported = (strcmp(api, CLAP_WINDOW_API_X11) == 0);
 #endif
+    }
     plugin_log("gui_is_api_supported: api=%s floating=%d -> %d",
                api ? api : "(null)", is_floating, supported);
     return supported;
@@ -585,16 +590,14 @@ static bool gui_get_preferred_api(const clap_plugin_t *plugin,
                                   const char **api, bool *is_floating)
 {
     (void)plugin;
-#if defined(_WIN32)
-    /* Prefer embedded on Windows so hosts like Reaper show us in-line */
-    *api = CLAP_WINDOW_API_WIN32;
+    /* Prefer embedded on all platforms */
     *is_floating = false;
+#if defined(_WIN32)
+    *api = CLAP_WINDOW_API_WIN32;
 #elif defined(__APPLE__)
     *api = CLAP_WINDOW_API_COCOA;
-    *is_floating = true;
 #else
     *api = CLAP_WINDOW_API_X11;
-    *is_floating = true;
 #endif
     return true;
 }
@@ -603,13 +606,7 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
 {
     plugin_log("gui_create: api=%s floating=%d", api ? api : "(null)", is_floating);
     (void)api;
-#if !defined(_WIN32)
-    /* On non-Windows platforms we only support floating windows */
-    if (!is_floating) {
-        plugin_log("gui_create: rejecting (not floating, non-Windows)");
-        return false;
-    }
-#endif
+    (void)is_floating;
 
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
 
@@ -665,7 +662,7 @@ static bool gui_set_scale(const clap_plugin_t *plugin, double scale)
 {
     (void)plugin;
     (void)scale;
-    return false; /* GLFW handles DPI internally */
+    return false; /* Pugl handles DPI internally */
 }
 
 static bool gui_get_size(const clap_plugin_t *plugin, uint32_t *width, uint32_t *height)
@@ -710,14 +707,16 @@ static bool gui_set_size(const clap_plugin_t *plugin, uint32_t width, uint32_t h
 static bool gui_set_parent(const clap_plugin_t *plugin, const clap_window_t *window)
 {
     plugin_log("gui_set_parent called");
-#if defined(_WIN32)
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
-    return m4a_gui_set_parent_win32(data->gui, window->win32);
+    uintptr_t parent = 0;
+#if defined(_WIN32)
+    parent = (uintptr_t)window->win32;
+#elif defined(__APPLE__)
+    parent = (uintptr_t)window->cocoa;
 #else
-    (void)plugin;
-    (void)window;
-    return false;
+    parent = (uintptr_t)window->x11;
 #endif
+    return m4a_gui_set_parent(data->gui, parent);
 }
 
 static bool gui_set_transient(const clap_plugin_t *plugin, const clap_window_t *window)

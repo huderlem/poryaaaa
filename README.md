@@ -166,8 +166,9 @@ On Windows the GUI is embedded inside the DAW's FX window. On Linux/macOS it ope
 
 Requires CMake 3.16+, a C11/C++17 compiler, and the following development libraries on Linux:
 
-```
-libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev libgl-dev
+```bash
+sudo apt-get install build-essential cmake
+sudo apt-get install libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev libgl-dev
 ```
 
 ```bash

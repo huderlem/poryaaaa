@@ -50,13 +50,13 @@ bool m4a_gui_set_size(M4AGuiState *gui, uint32_t width, uint32_t height);
 /* Returns true if the host may resize us (i.e. we are in embedded mode). */
 bool m4a_gui_can_resize(M4AGuiState *gui);
 
-#if defined(_WIN32)
 /*
- * Embed the plugin window as a Win32 child of the host's HWND.
- * Must be called after m4a_gui_create() and before m4a_gui_show().
+ * Embed the plugin window as a child of the host's native view.
+ * native_parent is a platform-native handle (HWND on Win32, NSView* on macOS,
+ * Window (XID) on X11). Must be called after m4a_gui_create() and before
+ * m4a_gui_show().
  */
-bool m4a_gui_set_parent_win32(M4AGuiState *gui, void *parentHwnd);
-#endif
+bool m4a_gui_set_parent(M4AGuiState *gui, uintptr_t native_parent);
 
 /*
  * Poll events and render one frame. Call from the CLAP timer callback (~60 Hz).
