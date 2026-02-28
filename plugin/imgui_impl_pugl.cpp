@@ -265,7 +265,12 @@ void ImGui_ImplPugl_ProcessEvent(const PuglEvent* event)
         break;
 
     case PUGL_POINTER_OUT:
-        io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+        /* When embedded in a DAW host on X11, the host may grab the pointer on
+           click, causing a LeaveNotify (PUGL_POINTER_OUT) even though the cursor
+           is still over our window.  Ignore the leave if any mouse button is
+           held so that clicks and drags continue to work. */
+        if (!io.MouseDown[0] && !io.MouseDown[1] && !io.MouseDown[2])
+            io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
         break;
 
     case PUGL_DATA_OFFER:
