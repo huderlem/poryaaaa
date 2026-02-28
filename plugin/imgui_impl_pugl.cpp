@@ -266,10 +266,10 @@ void ImGui_ImplPugl_ProcessEvent(const PuglEvent* event)
 
     case PUGL_POINTER_OUT:
         /* When embedded in a DAW host on X11, the host may grab the pointer on
-           click, causing a LeaveNotify (PUGL_POINTER_OUT) even though the cursor
-           is still over our window.  Ignore the leave if any mouse button is
-           held so that clicks and drags continue to work. */
-        if (!io.MouseDown[0] && !io.MouseDown[1] && !io.MouseDown[2])
+           click, causing a LeaveNotify even though the cursor is still over our
+           window.  Pugl reports this as PUGL_CROSSING_GRAB.  Only invalidate
+           the mouse position for real leaves (PUGL_CROSSING_NORMAL). */
+        if (event->crossing.mode == PUGL_CROSSING_NORMAL)
             io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
         break;
 
