@@ -214,3 +214,13 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         ${CMAKE_CURRENT_SOURCE_DIR}/clap-wrapper/src
     )
 endif()
+
+if(UNIX AND NOT APPLE)
+    get_target_property(_sa_sources_lin poryaaaa-standalone SOURCES)
+    list(FILTER _sa_sources_lin EXCLUDE REGEX "wrapasstandalone\\.cpp$")
+    set_target_properties(poryaaaa-standalone PROPERTIES SOURCES "${_sa_sources_lin}")
+    target_sources(poryaaaa-standalone PRIVATE plugin/standalone_main_linux.cpp)
+    target_include_directories(poryaaaa-standalone PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/clap-wrapper/src
+    )
+endif()
