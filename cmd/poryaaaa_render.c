@@ -160,6 +160,7 @@ typedef struct {
 typedef struct {
     uint64_t tick;
     uint8_t  channel;
+    uint8_t  track;    /* SMF track index (MTrk chunk number) */
     uint8_t  type;   /* nibble: 0x8=off, 0x9=on, 0xB=cc, 0xC=pc, 0xE=pb */
     uint8_t  data0;
     uint8_t  data1;
@@ -170,6 +171,7 @@ typedef struct {
 typedef struct {
     uint64_t samplePos;
     uint8_t  channel;
+    uint8_t  track;    /* SMF track index */
     uint8_t  type;
     uint8_t  data0;
     uint8_t  data1;
@@ -225,7 +227,7 @@ static bool text_is_loop_marker(const uint8_t *buf, uint32_t len, char marker)
  * Loop markers ('[' and ']') found in text/marker meta events are written to
  * *loopStartTick / *loopEndTick (first occurrence wins; UINT64_MAX = not found).
  */
-static void parse_track(MidiReader *r, uint32_t trackLen,
+static void parse_track(MidiReader *r, uint32_t trackLen, uint8_t trackIndex,
                          RawEventArray *rawEvents, TempoArray *tempos,
                          uint64_t *loopStartTick, uint64_t *loopEndTick)
 {
@@ -306,14 +308,14 @@ static void parse_track(MidiReader *r, uint32_t trackLen,
             case 0x8: { /* Note Off */
                 uint8_t vel;
                 if (mr_read_byte(r, &vel) < 0) goto track_done;
-                RawMidiEvent ev = { tick, chan, 0x8, data0, vel, 0 };
+                RawMidiEvent ev = { tick, chan, trackIndex, 0x8, data0, vel, 0 };
                 raw_push(rawEvents, ev);
                 break;
             }
             case 0x9: { /* Note On (vel=0 → note off) */
                 uint8_t vel;
                 if (mr_read_byte(r, &vel) < 0) goto track_done;
-                RawMidiEvent ev = { tick, chan, vel ? (uint8_t)0x9 : (uint8_t)0x8, data0, vel, 0 };
+                RawMidiEvent ev = { tick, chan, trackIndex, vel ? (uint8_t)0x9 : (uint8_t)0x8, data0, vel, 0 };
                 raw_push(rawEvents, ev);
                 break;
             }
@@ -325,12 +327,12 @@ static void parse_track(MidiReader *r, uint32_t trackLen,
             case 0xB: { /* Control Change */
                 uint8_t val;
                 if (mr_read_byte(r, &val) < 0) goto track_done;
-                RawMidiEvent ev = { tick, chan, 0xB, data0, val, 0 };
+                RawMidiEvent ev = { tick, chan, trackIndex, 0xB, data0, val, 0 };
                 raw_push(rawEvents, ev);
                 break;
             }
             case 0xC: { /* Program Change (1 data byte) */
-                RawMidiEvent ev = { tick, chan, 0xC, data0, 0, 0 };
+                RawMidiEvent ev = { tick, chan, trackIndex, 0xC, data0, 0, 0 };
                 raw_push(rawEvents, ev);
                 break;
             }
@@ -340,7 +342,7 @@ static void parse_track(MidiReader *r, uint32_t trackLen,
             case 0xE: { /* Pitch Bend (2 data bytes: LSB already in data0) */
                 uint8_t msb;
                 if (mr_read_byte(r, &msb) < 0) goto track_done;
-                RawMidiEvent ev = { tick, chan, 0xE, data0, msb, 0 };
+                RawMidiEvent ev = { tick, chan, trackIndex, 0xE, data0, msb, 0 };
                 raw_push(rawEvents, ev);
                 break;
             }
@@ -420,7 +422,8 @@ typedef struct {
 static RenderEventArray *parse_midi(const char *path, double sampleRate,
                                      uint64_t *totalMidiSamples,
                                      uint64_t *loopStartSampleOut,
-                                     uint64_t *loopEndSampleOut)
+                                     uint64_t *loopEndSampleOut,
+                                     uint16_t *midiFormatOut)
 {
     *loopStartSampleOut = UINT64_MAX;
     *loopEndSampleOut   = UINT64_MAX;
@@ -470,6 +473,7 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
         free(buf); return NULL;
     }
 
+    *midiFormatOut = format;
     uint32_t tpqn = division; /* ticks per quarter note */
 
     RawEventArray rawEvents    = { NULL, 0, 0 };
@@ -488,7 +492,7 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
         uint32_t trackLen;
         if (mr_read_u32_be(&r, &trackLen) < 0) break;
         size_t trackEnd = r.pos + trackLen;
-        parse_track(&r, trackLen, &rawEvents, &tempos, &loopStartTick, &loopEndTick);
+        parse_track(&r, trackLen, (uint8_t)t, &rawEvents, &tempos, &loopStartTick, &loopEndTick);
         r.pos = trackEnd;
     }
 
@@ -539,6 +543,7 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
                                                       tempos.events, tempos.count,
                                                       tpqn, sampleRate);
         result->events[i].channel   = re->channel;
+        result->events[i].track     = re->track;
         result->events[i].type      = re->type;
         result->events[i].data0     = re->data0;
         result->events[i].data1     = re->data1;
@@ -644,25 +649,31 @@ static void print_usage(const char *prog)
 }
 
 /* Dispatch one RenderEvent to the engine */
-static void dispatch_event(M4AEngine *engine, const RenderEvent *ev)
+static void dispatch_event(M4AEngine *engine, const RenderEvent *ev,
+                            int useTrackIndex)
 {
+    /* For Type 1 MIDIs, use the SMF track number as the engine track index
+     * so that tracks sharing the same MIDI channel get separate engine tracks.
+     * For Type 0, fall back to MIDI channel. */
+    int trackIdx = useTrackIndex ? ev->track : ev->channel;
+
     switch (ev->type) {
     case 0x8: /* Note Off */
-        m4a_engine_note_off(engine, ev->channel, ev->data0);
+        m4a_engine_note_off(engine, trackIdx, ev->data0);
         break;
     case 0x9: /* Note On */
-        m4a_engine_note_on(engine, ev->channel, ev->data0, ev->data1);
+        m4a_engine_note_on(engine, trackIdx, ev->data0, ev->data1);
         break;
     case 0xB: /* Control Change */
-        m4a_engine_cc(engine, ev->channel, ev->data0, ev->data1);
+        m4a_engine_cc(engine, trackIdx, ev->data0, ev->data1);
         break;
     case 0xC: /* Program Change */
-        m4a_engine_program_change(engine, ev->channel, ev->data0);
+        m4a_engine_program_change(engine, trackIdx, ev->data0);
         break;
     case 0xE: /* Pitch Bend — convert MIDI 14-bit unsigned to signed -8192..+8191 */
     {
         int16_t bend = (int16_t)(((int)(ev->data1 << 7) | ev->data0) - 8192);
-        m4a_engine_pitch_bend(engine, ev->channel, bend);
+        m4a_engine_pitch_bend(engine, trackIdx, bend);
         break;
     }
     }
@@ -767,9 +778,16 @@ int main(int argc, char *argv[])
     uint64_t totalMidiSamples = 0;
     uint64_t loopStartSample  = UINT64_MAX;
     uint64_t loopEndSample    = UINT64_MAX;
+    uint16_t midiFormat       = 0;
     RenderEventArray *events = parse_midi(midiPath, sampleRate, &totalMidiSamples,
-                                           &loopStartSample, &loopEndSample);
+                                           &loopStartSample, &loopEndSample,
+                                           &midiFormat);
     if (!events) return 1;
+
+    /* For Type 1 MIDI files, use SMF track numbers as engine track indices.
+     * This handles files where multiple tracks share the same MIDI channel
+     * (each track gets its own program/voice in the M4A engine). */
+    int useTrackIndex = (midiFormat == 1);
 
     printf("  %d MIDI events, raw duration: %.2f s\n",
            events->count, (double)totalMidiSamples / sampleRate);
@@ -941,7 +959,7 @@ oom:
                           ev->samplePos - samplePos);
 
         samplePos = ev->samplePos;
-        dispatch_event(&engine, ev);
+        dispatch_event(&engine, ev, useTrackIndex);
     }
 
     /* Render remaining frames (tail / fadeout section) */
