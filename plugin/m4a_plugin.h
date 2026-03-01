@@ -19,6 +19,10 @@ typedef struct {
     uint8_t maxPcmChannels;
     bool activated;
 
+    /* Voice editor: snapshot of original voices and per-voice override flags */
+    ToneData originalVoices[VOICEGROUP_SIZE];
+    bool voiceOverrides[VOICEGROUP_SIZE];
+
     /* GUI */
     const clap_host_t *host;
     M4AGuiState *gui;

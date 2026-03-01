@@ -100,6 +100,7 @@ typedef struct {
     uint8_t pseudoEchoVolume;
     uint8_t pseudoEchoLength;
     uint8_t priority;
+    uint8_t currentProgram; /* last program_change index (0-127) */
     ToneData currentVoice;  /* current instrument */
 } M4ATrack;
 
@@ -229,6 +230,10 @@ void m4a_engine_destroy(M4AEngine *engine);
 
 /* Set voicegroup (must be loaded by voicegroup_loader) */
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup);
+
+/* Re-copy voiceGroup[currentProgram] into each track's currentVoice.
+ * Call after editing voicegroup entries to propagate changes to active tracks. */
+void m4a_engine_refresh_voices(M4AEngine *engine);
 
 /* MIDI event handling */
 void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity);

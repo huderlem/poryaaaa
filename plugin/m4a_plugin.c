@@ -225,10 +225,20 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
                                          &data->loaderConfig);
         if (data->loadedVg) {
             m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
+            memcpy(data->originalVoices, data->loadedVg->voices, sizeof(data->originalVoices));
+            memset(data->voiceOverrides, 0, sizeof(data->voiceOverrides));
         }
     }
 
     data->activated = true;
+
+    /* Update voice data pointers for the GUI */
+    if (data->gui) {
+        if (data->loadedVg)
+            m4a_gui_set_voice_data(data->gui, data->loadedVg->voices, data->originalVoices, data->voiceOverrides);
+        else
+            m4a_gui_set_voice_data(data->gui, NULL, NULL, NULL);
+    }
 
     /* Notify GUI of current voicegroup status */
     if (data->gui) {
@@ -251,6 +261,8 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
 static void plugin_deactivate(const clap_plugin_t *plugin)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    if (data->gui)
+        m4a_gui_set_voice_data(data->gui, NULL, NULL, NULL);
     m4a_engine_destroy(&data->engine);
     data->activated = false;
 }
@@ -518,8 +530,11 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
             }
             data->loadedVg = voicegroup_load(data->projectRoot, data->voicegroupName,
                                              &data->loaderConfig);
-            if (data->loadedVg)
+            if (data->loadedVg) {
                 m4a_engine_set_voicegroup(&data->engine, data->loadedVg->voices);
+                memcpy(data->originalVoices, data->loadedVg->voices, sizeof(data->originalVoices));
+                memset(data->voiceOverrides, 0, sizeof(data->voiceOverrides));
+            }
         }
         data->engine.masterVolume = data->masterVolume;
         data->engine.songMasterVolume = data->songMasterVolume;
@@ -541,6 +556,10 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         gs.maxPcmChannels   = data->maxPcmChannels;
         gs.voicegroupLoaded = (data->loadedVg != NULL);
         m4a_gui_update_settings(data->gui, &gs);
+        if (data->loadedVg)
+            m4a_gui_set_voice_data(data->gui, data->loadedVg->voices, data->originalVoices, data->voiceOverrides);
+        else
+            m4a_gui_set_voice_data(data->gui, NULL, NULL, NULL);
     }
 
     return true;
@@ -626,6 +645,11 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
         plugin_log("gui_create: m4a_gui_create() returned NULL");
         return false;
     }
+
+    /* Wire voice data pointers if voicegroup is already loaded */
+    if (data->loadedVg)
+        m4a_gui_set_voice_data(data->gui, data->loadedVg->voices, data->originalVoices, data->voiceOverrides);
+
     plugin_log("gui_create: success");
 
     /* Register a ~60 Hz timer to drive GUI rendering */
@@ -778,6 +802,23 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
 
     /* Render one GUI frame */
     m4a_gui_tick(data->gui);
+
+    /* Handle voice restore requests from the voice editor */
+    int restoreIdx;
+    bool voicesChanged = false;
+    while (m4a_gui_poll_voice_restore(data->gui, &restoreIdx)) {
+        if (data->loadedVg && restoreIdx >= 0 && restoreIdx < VOICEGROUP_SIZE) {
+            data->loadedVg->voices[restoreIdx] = data->originalVoices[restoreIdx];
+            data->voiceOverrides[restoreIdx] = false;
+            voicesChanged = true;
+        }
+    }
+
+    /* If any voice was edited or restored, refresh active tracks */
+    if (m4a_gui_poll_voices_dirty(data->gui))
+        voicesChanged = true;
+    if (voicesChanged && data->activated)
+        m4a_engine_refresh_voices(&data->engine);
 
     /* Apply any settings the user changed */
     M4AGuiSettings gs;

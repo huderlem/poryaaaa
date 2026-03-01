@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <clap/clap.h>
+#include "m4a_engine.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -81,6 +82,27 @@ void m4a_gui_update_settings(M4AGuiState *gui, const M4AGuiSettings *settings);
  * *reload_voicegroup is set to true if the user pressed "Reload".
  */
 bool m4a_gui_poll_changes(M4AGuiState *gui, M4AGuiSettings *out, bool *reload_voicegroup);
+
+/*
+ * Provide the GUI with direct pointers to voice data for the voice editor tab.
+ * Pass NULL for all pointers to clear (e.g. when voicegroup is unloaded).
+ */
+void m4a_gui_set_voice_data(M4AGuiState *gui,
+                             ToneData *liveVoices,
+                             const ToneData *originalVoices,
+                             bool *overrides);
+
+/*
+ * Poll for a voice restore request. Returns true if the user clicked
+ * "Restore Original" on a voice. *voiceIndex receives the voice index.
+ */
+bool m4a_gui_poll_voice_restore(M4AGuiState *gui, int *voiceIndex);
+
+/*
+ * Returns true (and clears) if any voice was edited since the last poll.
+ * The plugin should call m4a_engine_refresh_voices() to propagate changes.
+ */
+bool m4a_gui_poll_voices_dirty(M4AGuiState *gui);
 
 #ifdef __cplusplus
 }

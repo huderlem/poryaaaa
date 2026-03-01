@@ -48,7 +48,7 @@ static void gui_log(const char *fmt, ...)
 /* ---- Constants ---- */
 
 static const int GUI_W = 540;
-static const int GUI_H = 350;
+static const int GUI_H = 500;
 
 /* ---- GUI state ---- */
 
@@ -81,6 +81,14 @@ struct M4AGuiState {
 
     /* True after the user closes the floating window */
     bool wasClosed;
+
+    /* Voice editor state */
+    ToneData *liveVoices;
+    const ToneData *originalVoices;
+    bool *voiceOverrides;
+    int selectedVoice;
+    int pendingRestoreVoice;  /* -1 = none */
+    bool voicesDirty;         /* set when any voice param is edited */
 };
 
 /* ---- Internal helpers ---- */
@@ -93,38 +101,53 @@ static void sync_buffers(M4AGuiState *gui)
              "%s", gui->settings.voicegroupName);
 }
 
-/* Render a single ImGui frame — called from PUGL_EXPOSE. */
-static void render_frame(M4AGuiState *gui)
+/* ---- Voice type helpers ---- */
+
+static const char *voice_type_name(uint8_t type)
 {
-    ImGui::SetCurrentContext(gui->imguiCtx);
+    uint8_t base = type & ~VOICE_TYPE_FIX;
+    switch (base) {
+    case 0x00: return "DirectSound";
+    case 0x01: return "Square 1";
+    case 0x02: return "Square 2";
+    case 0x03: return "Prog Wave";
+    case 0x04: return "Noise";
+    case VOICE_CRY:          return "Cry";
+    case VOICE_CRY_REVERSE:  return "Cry (Reverse)";
+    case VOICE_KEYSPLIT:     return "Keysplit";
+    case VOICE_KEYSPLIT_ALL: return "Drum Kit";
+    default: return "Unknown";
+    }
+}
 
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplPugl_NewFrame();
-    ImGui::NewFrame();
+/* Edit ADSR for DirectSound voices (0-255 range). Returns true if changed. */
+static bool edit_directsound_adsr(ToneData *voice)
+{
+    bool changed = false;
+    int a = voice->attack, d = voice->decay, s = voice->sustain, r = voice->release;
+    if (ImGui::SliderInt("Attack##ds", &a, 0, 255))  { voice->attack  = (uint8_t)a; changed = true; }
+    if (ImGui::SliderInt("Decay##ds",  &d, 0, 255))  { voice->decay   = (uint8_t)d; changed = true; }
+    if (ImGui::SliderInt("Sustain##ds",&s, 0, 255))   { voice->sustain = (uint8_t)s; changed = true; }
+    if (ImGui::SliderInt("Release##ds",&r, 0, 255))   { voice->release = (uint8_t)r; changed = true; }
+    return changed;
+}
 
-    uint32_t fbW = gui->cachedWidth;
-    uint32_t fbH = gui->cachedHeight;
+/* Edit ADSR for CGB voices (limited range). Returns true if changed. */
+static bool edit_cgb_adsr(ToneData *voice)
+{
+    bool changed = false;
+    int a = voice->attack, d = voice->decay, s = voice->sustain, r = voice->release;
+    if (ImGui::SliderInt("Attack##cgb", &a, 0, 7))   { voice->attack  = (uint8_t)a; changed = true; }
+    if (ImGui::SliderInt("Decay##cgb",  &d, 0, 7))   { voice->decay   = (uint8_t)d; changed = true; }
+    if (ImGui::SliderInt("Sustain##cgb",&s, 0, 15))   { voice->sustain = (uint8_t)s; changed = true; }
+    if (ImGui::SliderInt("Release##cgb",&r, 0, 7))    { voice->release = (uint8_t)r; changed = true; }
+    return changed;
+}
 
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2((float)fbW, (float)fbH));
+/* ---- Tab rendering ---- */
 
-    ImGuiWindowFlags wflags =
-        ImGuiWindowFlags_NoTitleBar      |
-        ImGuiWindowFlags_NoResize        |
-        ImGuiWindowFlags_NoMove          |
-        ImGuiWindowFlags_NoScrollbar     |
-        ImGuiWindowFlags_NoCollapse      |
-        ImGuiWindowFlags_NoBringToFrontOnFocus;
-
-    ImGui::Begin("##Main", nullptr, wflags);
-
-    /* ---- Plugin title ---- */
-    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "poryaaaa");
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 160.0f);
-    ImGui::TextDisabled("pokeemerald");
-    ImGui::Separator();
-    ImGui::Spacing();
-
+static void render_general_tab(M4AGuiState *gui)
+{
     /* ---- Project Settings ---- */
     ImGui::SeparatorText("Project Settings");
 
@@ -189,6 +212,172 @@ static void render_frame(M4AGuiState *gui)
     }
     if (ImGui::Checkbox("GBA Analog Filter", &gui->settings.analogFilter))
         gui->settingsChanged = true;
+}
+
+static void render_voices_tab(M4AGuiState *gui)
+{
+    if (!gui->liveVoices) {
+        ImGui::TextColored(ImVec4(0.9f, 0.35f, 0.35f, 1.0f), "No voicegroup loaded");
+        return;
+    }
+
+    /* Voice selector */
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
+    ImGui::SliderInt("##voiceSlider", &gui->selectedVoice, 0, 127);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80.0f);
+    ImGui::InputInt("##voiceInput", &gui->selectedVoice, 1, 10);
+    if (gui->selectedVoice < 0) gui->selectedVoice = 0;
+    if (gui->selectedVoice > 127) gui->selectedVoice = 127;
+
+    int idx = gui->selectedVoice;
+    ToneData *voice = &gui->liveVoices[idx];
+    uint8_t type = voice->type;
+
+    /* Type label */
+    ImGui::Text("Type: %s (0x%02X)", voice_type_name(type), type);
+    if (type == VOICE_DIRECTSOUND_NO_RESAMPLE) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "[Fixed]");
+    }
+
+    /* Modified indicator */
+    if (gui->voiceOverrides[idx]) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "(modified)");
+    }
+
+    ImGui::Separator();
+
+    bool changed = false;
+    uint8_t baseType = type & ~VOICE_TYPE_FIX;
+
+    /* Dispatch to per-type editor */
+    if (baseType == 0x00) {
+        /* DirectSound — key and panSweep are metadata only */
+        ImGui::Text("Key: %d", voice->key);
+        ImGui::Text("Pan/Sweep: %d (0x%02X)", voice->panSweep, voice->panSweep);
+        changed |= edit_directsound_adsr(voice);
+
+        /* Read-only sample info */
+        if (voice->wav) {
+            ImGui::Spacing();
+            ImGui::SeparatorText("Sample Info");
+            ImGui::Text("Size: %u samples", voice->wav->size);
+            ImGui::Text("Frequency: %u Hz", voice->wav->freq);
+            ImGui::Text("Loop: %s (start: %u)", (voice->wav->status & 0x4000) ? "Yes" : "No", voice->wav->loopStart);
+        }
+    } else if (baseType == 0x01) {
+        /* Square 1 */
+        int key = voice->key;
+        if (ImGui::SliderInt("Key", &key, 0, 127)) { voice->key = (uint8_t)key; changed = true; }
+        int sweep = voice->panSweep;
+        if (ImGui::SliderInt("Sweep", &sweep, 0, 127)) { voice->panSweep = (uint8_t)sweep; changed = true; }
+        int duty = (int)(uintptr_t)voice->wavePointer & 0x03;
+        const char *dutyNames[] = { "12.5%", "25%", "50%", "75%" };
+        if (ImGui::Combo("Duty Cycle", &duty, dutyNames, 4)) {
+            voice->wavePointer = (uint32_t *)(uintptr_t)(duty & 0x03);
+            changed = true;
+        }
+        changed |= edit_cgb_adsr(voice);
+    } else if (baseType == 0x02) {
+        /* Square 2 */
+        int key = voice->key;
+        if (ImGui::SliderInt("Key", &key, 0, 127)) { voice->key = (uint8_t)key; changed = true; }
+        int duty = (int)(uintptr_t)voice->wavePointer & 0x03;
+        const char *dutyNames[] = { "12.5%", "25%", "50%", "75%" };
+        if (ImGui::Combo("Duty Cycle", &duty, dutyNames, 4)) {
+            voice->wavePointer = (uint32_t *)(uintptr_t)(duty & 0x03);
+            changed = true;
+        }
+        changed |= edit_cgb_adsr(voice);
+    } else if (baseType == 0x03) {
+        /* Programmable Wave */
+        int key = voice->key;
+        if (ImGui::SliderInt("Key", &key, 0, 127)) { voice->key = (uint8_t)key; changed = true; }
+        changed |= edit_cgb_adsr(voice);
+    } else if (baseType == 0x04) {
+        /* Noise */
+        int key = voice->key;
+        if (ImGui::SliderInt("Key", &key, 0, 127)) { voice->key = (uint8_t)key; changed = true; }
+        int period = (int)(uintptr_t)voice->wavePointer & 0x01;
+        const char *periodNames[] = { "Normal (15-bit)", "Metallic (7-bit)" };
+        if (ImGui::Combo("Period", &period, periodNames, 2)) {
+            voice->wavePointer = (uint32_t *)(uintptr_t)(period & 0x01);
+            changed = true;
+        }
+        changed |= edit_cgb_adsr(voice);
+    } else if (baseType == VOICE_CRY || baseType == VOICE_CRY_REVERSE) {
+        /* Cry — read-only display */
+        ImGui::Text("Key: %d", voice->key);
+        ImGui::Text("Attack: %d  Decay: %d  Sustain: %d  Release: %d",
+                     voice->attack, voice->decay, voice->sustain, voice->release);
+        ImGui::TextDisabled("(Cry voices are read-only)");
+    } else if (baseType == VOICE_KEYSPLIT) {
+        ImGui::TextDisabled("(Keysplit voice — sub-voice editing not supported)");
+    } else if (baseType == VOICE_KEYSPLIT_ALL) {
+        ImGui::TextDisabled("(Drum Kit voice — sub-voice editing not supported)");
+    } else {
+        ImGui::TextDisabled("(Unknown voice type)");
+    }
+
+    if (changed) {
+        gui->voiceOverrides[idx] = true;
+        gui->voicesDirty = true;
+    }
+
+    /* Restore button */
+    if (gui->voiceOverrides[idx]) {
+        ImGui::Spacing();
+        if (ImGui::Button("Restore Original")) {
+            gui->pendingRestoreVoice = idx;
+        }
+    }
+}
+
+/* Render a single ImGui frame — called from PUGL_EXPOSE. */
+static void render_frame(M4AGuiState *gui)
+{
+    ImGui::SetCurrentContext(gui->imguiCtx);
+
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplPugl_NewFrame();
+    ImGui::NewFrame();
+
+    uint32_t fbW = gui->cachedWidth;
+    uint32_t fbH = gui->cachedHeight;
+
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2((float)fbW, (float)fbH));
+
+    ImGuiWindowFlags wflags =
+        ImGuiWindowFlags_NoTitleBar      |
+        ImGuiWindowFlags_NoResize        |
+        ImGuiWindowFlags_NoMove          |
+        ImGuiWindowFlags_NoCollapse      |
+        ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+    ImGui::Begin("##Main", nullptr, wflags);
+
+    /* ---- Plugin title ---- */
+    ImGui::TextColored(ImVec4(0.3f, 0.75f, 1.0f, 1.0f), "poryaaaa");
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 160.0f);
+    ImGui::TextDisabled("pokeemerald");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    /* ---- Tabbed content ---- */
+    if (ImGui::BeginTabBar("##Tabs")) {
+        if (ImGui::BeginTabItem("General")) {
+            render_general_tab(gui);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Voices")) {
+            render_voices_tab(gui);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
 
     ImGui::End();
 
@@ -293,6 +482,8 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
     gui->host         = host;
     gui->cachedWidth  = (uint32_t)GUI_W;
     gui->cachedHeight = (uint32_t)GUI_H;
+    gui->selectedVoice       = 0;
+    gui->pendingRestoreVoice = -1;
 
     if (initial) {
         gui->settings = *initial;
@@ -513,6 +704,36 @@ void m4a_gui_tick(M4AGuiState *gui)
         puglObscureView(gui->view);
 
     puglUpdate(gui->world, 0.0);
+}
+
+void m4a_gui_set_voice_data(M4AGuiState *gui,
+                             ToneData *liveVoices,
+                             const ToneData *originalVoices,
+                             bool *overrides)
+{
+    if (!gui) return;
+    gui->liveVoices     = liveVoices;
+    gui->originalVoices = originalVoices;
+    gui->voiceOverrides = overrides;
+    if (!liveVoices)
+        gui->pendingRestoreVoice = -1;
+}
+
+bool m4a_gui_poll_voice_restore(M4AGuiState *gui, int *voiceIndex)
+{
+    if (!gui || gui->pendingRestoreVoice < 0)
+        return false;
+    *voiceIndex = gui->pendingRestoreVoice;
+    gui->pendingRestoreVoice = -1;
+    return true;
+}
+
+bool m4a_gui_poll_voices_dirty(M4AGuiState *gui)
+{
+    if (!gui || !gui->voicesDirty)
+        return false;
+    gui->voicesDirty = false;
+    return true;
 }
 
 } /* extern "C" */

@@ -242,7 +242,18 @@ void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t progra
         return;
 
     M4ATrack *track = &engine->tracks[trackIndex];
+    track->currentProgram = program;
     track->currentVoice = engine->voiceGroup[program];
+}
+
+void m4a_engine_refresh_voices(M4AEngine *engine)
+{
+    if (!engine->voiceGroup)
+        return;
+    for (int i = 0; i < MAX_TRACKS; i++) {
+        M4ATrack *track = &engine->tracks[i];
+        track->currentVoice = engine->voiceGroup[track->currentProgram];
+    }
 }
 
 /*
