@@ -583,6 +583,8 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         break;
     case 0x15: /* LFO speed (LFOS) */
         track->lfoSpeed = value;
+        track->lfoSpeedC = 0;
+        track->modM = 0;
         break;
     case 0x16: /* Modulation type (MODT) */
         // TODO: none of the pokemon emerald songs use MODT
