@@ -223,4 +223,21 @@ if(UNIX AND NOT APPLE)
     target_include_directories(poryaaaa-standalone PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/clap-wrapper/src
     )
+
+    # Our standalone uses Pugl (not GTK), so strip GTK3 from the
+    # clap-wrapper standalone library to prevent assert(gtkGui) crash
+    # when gtkmm-3.0 happens to be installed on the build system.
+    set(_salib poryaaaa-standalone-clap-wrapper-standalone-lib)
+    get_target_property(_salib_sources ${_salib} SOURCES)
+    if(_salib_sources)
+        list(FILTER _salib_sources EXCLUDE REGEX "gtkutils\\.cpp$")
+        set_target_properties(${_salib} PROPERTIES SOURCES "${_salib_sources}")
+    endif()
+    foreach(_prop COMPILE_DEFINITIONS INTERFACE_COMPILE_DEFINITIONS)
+        get_target_property(_defs ${_salib} ${_prop})
+        if(_defs)
+            list(REMOVE_ITEM _defs "CLAP_WRAPPER_HAS_GTK3")
+            set_target_properties(${_salib} PROPERTIES ${_prop} "${_defs}")
+        endif()
+    endforeach()
 endif()
