@@ -18,9 +18,8 @@
 #include <stdio.h>
 #include <time.h>
 
-#ifdef __APPLE__
-#include <dispatch/dispatch.h>
-#endif
+/* Timer ID for the internal render timer (used when host lacks timer_support) */
+static const uintptr_t RENDER_TIMER_ID = 1;
 
 /* ---- Debug logging ---- */
 static const char *s_logPath = nullptr;
@@ -86,10 +85,8 @@ struct M4AGuiState {
     /* True after the user closes the floating window */
     bool wasClosed;
 
-    /* GCD timer used when the host has no timer_support */
-#ifdef __APPLE__
-    dispatch_source_t dispatchTimer;
-#endif
+    /* True when the internal pugl render timer is active */
+    bool internalTimerActive;
 
     /* Voice editor state */
     ToneData *liveVoices;
@@ -448,15 +445,17 @@ static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
             render_frame(gui);
         break;
 
+    case PUGL_TIMER:
+        if (event->timer.id == RENDER_TIMER_ID)
+            m4a_gui_tick(gui);
+        break;
+
     case PUGL_CLOSE:
         gui->wasClosed = true;
-        #ifdef __APPLE__
-                if (gui->dispatchTimer) {
-                    dispatch_source_cancel(gui->dispatchTimer);
-                    dispatch_release(gui->dispatchTimer);
-                    gui->dispatchTimer = nullptr;
-                }
-        #endif
+        if (gui->internalTimerActive) {
+            puglStopTimer(gui->view, RENDER_TIMER_ID);
+            gui->internalTimerActive = false;
+        }
         // gui_log("pugl_event_handler: PUGL_CLOSE");
         if (gui->host) {
             const clap_host_gui_t *hostGui =
@@ -581,14 +580,11 @@ void m4a_gui_destroy(M4AGuiState *gui)
         return;
 
 
-    /* Cancel the GCD render timer before tearing down GL/ImGui */
-#ifdef __APPLE__
-    if (gui->dispatchTimer) {
-        dispatch_source_cancel(gui->dispatchTimer);
-        dispatch_release(gui->dispatchTimer);
-        gui->dispatchTimer = nullptr;
+    /* Stop the internal render timer before tearing down GL/ImGui */
+    if (gui->internalTimerActive) {
+        puglStopTimer(gui->view, RENDER_TIMER_ID);
+        gui->internalTimerActive = false;
     }
-#endif
 
     ImGui::SetCurrentContext(gui->imguiCtx);
 
@@ -778,20 +774,11 @@ void m4a_gui_start_internal_timer(M4AGuiState *gui)
 {
     if (!gui || !gui->view || !gui->realized)
         return;
-#ifdef __APPLE__
-    if (gui->dispatchTimer)
+    if (gui->internalTimerActive)
         return;
-    dispatch_source_t timer = dispatch_source_create(
-        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    uint64_t interval = (uint64_t)(1.0 / 60.0 * NSEC_PER_SEC);
-    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0),
-                              interval, interval / 10);
-    dispatch_source_set_event_handler(timer, ^{
-        m4a_gui_tick(gui);
-    });
-    dispatch_resume(timer);
-    gui->dispatchTimer = timer;
-#endif
+    PuglStatus st = puglStartTimer(gui->view, RENDER_TIMER_ID, 1.0 / 60.0);
+    if (st == PUGL_SUCCESS)
+        gui->internalTimerActive = true;
 }
 
 } /* extern "C" */
