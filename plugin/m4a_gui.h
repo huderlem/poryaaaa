@@ -66,6 +66,12 @@ bool m4a_gui_set_parent(M4AGuiState *gui, uintptr_t native_parent);
 void m4a_gui_tick(M4AGuiState *gui);
 
 /*
+ * Start an internal Pugl timer to drive rendering at ~60 Hz.
+ * Use this when the CLAP host does not provide timer_support.
+ */
+void m4a_gui_start_internal_timer(M4AGuiState *gui);
+
+/*
  * Returns true if the GUI window has been closed by the user.
  */
 bool m4a_gui_was_closed(M4AGuiState *gui);

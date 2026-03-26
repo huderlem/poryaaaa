@@ -18,6 +18,10 @@
 #include <stdio.h>
 #include <time.h>
 
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#endif
+
 /* ---- Debug logging ---- */
 static const char *s_logPath = nullptr;
 
@@ -81,6 +85,11 @@ struct M4AGuiState {
 
     /* True after the user closes the floating window */
     bool wasClosed;
+
+    /* GCD timer used when the host has no timer_support */
+#ifdef __APPLE__
+    dispatch_source_t dispatchTimer;
+#endif
 
     /* Voice editor state */
     ToneData *liveVoices;
@@ -407,7 +416,7 @@ static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
         if (!gui->glInited) {
             ImGui_ImplOpenGL3_Init("#version 330 core");
             gui->glInited = true;
-            gui_log("pugl_event_handler: PUGL_REALIZE, ImGui_ImplOpenGL3_Init done");
+            // gui_log("pugl_event_handler: PUGL_REALIZE, ImGui_ImplOpenGL3_Init done");
         }
         break;
 
@@ -441,7 +450,14 @@ static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
 
     case PUGL_CLOSE:
         gui->wasClosed = true;
-        gui_log("pugl_event_handler: PUGL_CLOSE");
+        #ifdef __APPLE__
+                if (gui->dispatchTimer) {
+                    dispatch_source_cancel(gui->dispatchTimer);
+                    dispatch_release(gui->dispatchTimer);
+                    gui->dispatchTimer = nullptr;
+                }
+        #endif
+        // gui_log("pugl_event_handler: PUGL_CLOSE");
         if (gui->host) {
             const clap_host_gui_t *hostGui =
                 (const clap_host_gui_t *)gui->host->get_extension(gui->host, CLAP_EXT_GUI);
@@ -455,6 +471,10 @@ static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
          * to our child window.  In embedded mode the host's message pump does
          * not automatically give the child focus on click. */
         puglGrabFocus(view);
+        ImGui_ImplPugl_ProcessEvent(event);
+        break;
+
+    case PUGL_BUTTON_RELEASE:
         ImGui_ImplPugl_ProcessEvent(event);
         break;
 
@@ -475,7 +495,7 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
                              const char *log_path)
 {
     s_logPath = log_path;
-    gui_log("m4a_gui_create: begin");
+    // gui_log("m4a_gui_create: begin");
 
     M4AGuiState *gui = new M4AGuiState();
     memset(gui, 0, sizeof(*gui));
@@ -560,7 +580,15 @@ void m4a_gui_destroy(M4AGuiState *gui)
     if (!gui)
         return;
 
-    gui_log("m4a_gui_destroy: begin");
+
+    /* Cancel the GCD render timer before tearing down GL/ImGui */
+#ifdef __APPLE__
+    if (gui->dispatchTimer) {
+        dispatch_source_cancel(gui->dispatchTimer);
+        dispatch_release(gui->dispatchTimer);
+        gui->dispatchTimer = nullptr;
+    }
+#endif
 
     ImGui::SetCurrentContext(gui->imguiCtx);
 
@@ -573,7 +601,7 @@ void m4a_gui_destroy(M4AGuiState *gui)
         ImGui_ImplOpenGL3_Shutdown();
         gui->glInited = false;
         puglLeaveContext(gui->view);
-        gui_log("m4a_gui_destroy: ImGui_ImplOpenGL3_Shutdown done");
+        // gui_log("m4a_gui_destroy: ImGui_ImplOpenGL3_Shutdown done");
     }
 
     ImGui_ImplPugl_Shutdown();
@@ -633,14 +661,14 @@ bool m4a_gui_show(M4AGuiState *gui)
         gui_log("m4a_gui_show: realized as floating");
     }
 
-    puglShow(gui->view, PUGL_SHOW_RAISE);
-    gui_log("m4a_gui_show: shown");
+    /* Embedded views must not manipulate the host's window (orderFront etc.),
+     * so use PUGL_SHOW_PASSIVE.  Floating windows should raise normally. */
+    puglShow(gui->view, gui->isEmbedded ? PUGL_SHOW_PASSIVE : PUGL_SHOW_RAISE);
     return true;
 }
 
 bool m4a_gui_hide(M4AGuiState *gui)
 {
-    gui_log("m4a_gui_hide called");
     if (!gui || !gui->view) return false;
     puglHide(gui->view);
     return true;
@@ -653,15 +681,25 @@ void m4a_gui_get_size(M4AGuiState *gui, uint32_t *width, uint32_t *height)
         *height = (uint32_t)GUI_H;
         return;
     }
-    *width  = gui->cachedWidth;
-    *height = gui->cachedHeight;
+    /* cachedWidth/Height are in backing pixels (from Pugl CONFIGURE).
+     * The CLAP host expects logical pixels (points on macOS), so divide
+     * by the backing scale factor. */
+    double scale = gui->view ? puglGetScaleFactor(gui->view) : 1.0;
+    if (scale < 1.0) scale = 1.0;
+    *width  = (uint32_t)(gui->cachedWidth  / scale);
+    *height = (uint32_t)(gui->cachedHeight / scale);
 }
 
 bool m4a_gui_set_size(M4AGuiState *gui, uint32_t width, uint32_t height)
 {
     if (!gui || !gui->view) return false;
-    gui_log("m4a_gui_set_size: %ux%u", width, height);
-    puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE, (PuglSpan)width, (PuglSpan)height);
+    /* The host sends logical pixels; Pugl's PUGL_CURRENT_SIZE expects
+     * backing pixels, so scale up. */
+    double scale = puglGetScaleFactor(gui->view);
+    if (scale < 1.0) scale = 1.0;
+    PuglSpan pw = (PuglSpan)(width  * scale);
+    PuglSpan ph = (PuglSpan)(height * scale);
+    puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE, pw, ph);
     return true;
 }
 
@@ -734,6 +772,26 @@ bool m4a_gui_poll_voices_dirty(M4AGuiState *gui)
         return false;
     gui->voicesDirty = false;
     return true;
+}
+
+void m4a_gui_start_internal_timer(M4AGuiState *gui)
+{
+    if (!gui || !gui->view || !gui->realized)
+        return;
+#ifdef __APPLE__
+    if (gui->dispatchTimer)
+        return;
+    dispatch_source_t timer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    uint64_t interval = (uint64_t)(1.0 / 60.0 * NSEC_PER_SEC);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                              interval, interval / 10);
+    dispatch_source_set_event_handler(timer, ^{
+        m4a_gui_tick(gui);
+    });
+    dispatch_resume(timer);
+    gui->dispatchTimer = timer;
+#endif
 }
 
 } /* extern "C" */

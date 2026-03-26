@@ -760,7 +760,15 @@ static bool gui_show(const clap_plugin_t *plugin)
 {
     plugin_log("gui_show called");
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
-    return m4a_gui_show(data->gui);
+    bool ok = m4a_gui_show(data->gui);
+
+    /* If the host doesn't provide timer_support, start Pugl's internal
+     * NSTimer to drive rendering at ~60 Hz. Must be called after
+     * gui_show (view must be realized and visible). */
+    if (ok && data->guiTimerId == CLAP_INVALID_ID)
+        m4a_gui_start_internal_timer(data->gui);
+
+    return ok;
 }
 
 static bool gui_hide(const clap_plugin_t *plugin)
