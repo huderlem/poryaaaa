@@ -755,9 +755,12 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
 
     /* Register a ~60 Hz timer to drive GUI rendering */
     const clap_host_timer_support_t *timerExt =
-        (const clap_host_timer_support_t *)data->host->get_extension(
-            data->host, CLAP_EXT_TIMER_SUPPORT);
-
+    (const clap_host_timer_support_t *)data->host->get_extension(
+        data->host, CLAP_EXT_TIMER_SUPPORT);
+    if (timerExt)
+        timerExt->register_timer(data->host, 16 /* ms */, &data->guiTimerId);
+    else 
+        m4a_gui_set_internal_timer_callback(data->gui, gui_internal_timer_callback, (void *)plugin);
     return true;
 }
 
