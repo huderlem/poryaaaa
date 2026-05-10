@@ -419,6 +419,46 @@ static void scan_dirs_recursive(const char *basePath, int depth, int maxDepth, d
     closedir(d);
 }
 
+/*
+ * Probe for keysplit-table data adjacent to a voicegroup-style directory.
+ * Adds <dir>/keysplit_tables.{s,inc} and any .s/.inc files inside <dir>/keysplits/
+ * to the keySplitTableFiles list. Safe to call repeatedly (pathlist_add dedups).
+ *
+ * Note: files in a keysplits/ subdir that turn out to be sub-voicegroup definitions
+ * rather than keysplit tables are harmless — parse_keysplit_tables_file only acts
+ * on lines beginning with "keysplit ".
+ */
+static void probe_keysplit_data_in_dir(const char *dirPath, ProjectDiscovery *out)
+{
+    char p[MAX_PATH_LEN];
+
+    snprintf(p, sizeof(p), "%s%ckeysplit_tables.inc", dirPath, PATH_SEP);
+    if (file_exists(p))
+        pathlist_add(&out->keySplitTableFiles, p);
+    snprintf(p, sizeof(p), "%s%ckeysplit_tables.s", dirPath, PATH_SEP);
+    if (file_exists(p))
+        pathlist_add(&out->keySplitTableFiles, p);
+
+    char ksDir[MAX_PATH_LEN];
+    snprintf(ksDir, sizeof(ksDir), "%s%ckeysplits", dirPath, PATH_SEP);
+    if (is_directory(ksDir)) {
+        DIR *d = opendir(ksDir);
+        if (d) {
+            struct dirent *ent;
+            while ((ent = readdir(d)) != NULL) {
+                if (ent->d_name[0] == '.') continue;
+                if (!str_ends_with_ci(ent->d_name, ".s") &&
+                    !str_ends_with_ci(ent->d_name, ".inc"))
+                    continue;
+                char fp[MAX_PATH_LEN];
+                snprintf(fp, sizeof(fp), "%s%c%s", ksDir, PATH_SEP, ent->d_name);
+                pathlist_add(&out->keySplitTableFiles, fp);
+            }
+            closedir(d);
+        }
+    }
+}
+
 /* Combined visitor context for voicegroup and wav directory discovery */
 typedef struct {
     ProjectDiscovery *disc;
@@ -431,6 +471,7 @@ static void visit_for_voicegroup_and_wav_dirs(const char *dirPath, void *ctx)
         pathlist_add(&vctx->disc->voicegroupDirs, dirPath);
     if (dir_has_files_with_ext(dirPath, ".wav"))
         pathlist_add(&vctx->disc->wavSampleDirs, dirPath);
+    probe_keysplit_data_in_dir(dirPath, vctx->disc);
 }
 
 /*
@@ -517,6 +558,7 @@ static void discover_project(const char *projectRoot,
                     }
                     closedir(d);
                 }
+                probe_keysplit_data_in_dir(path, out);
             } else if (file_exists(path)) {
                 /* It's a file - check if it's monolithic or a voicegroup dir entry */
                 if (is_monolithic_voicegroup_file(path))

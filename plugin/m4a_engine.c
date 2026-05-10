@@ -328,6 +328,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
     uint8_t voiceType = voice->type & VOICE_TYPE_CGB_MASK;
     int8_t rhythmPan = 0;
     uint8_t useKey = key;
+    int32_t pcmBaseAdjust = 0;
 
     /* For rhythm (keysplit_all) voices: the MIDI note selects which drum voice
      * to play, but the playback pitch is fixed to the drum voice's own key --
@@ -337,6 +338,12 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         if (voice->panSweep & 0x80) {
             rhythmPan = (int8_t)((voice->panSweep - 0xC0) * 2);
         }
+    } else if (voiceType == 0) {
+        /* PCM voice_directsound (non-rhythm): treat voice->key as the sample's
+         * base MIDI note.  wav->freq is calibrated so MIDI 60 plays at the
+         * sample's natural rate, so shift by (60 - voice->key) to make the
+         * sample play at the correct pitch when the player presses any note. */
+        pcmBaseAdjust = 60 - (int32_t)voice->key;
     }
 
     /* Calculate combined priority */
@@ -345,10 +352,18 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
     /* Calculate track volumes */
     m4a_track_vol_pit_set(track);
 
-    /* Calculate final key with transposition */
+    /* Calculate final key with transposition.  pcmBaseAdjust is folded in for
+     * PCM voice_directsound; the CGB branch ignores it (no sample to calibrate)
+     * by using `useKey + keyM` directly below. */
+    int32_t pcmKey = (int32_t)useKey + pcmBaseAdjust;
+    if (pcmKey < 0) pcmKey = 0;
+    if (pcmKey > 255) pcmKey = 255;
     int32_t finalKey = (int32_t)useKey + track->keyM;
     if (finalKey < 0) finalKey = 0;
     if (finalKey > 127) finalKey = 127;
+    int32_t pcmFinalKey = pcmKey + track->keyM;
+    if (pcmFinalKey < 0) pcmFinalKey = 0;
+    if (pcmFinalKey > 178) pcmFinalKey = 178;
 
     if (voiceType >= 1 && voiceType <= 4) {
         /* CGB channel */
@@ -405,7 +420,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         if (!ch) return;
 
         ch->midiKey = key;
-        ch->key = useKey;
+        ch->key = (uint8_t)pcmKey;
         ch->velocity = velocity;
         ch->priority = combinedPriority;
         ch->trackIndex = trackIndex;
@@ -437,7 +452,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
                 ch->frequency = (uint32_t)(0x800000 * scale);
             } else {
                 int32_t divFreq = (16777216 / pcmFreq + 1) >> 1;
-                ch->frequency = m4a_midi_key_to_freq(voice->wav, (uint8_t)finalKey, track->pitM);
+                ch->frequency = m4a_midi_key_to_freq(voice->wav, (uint8_t)pcmFinalKey, track->pitM);
                 ch->frequency = (uint32_t)((uint64_t)ch->frequency * divFreq * scale);
             }
         }
