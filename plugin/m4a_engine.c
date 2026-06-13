@@ -314,6 +314,83 @@ static M4APCMChannel *allocate_pcm_channel(M4AEngine *engine, uint8_t priority,
 }
 
 /*
+ * Apply an interpolated portamento key (8.8 fixed point: (key << 8) | fine) to
+ * every active, non-releasing channel on the track.  The track-level pitch
+ * adjustments (key shift, bend, tune, vibrato) are layered on top, matching
+ * MPlayProcessPortamento in pokeemerald's m4a.c.
+ */
+static void apply_portamento_pitch(M4AEngine *engine, M4ATrack *track,
+                                   int trackIndex, int32_t currentKey16)
+{
+    int32_t fullPitch = currentKey16 + ((int32_t)track->keyM << 8) + track->pitM;
+    int32_t key = fullPitch >> 8;
+    if (key < 0) key = 0;
+    else if (key > 178) key = 178;
+    uint8_t fine = (uint8_t)(fullPitch & 0xFF);
+
+    for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+        M4APCMChannel *ch = &engine->pcmChannels[i];
+        if (!(ch->status & CHN_ON) || (ch->status & CHN_STOP)
+            || ch->trackIndex != trackIndex || !ch->wav)
+            continue;
+        /* Fixed-frequency voices ignore the MIDI key entirely */
+        if (ch->type & VOICE_TYPE_FIX)
+            continue;
+        uint32_t freq = m4a_midi_key_to_freq(ch->wav, (uint8_t)key, fine);
+        int32_t pcmSamplesPerVBlank = 224;
+        int32_t pcmFreq = (597275 * pcmSamplesPerVBlank + 5000) / 10000;
+        int32_t divFreq = (16777216 / pcmFreq + 1) >> 1;
+        float scale = (float)pcmFreq / engine->sampleRate;
+        ch->frequency = (uint32_t)((uint64_t)freq * divFreq * scale);
+    }
+    for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
+        M4ACGBChannel *ch = &engine->cgbChannels[i];
+        if (!(ch->status & CHN_ON) || (ch->status & CHN_STOP)
+            || ch->trackIndex != trackIndex)
+            continue;
+        uint32_t newFreq = m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)key, fine);
+        /* Preserve NR43 bit 3 (7-bit LFSR mode) for the noise channel */
+        if (ch->type == 4)
+            newFreq |= ch->frequency & 0x08;
+        ch->frequency = newFreq;
+    }
+}
+
+/*
+ * Called after a new note has successfully started a channel.  Decides whether
+ * the note begins a portamento glide from the track's previous note key.
+ * Mirrors the new-note handling in MPlayProcessPortamento.
+ */
+static void portamento_note_started(M4AEngine *engine, M4ATrack *track,
+                                    int trackIndex, uint8_t chanKey)
+{
+    /* Note that portamentoPrevKey is intentionally NOT updated here when a new
+     * note interrupts an in-progress glide.  It still holds the glide's
+     * original start key, so the next glide restarts from the previous note's
+     * pitch (snapping back if the glide hadn't finished) -- matching
+     * MPlayProcessPortamento on the GBA, which only advances portamentoPrevKey
+     * once a glide completes. */
+    track->portamentoElapsed = 0;
+    if (track->portamentoDuration != 0 && track->portamentoPrevKey != 0
+        && track->portamentoPrevKey != chanKey) {
+        track->portamentoGliding = true;
+        track->portamentoTargetKey = chanKey;
+        /* Pitch the new note to the glide start key right away so it never
+         * sounds at the target pitch before the first engine tick.  (On the
+         * GBA, MPlayProcessPortamento runs before any audio is mixed.) */
+        apply_portamento_pitch(engine, track, trackIndex,
+                               (int32_t)track->portamentoPrevKey << 8);
+    } else {
+        /* Always remember the last note played -- even while portamento is
+         * off or when the same key repeats -- so a later glide starts from
+         * the actual previous note regardless of whether its channel was
+         * still alive when CC 5 arrived. */
+        track->portamentoPrevKey = chanKey;
+        track->portamentoGliding = false;
+    }
+}
+
+/*
  * Note On
  */
 void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity)
@@ -378,6 +455,15 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
                 return;
         }
 
+        /* Portamento legato: CGB tone types share one channel slot, so a
+         * non-zero envelope volume means the previous note was still audible
+         * at the moment of retrigger (zero gap).  In that case skip the note
+         * trigger entirely -- keep the oscillator phase and envelope and put
+         * the channel into sustain so it carries the previous note's state. */
+        bool portamentoInherit = track->portamentoDuration != 0
+                              && (ch->status & CHN_ON)
+                              && ch->envelopeVolume != 0;
+
         ch->midiKey = key;
         ch->key = useKey;
         ch->velocity = velocity;
@@ -411,7 +497,12 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         if (voiceType == 4)
             ch->frequency |= ((uintptr_t)voice->wavePointer & 0x01) << 3;
 
-        m4a_cgb_channel_start(ch);
+        if (portamentoInherit)
+            ch->status = CHN_ENV_SUSTAIN;
+        else
+            m4a_cgb_channel_start(ch);
+
+        portamento_note_started(engine, track, trackIndex, ch->key);
     } else {
         /* PCM DirectSound channel */
         if (!voice->wav) return;
@@ -459,6 +550,29 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
 
         m4a_pcm_channel_start(ch, voice->wav, voice->type);
 
+        /* Portamento legato: if the previous note on this track is still in
+         * any envelope phase (zero gap between notes), the new note inherits
+         * its sample position, envelope, and loop state instead of triggering
+         * a fresh attack/sample start, making the glide perfectly smooth.
+         * The previous channel is silenced so the two don't double-voice.
+         * Disallowed if the voice changed between notes (different wav). */
+        if (track->portamentoDuration != 0) {
+            for (int i = 0; i < engine->maxPcmChannels; i++) {
+                M4APCMChannel *prev = &engine->pcmChannels[i];
+                if (prev == ch || !(prev->status & CHN_ON)
+                    || prev->trackIndex != trackIndex || prev->wav != voice->wav)
+                    continue;
+                ch->currentPointer = prev->currentPointer;
+                ch->count = prev->count;
+                ch->fw = prev->fw;
+                uint8_t prevVolume = prev->envelopeVolume;
+                ch->envelopeVolume = (prevVolume > ch->sustain) ? prevVolume : ch->sustain;
+                ch->status = CHN_ENV_SUSTAIN | (prev->status & CHN_LOOP);
+                prev->status = 0;
+                break;
+            }
+        }
+
         /* Compute initial envelope volumes so the channel produces sound
          * before the first engine tick (~60Hz). On the GBA, SoundMainRAM
          * handles this every frame, but our render loop runs at DAW rate. */
@@ -467,6 +581,8 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
             ch->envelopeVolumeRight = ((uint32_t)ch->rightVolume * vol) >> 8;
             ch->envelopeVolumeLeft = ((uint32_t)ch->leftVolume * vol) >> 8;
         }
+
+        portamento_note_started(engine, track, trackIndex, ch->key);
     }
 }
 
@@ -572,6 +688,12 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
             track->modM = 0;
         }
         break;
+    case 0x5:  /* Portamento time (PORTAMENTO) -- glide duration in song ticks, 0 = off.
+                * Unlike the GBA's ply_portamento, no channel-state capture is needed
+                * here: every note records its key at note-on, so the glide start key
+                * is always known regardless of envelope state. */
+        track->portamentoDuration = value;
+        break;
     case 0x7:  /* Volume */
         track->rawVolume = value;
         track->volume = value * engine->songMasterVolume / MAX_SONG_VOLUME;
@@ -641,10 +763,27 @@ void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend)
 }
 
 /*
+ * Forget a track's portamento note history.  Called when notes are cut off
+ * out-of-band (DAW transport stop/reset, All Notes Off / All Sound Off) so
+ * that the first note after playback resumes doesn't glide from a note that
+ * was sounding before the interruption.  portamentoDuration is kept: it's a
+ * parameter (CC 5), not note state.
+ */
+static void reset_portamento_note_state(M4ATrack *track)
+{
+    track->portamentoPrevKey = 0;
+    track->portamentoTargetKey = 0;
+    track->portamentoGliding = false;
+    track->portamentoElapsed = 0;
+}
+
+/*
  * All Notes Off for a channel
  */
 void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex)
 {
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
+        return;
     for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
         M4APCMChannel *ch = &engine->pcmChannels[i];
         if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex)
@@ -655,6 +794,7 @@ void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex)
         if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex)
             ch->status |= CHN_STOP;
     }
+    reset_portamento_note_state(&engine->tracks[trackIndex]);
 }
 
 /*
@@ -666,6 +806,13 @@ void m4a_engine_all_sound_off(M4AEngine *engine)
         engine->pcmChannels[i].status = 0;
     for (int i = 0; i < MAX_CGB_CHANNELS; i++)
         engine->cgbChannels[i].status = 0;
+    m4a_engine_reset_portamento(engine);
+}
+
+void m4a_engine_reset_portamento(M4AEngine *engine)
+{
+    for (int i = 0; i < MAX_TRACKS; i++)
+        reset_portamento_note_state(&engine->tracks[i]);
 }
 
 void m4a_engine_set_song_volume(M4AEngine *engine, uint8_t volume)
@@ -749,6 +896,44 @@ static void m4a_lfo_tick(M4AEngine *engine)
 }
 
 /*
+ * Advance active portamento glides.  Called once per engine tick (~60Hz),
+ * matching MPlayProcessPortamento which runs once per VBlank so the glide
+ * stays smooth regardless of tempo.  Tracks are assumed monophonic for
+ * portamento.  The glide spans `duration` song ticks: elapsed accumulates
+ * tempoI per VBlank and the glide completes at duration*150 (one song tick
+ * fires per 150 accumulated tempo units).
+ */
+static void m4a_portamento_tick(M4AEngine *engine)
+{
+    for (int i = 0; i < MAX_TRACKS; i++) {
+        M4ATrack *track = &engine->tracks[i];
+        if (!track->portamentoGliding)
+            continue;
+
+        int32_t elapsed = (int32_t)track->portamentoElapsed + engine->tempoI;
+        int32_t totalDurationUnits = (int32_t)track->portamentoDuration * 150;
+        int32_t startKey = track->portamentoPrevKey;
+        int32_t targetKey = track->portamentoTargetKey;
+        int32_t currentKey16; /* current pitch in 8.8 fixed point */
+
+        track->portamentoElapsed = (uint32_t)elapsed;
+        if (totalDurationUnits == 0 || elapsed >= totalDurationUnits) {
+            /* Portamento glide is complete! */
+            currentKey16 = targetKey << 8;
+            track->portamentoPrevKey = (uint8_t)targetKey;
+            track->portamentoElapsed = 0;
+            track->portamentoGliding = false;
+        } else {
+            /* Interpolate to get the current key */
+            currentKey16 = (startKey << 8)
+                         + (((targetKey - startKey) * elapsed) << 8) / totalDurationUnits;
+        }
+
+        apply_portamento_pitch(engine, track, i, currentKey16);
+    }
+}
+
+/*
  * Engine tick - called at ~60Hz (VBlank rate)
  * Advances envelopes at VBlank rate and LFO at tempo rate,
  * matching the GBA's split between SoundMainRAM and MPlayMain.
@@ -795,6 +980,10 @@ void m4a_engine_tick(M4AEngine *engine)
         engine->tempoC -= 150;
         m4a_lfo_tick(engine);
     }
+
+    /* Advance portamento glides last so they override any pitch the LFO
+     * wrote this tick, matching MPlayMain's ordering on the GBA. */
+    m4a_portamento_tick(engine);
 }
 
 /*

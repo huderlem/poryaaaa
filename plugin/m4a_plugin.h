@@ -18,6 +18,7 @@ typedef struct {
     bool analogFilter;
     uint8_t maxPcmChannels;
     bool activated;
+    bool transportWasPlaying; /* last seen CLAP_TRANSPORT_IS_PLAYING state */
 
     /* Voice editor: snapshot of original voices and per-voice override flags */
     ToneData originalVoices[VOICEGROUP_SIZE];

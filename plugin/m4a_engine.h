@@ -99,6 +99,14 @@ typedef struct {
     uint8_t volML;          /* computed left volume */
     uint8_t pseudoEchoVolume;
     uint8_t pseudoEchoLength;
+    uint8_t portamentoDuration;  /* PORTAMENTO (CC 5) glide duration in song ticks; 0 = off */
+    uint8_t portamentoPrevKey;   /* channel key of the last note played (glide start key);
+                                  * 0 = no note played yet.  Updated on every note trigger
+                                  * so glides never depend on whether the previous note's
+                                  * channel is still alive. */
+    uint8_t portamentoTargetKey; /* glide destination key (newest note's channel key) */
+    bool portamentoGliding;      /* a glide is in progress */
+    uint32_t portamentoElapsed;  /* accumulated tempoI units; glide done at duration*150 */
     uint8_t priority;
     uint8_t currentProgram; /* last program_change index (0-127) */
     ToneData currentVoice;  /* current instrument */
@@ -243,6 +251,12 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
 void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend);
 void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex);
 void m4a_engine_all_sound_off(M4AEngine *engine);
+
+/* Forget every track's portamento note history (the "previous note" a glide
+ * would start from).  Called automatically by all_notes_off/all_sound_off;
+ * also call on DAW transport stop so the first note after the playhead moves
+ * doesn't glide from a note that was sounding before playback paused. */
+void m4a_engine_reset_portamento(M4AEngine *engine);
 void m4a_engine_set_song_volume(M4AEngine *engine, uint8_t volume);
 
 /* Set tempo from DAW BPM.  The GBA relationship is tempoI ≈ BPM

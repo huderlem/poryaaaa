@@ -413,6 +413,324 @@ static void test_polyphony_stealing(void)
     free(wd);
 }
 
+/* Find the active, non-releasing PCM channel for a track, or NULL */
+static M4APCMChannel *find_pcm_channel(M4AEngine *engine, int trackIndex)
+{
+    for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+        M4APCMChannel *ch = &engine->pcmChannels[i];
+        if ((ch->status & CHN_ON) && !(ch->status & CHN_STOP)
+            && ch->trackIndex == trackIndex)
+            return ch;
+    }
+    return NULL;
+}
+
+/* Test portamento (CC 5) glide behavior */
+static void test_portamento(void)
+{
+    printf("Testing portamento...\n");
+
+    /* Looped WaveData so legato notes keep playing indefinitely */
+    int dataSize = 64;
+    WaveData *wd = calloc(1, sizeof(WaveData) + dataSize + 1);
+    wd->type = 0;
+    wd->status = 0xC000;  /* looped */
+    wd->freq = 0x01000000;
+    wd->loopStart = 0;
+    wd->size = dataSize;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    for (int i = 0; i < dataSize; i++)
+        wd->data[i] = (int8_t)(127.0 * sin(2.0 * 3.14159265 * i / dataSize));
+    wd->data[dataSize] = wd->data[0];
+
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].decay = 0;
+    voices[0].sustain = 0xFF;
+    voices[0].release = 220;  /* slow release so legato gap detection sees the old note */
+    voices[1].type = VOICE_SQUARE_1;
+    voices[1].key = 60;
+    voices[1].wavePointer = (uint32_t *)(uintptr_t)2;  /* duty cycle */
+    voices[1].attack = 0;
+    voices[1].decay = 0;
+    voices[1].sustain = 15;
+    voices[1].release = 3;
+
+    M4AEngine engine;
+    float outL[1024], outR[1024];
+
+    /* ---- PCM: legato glide ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 0x5, 2);  /* portamento: 2-tick glide */
+    ASSERT_EQ(engine.tracks[0].portamentoDuration, 2, "portamento: duration set by CC 5");
+
+    /* First note: no previous key, so no glide */
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 60, "portamento: first note captures prev key");
+    ASSERT(!engine.tracks[0].portamentoGliding, "portamento: first note does not glide");
+
+    M4APCMChannel *first = find_pcm_channel(&engine, 0);
+    ASSERT(first != NULL, "portamento: first note allocated a channel");
+    uint32_t freqStart = first->frequency;
+
+    /* Render a bit, then play a legato (zero-gap) note a fifth up */
+    m4a_engine_process(&engine, outL, outR, 256);
+    int8_t *posBefore = first->currentPointer;
+    m4a_engine_note_off(&engine, 0, 60);
+    m4a_engine_note_on(&engine, 0, 67, 100);
+
+    M4APCMChannel *second = find_pcm_channel(&engine, 0);
+    ASSERT(second != NULL, "portamento: legato note has a channel");
+    ASSERT(engine.tracks[0].portamentoGliding, "portamento: legato note starts a glide");
+    ASSERT_EQ(engine.tracks[0].portamentoTargetKey, 67, "portamento: glide target key");
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 60, "portamento: glide start key");
+
+    /* The new note inherits the old note's state: sustain envelope, sample
+     * position, and the old channel is silenced (only one channel active) */
+    ASSERT_EQ(second->status & ~CHN_LOOP, CHN_ENV_SUSTAIN, "portamento: inherited note is in sustain");
+    ASSERT(second->currentPointer == posBefore, "portamento: inherited sample position");
+    {
+        int active = 0;
+        for (int i = 0; i < MAX_PCM_CHANNELS; i++)
+            if (engine.pcmChannels[i].status & CHN_ON) active++;
+        ASSERT_EQ(active, 1, "portamento: previous channel silenced (no double-voice)");
+    }
+
+    /* Pitch starts at the old key, rises during the glide, and lands on the
+     * target.  2 ticks at default tempo = 2 VBlanks ~= 1477 samples. */
+    ASSERT_EQ(second->frequency, freqStart, "portamento: glide starts at previous pitch");
+    m4a_engine_process(&engine, outL, outR, 745);  /* ~1 VBlank: mid-glide */
+    uint32_t freqMid = second->frequency;
+    ASSERT(freqMid > freqStart, "portamento: pitch rises during glide");
+    m4a_engine_process(&engine, outL, outR, 1024);  /* finish the glide */
+    uint32_t freqEnd = second->frequency;
+    ASSERT(freqEnd > freqMid, "portamento: pitch keeps rising to target");
+    ASSERT(!engine.tracks[0].portamentoGliding, "portamento: glide completes");
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 67, "portamento: prev key updated on completion");
+
+    /* Final pitch matches a plain note at the target key */
+    {
+        M4AEngine ref;
+        m4a_engine_init(&ref, 44100.0f);
+        m4a_engine_set_voicegroup(&ref, voices);
+        m4a_engine_program_change(&ref, 0, 0);
+        m4a_engine_note_on(&ref, 0, 67, 100);
+        M4APCMChannel *refCh = find_pcm_channel(&ref, 0);
+        ASSERT_EQ(freqEnd, refCh->frequency, "portamento: final pitch equals target note pitch");
+        m4a_engine_destroy(&ref);
+    }
+    m4a_engine_destroy(&engine);
+
+    /* ---- PCM: notes with a gap do not inherit channel state ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 0x5, 2);
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    m4a_engine_note_off(&engine, 0, 60);
+    /* Render long enough for the release to fully fade out */
+    for (int i = 0; i < 200; i++)
+        m4a_engine_process(&engine, outL, outR, 1024);
+    ASSERT(find_pcm_channel(&engine, 0) == NULL, "portamento gap: old note fully released");
+    m4a_engine_note_on(&engine, 0, 67, 100);
+    M4APCMChannel *gapCh = find_pcm_channel(&engine, 0);
+    ASSERT(gapCh != NULL, "portamento gap: new note allocated");
+    ASSERT(gapCh->status & CHN_ENV_MASK, "portamento gap: new note triggers its own envelope");
+    /* But the pitch still glides from the previous note's key */
+    ASSERT(engine.tracks[0].portamentoGliding, "portamento gap: pitch still glides");
+    m4a_engine_destroy(&engine);
+
+    /* ---- CC 5 value 0 disables portamento ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 0x5, 2);
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    m4a_engine_cc(&engine, 0, 0x5, 0);
+    m4a_engine_note_off(&engine, 0, 60);
+    m4a_engine_note_on(&engine, 0, 67, 100);
+    ASSERT(!engine.tracks[0].portamentoGliding, "portamento off: no glide");
+    M4APCMChannel *offCh = find_pcm_channel(&engine, 0);
+    {
+        M4AEngine ref;
+        m4a_engine_init(&ref, 44100.0f);
+        m4a_engine_set_voicegroup(&ref, voices);
+        m4a_engine_program_change(&ref, 0, 0);
+        m4a_engine_note_on(&ref, 0, 67, 100);
+        ASSERT_EQ(offCh->frequency, find_pcm_channel(&ref, 0)->frequency,
+                  "portamento off: note plays at its own pitch");
+        m4a_engine_destroy(&ref);
+    }
+    m4a_engine_destroy(&engine);
+
+    /* ---- CGB: legato note inherits the shared channel slot ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 1);  /* square 1 */
+    m4a_engine_cc(&engine, 0, 0x5, 2);
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    M4ACGBChannel *cgb = &engine.cgbChannels[0];
+    ASSERT(cgb->status & CHN_ON, "cgb portamento: first note started");
+    uint32_t cgbFreqStart = cgb->frequency;
+    uint8_t cgbEnvBefore = cgb->envelopeVolume;
+    ASSERT(cgbEnvBefore != 0, "cgb portamento: first note envelope is audible");
+    m4a_engine_process(&engine, outL, outR, 256);
+    m4a_engine_note_off(&engine, 0, 60);
+    m4a_engine_note_on(&engine, 0, 67, 100);
+    ASSERT_EQ(cgb->status, CHN_ENV_SUSTAIN, "cgb portamento: legato note sustains, no retrigger");
+    ASSERT(engine.tracks[0].portamentoGliding, "cgb portamento: glide started");
+    ASSERT_EQ(cgb->frequency, cgbFreqStart, "cgb portamento: glide starts at previous pitch");
+    m4a_engine_process(&engine, outL, outR, 1024);  /* finish the glide... */
+    m4a_engine_process(&engine, outL, outR, 1024);
+    ASSERT(!engine.tracks[0].portamentoGliding, "cgb portamento: glide completes");
+    {
+        M4AEngine ref;
+        m4a_engine_init(&ref, 44100.0f);
+        m4a_engine_set_voicegroup(&ref, voices);
+        m4a_engine_program_change(&ref, 0, 1);
+        m4a_engine_note_on(&ref, 0, 67, 100);
+        ASSERT_EQ(cgb->frequency, ref.cgbChannels[0].frequency,
+                  "cgb portamento: final pitch equals target note pitch");
+        m4a_engine_destroy(&ref);
+    }
+    m4a_engine_destroy(&engine);
+
+    free(wd);
+}
+
+/* Regression tests for intermittent gap-detection failures: the glide start
+ * key must come from note history, not from whether the previous note's
+ * channel happened to still be alive when CC 5 arrived. */
+static void test_portamento_prev_key_tracking(void)
+{
+    printf("Testing portamento prev-key tracking...\n");
+
+    int dataSize = 64;
+    WaveData *wd = calloc(1, sizeof(WaveData) + dataSize + 1);
+    wd->type = 0;
+    wd->status = 0xC000;
+    wd->freq = 0x01000000;
+    wd->loopStart = 0;
+    wd->size = dataSize;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    for (int i = 0; i < dataSize; i++)
+        wd->data[i] = (int8_t)(127.0 * sin(2.0 * 3.14159265 * i / dataSize));
+    wd->data[dataSize] = wd->data[0];
+
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    /* Decaying (piano-like) voice: envelope dies during a held note */
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].decay = 200;
+    voices[0].sustain = 0;
+    voices[0].release = 150;
+
+    M4AEngine engine;
+    float outL[1024], outR[1024];
+
+    /* ---- Symptom "no glide": envelope fully decayed before CC 5 arrives ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_note_on(&engine, 0, 48, 0x60);
+    /* Hold until the decay-to-zero envelope frees the channel */
+    for (int i = 0; i < 100; i++)
+        m4a_engine_process(&engine, outL, outR, 1024);
+    {
+        int alive = 0;
+        for (int i = 0; i < MAX_PCM_CHANNELS; i++)
+            if (engine.pcmChannels[i].status & CHN_ON) alive = 1;
+        ASSERT(!alive, "prev-key: held note's channel fully decayed");
+    }
+    /* CC 5 + zero-gap pair, exactly like the user's minimal MIDI */
+    m4a_engine_cc(&engine, 0, 0x5, 5);
+    m4a_engine_note_off(&engine, 0, 48);
+    m4a_engine_note_on(&engine, 0, 50, 0x60);
+    ASSERT(engine.tracks[0].portamentoGliding, "prev-key: glide starts even after envelope died");
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 48, "prev-key: glide starts from previous note");
+    ASSERT_EQ(engine.tracks[0].portamentoTargetKey, 50, "prev-key: glide targets new note");
+    m4a_engine_destroy(&engine);
+
+    /* ---- Symptom "wrong frequency": notes played while portamento is off
+     * must still update the glide start key ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 0x5, 5);
+    m4a_engine_note_on(&engine, 0, 40, 0x60);   /* records key 40 */
+    m4a_engine_note_off(&engine, 0, 40);
+    m4a_engine_cc(&engine, 0, 0x5, 0);          /* portamento off */
+    m4a_engine_note_on(&engine, 0, 60, 0x60);   /* must record key 60 */
+    m4a_engine_note_off(&engine, 0, 60);
+    m4a_engine_cc(&engine, 0, 0x5, 5);          /* portamento back on */
+    m4a_engine_note_on(&engine, 0, 62, 0x60);
+    ASSERT(engine.tracks[0].portamentoGliding, "prev-key: glide after re-enable");
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 60,
+              "prev-key: glide starts from last note, not stale pre-disable key");
+    m4a_engine_destroy(&engine);
+
+    /* ---- Transport stop / All Notes Off forgets note history: the first
+     * note after resume must not glide, but CC 5 (a parameter) survives ---- */
+    voices[0].decay = 0;
+    voices[0].sustain = 0xFF;
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 0x5, 5);
+    m4a_engine_note_on(&engine, 0, 48, 0x60);          /* records key 48 */
+    m4a_engine_all_notes_off(&engine, 0);              /* DAW stop (CC 123) */
+    m4a_engine_note_on(&engine, 0, 60, 0x60);
+    ASSERT(!engine.tracks[0].portamentoGliding, "reset: no glide after All Notes Off");
+    ASSERT_EQ(engine.tracks[0].portamentoDuration, 5, "reset: CC 5 duration survives");
+    /* ...but a subsequent legato note glides again as usual */
+    m4a_engine_note_off(&engine, 0, 60);
+    m4a_engine_note_on(&engine, 0, 62, 0x60);
+    ASSERT(engine.tracks[0].portamentoGliding, "reset: portamento works after resume");
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 60, "reset: glide from post-resume note");
+    /* All Sound Off / transport stop clears every track, even mid-glide */
+    m4a_engine_all_sound_off(&engine);
+    ASSERT(!engine.tracks[0].portamentoGliding, "reset: All Sound Off cancels glide");
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 0, "reset: All Sound Off forgets prev key");
+    m4a_engine_destroy(&engine);
+
+    /* ---- Interrupted glide: a new note that interrupts an in-progress glide
+     * restarts from the original previous-note key (snapping back to that
+     * pitch), NOT the current interpolated position.  Matches the GBA, which
+     * only advances portamentoPrevKey when a glide actually completes. ---- */
+    voices[0].decay = 0;
+    voices[0].sustain = 0xFF;  /* sustained so legato inheritance works */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 0x5, 8);
+    m4a_engine_note_on(&engine, 0, 48, 0x60);
+    m4a_engine_process(&engine, outL, outR, 1024);
+    m4a_engine_note_off(&engine, 0, 48);
+    m4a_engine_note_on(&engine, 0, 60, 0x60);   /* glide 48 -> 60 */
+    /* Let the glide get partway (8 ticks = 1200 units; ~3 VBlanks in) */
+    m4a_engine_process(&engine, outL, outR, 1024);
+    m4a_engine_process(&engine, outL, outR, 1024);
+    ASSERT(engine.tracks[0].portamentoGliding, "interrupt: glide still in progress");
+    m4a_engine_note_off(&engine, 0, 60);
+    m4a_engine_note_on(&engine, 0, 50, 0x60);   /* interrupt mid-glide */
+    ASSERT(engine.tracks[0].portamentoGliding, "interrupt: new glide starts");
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 48,
+              "interrupt: new glide restarts from original previous-note key");
+    ASSERT_EQ(engine.tracks[0].portamentoTargetKey, 50, "interrupt: new glide targets new note");
+    m4a_engine_destroy(&engine);
+
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -425,6 +743,8 @@ int main(void)
     test_engine_init();
     test_basic_audio();
     test_polyphony_stealing();
+    test_portamento();
+    test_portamento_prev_key_tracking();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

@@ -356,6 +356,17 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         m4a_engine_set_tempo_bpm(&data->engine, process->transport->tempo);
     }
 
+    /* When the host transport stops, forget portamento note history so the
+     * first note after the playhead moves doesn't glide from a note that was
+     * sounding when playback paused.  (Hosts that send All Notes Off / All
+     * Sound Off on stop are covered by those handlers too.) */
+    if (process->transport) {
+        bool playing = (process->transport->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
+        if (data->transportWasPlaying && !playing)
+            m4a_engine_reset_portamento(&data->engine);
+        data->transportWasPlaying = playing;
+    }
+
     const uint32_t numFrames = process->frames_count;
     const uint32_t numEvents = process->in_events->size(process->in_events);
 
