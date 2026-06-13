@@ -731,6 +731,78 @@ static void test_portamento_prev_key_tracking(void)
     free(wd);
 }
 
+/* Pulse-width modulation: PWMC (CC 0x17) selects a duty-cycle pattern and PWMS
+ * (CC 0x19) sets the speed; the engine then cycles a square channel's duty
+ * cycle through the pattern at VBlank rate. */
+static void test_pwm(void)
+{
+    printf("Testing pulse-width modulation...\n");
+
+    /* Square voice with a default 50% (duty 2) duty cycle. */
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_SQUARE_1;
+    voices[0].key = 60;
+    voices[0].wavePointer = (uint32_t *)(uintptr_t)2;  /* default duty: 50% */
+    voices[0].attack = 0;
+    voices[0].decay = 0;
+    voices[0].sustain = 15;
+    voices[0].release = 3;
+
+    M4AEngine engine;
+    float outL[1024], outR[1024];
+
+    /* At 44100 Hz one VBlank tick is ~738.4 samples; 739 fires exactly one. */
+    const int SAMPLES_PER_TICK = 739;
+
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+
+    M4ACGBChannel *sq = &engine.cgbChannels[0];  /* SQUARE_1 -> cgb ch 0 */
+
+    /* Enable PWM with pattern 2 (ascending {0,1,2}) at speed 2. */
+    m4a_engine_cc(&engine, 0, 0x17, 2);  /* PWMC: pattern 2 */
+    m4a_engine_cc(&engine, 0, 0x19, 2);  /* PWMS: speed 2 */
+    ASSERT_EQ(engine.tracks[0].pwmPattern, 2, "pwm: PWMC sets pattern");
+    ASSERT_EQ(engine.tracks[0].pwmSpeed, 2, "pwm: PWMS sets speed");
+    ASSERT(engine.pwmActiveFlag, "pwm: enabling PWMS marks engine active");
+
+    /* A new note starts on the pattern's first duty cycle (step 0 = 0), not the
+     * voice's default duty.  Mirrors the SF_START branch on the GBA. */
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    ASSERT_EQ(sq->dutyCycle, 0, "pwm: note starts on pattern step 0");
+    ASSERT_EQ(engine.tracks[0].pwmStep, 0, "pwm: note resets pattern step");
+
+    /* speed=2: duty holds for one tick, then advances each second tick. */
+    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 1 */
+    ASSERT_EQ(sq->dutyCycle, 0, "pwm: duty holds during speed countdown");
+    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 2 */
+    ASSERT_EQ(sq->dutyCycle, 1, "pwm: duty advances to step 1");
+    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 3 */
+    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 4 */
+    ASSERT_EQ(sq->dutyCycle, 2, "pwm: duty advances to step 2");
+    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 5 */
+    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 6 */
+    ASSERT_EQ(sq->dutyCycle, 0, "pwm: pattern wraps back to step 0");
+
+    /* Disabling the effect (PWMS 0) restores the voice's default duty cycle. */
+    m4a_engine_cc(&engine, 0, 0x19, 0);
+    ASSERT_EQ(engine.tracks[0].pwmSpeed, 0, "pwm: PWMS 0 disables");
+    ASSERT_EQ(sq->dutyCycle, 2, "pwm: disabling restores voice default duty");
+
+    /* The disabled effect no longer modulates the duty. */
+    for (int i = 0; i < 4; i++)
+        m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);
+    ASSERT_EQ(sq->dutyCycle, 2, "pwm: duty stays fixed once disabled");
+
+    /* An out-of-range pattern index falls back to 0 (no effect). */
+    m4a_engine_cc(&engine, 0, 0x17, 200);
+    ASSERT_EQ(engine.tracks[0].pwmPattern, 0, "pwm: out-of-range pattern clamps to 0");
+
+    m4a_engine_destroy(&engine);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -745,6 +817,7 @@ int main(void)
     test_polyphony_stealing();
     test_portamento();
     test_portamento_prev_key_tracking();
+    test_pwm();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

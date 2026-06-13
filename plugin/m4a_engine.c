@@ -5,6 +5,25 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Duty cycle patterns for the pulse-width modulation effect (PWMC command).
+ * They loop from start to end while the effect is running.  Hardware duty-cycle
+ * values: 0 = 12.5%, 1 = 25%, 2 = 50%, 3 = 75%.  Matches gPulseWidthModPatterns
+ * in pokeemerald's m4a_tables.c. */
+const PulseWidthModPattern gPulseWidthModPatterns[] =
+{
+    { 0, {0} },           /* 0: none */
+    { 3, {2, 1, 0} },     /* 1: descending 50% -> 25% -> 12.5% */
+    { 3, {0, 1, 2} },     /* 2: ascending 12.5% -> 25% -> 50% */
+    { 4, {0, 1, 2, 1} },  /* 3: triangle 12.5% -> 25% -> 50% -> 25% */
+    { 4, {2, 1, 0, 1} },  /* 4: inverted triangle 50% -> 25% -> 12.5% -> 25% */
+    { 2, {1, 2} },        /* 5: alternating 25% <-> 50% */
+    { 2, {0, 2} },        /* 6: alternating 12.5% <-> 50% */
+    { 2, {0, 1} },        /* 7: alternating 12.5% <-> 25% */
+};
+
+const uint8_t gNumPulseWidthModPatterns =
+    sizeof(gPulseWidthModPatterns) / sizeof(gPulseWidthModPatterns[0]);
+
 /*
  * MidiKeyToFreq - matches m4a.c
  * Converts MIDI key + fine adjust to a frequency word for PCM playback.
@@ -486,6 +505,19 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
             ch->dutyCycle = (uint8_t)(uintptr_t)voice->wavePointer & 0x03;
             if (voiceType == 1)
                 ch->sweep = (voice->panSweep & 0x70) ? voice->panSweep : 0x08;
+
+            /* Pulse-width modulation: if the effect is active on this track,
+             * start the note on the pattern's first duty cycle and reset the
+             * pattern position.  Mirrors the new-note (SOUND_CHANNEL_SF_START)
+             * branch of MPlayProcessPulseWidthMod on the GBA. */
+            if (track->pwmSpeed != 0 && track->pwmPattern != 0) {
+                const PulseWidthModPattern *p = &gPulseWidthModPatterns[track->pwmPattern];
+                if (p->numSteps != 0) {
+                    ch->dutyCycle = p->duty[0];
+                    track->pwmStep = 0;
+                    track->pwmSpeedCounter = track->pwmSpeed;
+                }
+            }
         } else if (voiceType == 3) {
             ch->wavePointer = voice->wavePointer;
         }
@@ -670,6 +702,21 @@ static inline void refresh_volumes(M4AEngine *engine, M4ATrack *track, int track
     }
 }
 
+/* Return the active CGB square channel (sq1/sq2) currently owned by a track,
+ * or NULL if the track isn't driving a square channel.  Pulse-width modulation
+ * only affects the two square-wave channels. */
+static M4ACGBChannel *find_track_square_channel(M4AEngine *engine, int trackIndex)
+{
+    for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
+        M4ACGBChannel *ch = &engine->cgbChannels[i];
+        if ((ch->type == 1 || ch->type == 2)
+            && (ch->status & CHN_ON)
+            && ch->trackIndex == trackIndex)
+            return ch;
+    }
+    return NULL;
+}
+
 /*
  * Control Change
  */
@@ -725,6 +772,42 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         break;
     case 0x16: /* Modulation type (MODT) */
         // TODO: none of the pokemon emerald songs use MODT
+        break;
+    case 0x17: { /* Pulse-width mod duty-cycle pattern (PWMC); 0 = disable.
+                  * Mirrors ply_pwmc on the GBA. */
+        uint8_t pattern = value;
+        if (pattern >= gNumPulseWidthModPatterns)
+            pattern = 0;
+        track->pwmPattern = pattern;
+        track->pwmStep = 0;
+        track->pwmSpeedCounter = track->pwmSpeed;
+        break;
+    }
+    case 0x19: /* Pulse-width mod speed (PWMS), VBlank frames per step; 0 = off.
+                * Mirrors ply_pwms on the GBA. */
+        if (value > 0) {
+            /* Only restart the pattern when the effect turns off->on, so the
+             * speed can be modulated smoothly while the effect is running. */
+            if (track->pwmSpeed == 0) {
+                track->pwmStep = 0;
+                track->pwmSpeedCounter = value;
+            } else if (track->pwmSpeedCounter > value) {
+                track->pwmSpeedCounter = value;
+            }
+            track->pwmSpeed = value;
+            engine->pwmActiveFlag = true;
+        } else {
+            /* Disable the effect and restore the voice's default duty cycle. */
+            track->pwmSpeed = 0;
+            track->pwmSpeedCounter = 0;
+            track->pwmStep = 0;
+            uint8_t voiceType = track->currentVoice.type & VOICE_TYPE_CGB_MASK;
+            if (voiceType == 1 || voiceType == 2) {
+                M4ACGBChannel *ch = find_track_square_channel(engine, trackIndex);
+                if (ch != NULL)
+                    ch->dutyCycle = (uint8_t)(uintptr_t)track->currentVoice.wavePointer & 0x03;
+            }
+        }
         break;
     case 0x18: /* Micro tuning (TUNE) */
         // TODO: none of the pokemon emerald songs use TUNE
@@ -934,6 +1017,52 @@ static void m4a_portamento_tick(M4AEngine *engine)
 }
 
 /*
+ * Advance the pulse-width modulation duty-cycle pattern for each track.  Called
+ * once per engine tick (~60Hz/VBlank), so the modulation rate is tempo-
+ * independent.  Only affects CGB square channels 1 and 2.  Mirrors
+ * MPlayProcessPulseWidthMod in pokeemerald's m4a.c.
+ */
+static void m4a_pwm_tick(M4AEngine *engine)
+{
+    if (!engine->pwmActiveFlag)
+        return;
+
+    bool anyActive = false;
+
+    for (int i = 0; i < MAX_TRACKS; i++) {
+        M4ATrack *track = &engine->tracks[i];
+
+        if (track->pwmSpeed == 0 || track->pwmPattern == 0)
+            continue;
+
+        anyActive = true;
+
+        M4ACGBChannel *ch = find_track_square_channel(engine, i);
+        if (ch == NULL)
+            continue;
+
+        const PulseWidthModPattern *pattern = &gPulseWidthModPatterns[track->pwmPattern];
+        if (pattern->numSteps == 0)
+            continue;
+
+        /* Move to the next step once the per-step counter expires.  The note's
+         * first duty cycle (pattern step 0) is set at note-on, mirroring the
+         * SOUND_CHANNEL_SF_START branch of the GBA's process routine. */
+        if (--track->pwmSpeedCounter > 0)
+            continue;
+
+        track->pwmSpeedCounter = track->pwmSpeed;
+        uint8_t step = track->pwmStep + 1;
+        if (step >= pattern->numSteps)
+            step = 0;
+        track->pwmStep = step;
+        ch->dutyCycle = pattern->duty[step];
+    }
+
+    engine->pwmActiveFlag = anyActive;
+}
+
+/*
  * Engine tick - called at ~60Hz (VBlank rate)
  * Advances envelopes at VBlank rate and LFO at tempo rate,
  * matching the GBA's split between SoundMainRAM and MPlayMain.
@@ -984,6 +1113,10 @@ void m4a_engine_tick(M4AEngine *engine)
     /* Advance portamento glides last so they override any pitch the LFO
      * wrote this tick, matching MPlayMain's ordering on the GBA. */
     m4a_portamento_tick(engine);
+
+    /* Advance pulse-width modulation duty cycles for square-wave channels,
+     * matching MPlayProcessPulseWidthMod's placement in MPlayMain. */
+    m4a_pwm_tick(engine);
 }
 
 /*

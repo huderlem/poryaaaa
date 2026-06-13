@@ -72,6 +72,20 @@ typedef struct {
     uint8_t release;
 } ToneData;
 
+/* Pulse-width modulation duty-cycle pattern (matches GBA PulseWidthModPattern).
+ * The PWMC command selects a pattern by index and the PWMS command sets the
+ * modulation speed; the effect cycles a CGB square channel's duty cycle through
+ * the pattern's steps.  Hardware duty values: 0=12.5%, 1=25%, 2=50%, 3=75%. */
+#define MAX_PWM_PATTERN_STEPS 7
+
+typedef struct {
+    uint8_t numSteps;                    /* 0 = disabled */
+    uint8_t duty[MAX_PWM_PATTERN_STEPS]; /* duty cycle per step (0-3) */
+} PulseWidthModPattern;
+
+extern const PulseWidthModPattern gPulseWidthModPatterns[];
+extern const uint8_t gNumPulseWidthModPatterns;
+
 /* Track state (per MIDI channel) */
 typedef struct {
     uint8_t flags;
@@ -107,6 +121,10 @@ typedef struct {
     uint8_t portamentoTargetKey; /* glide destination key (newest note's channel key) */
     bool portamentoGliding;      /* a glide is in progress */
     uint32_t portamentoElapsed;  /* accumulated tempoI units; glide done at duration*150 */
+    uint8_t pwmPattern;          /* PWMC (CC 0x17): duty-cycle pattern index; 0 = off */
+    uint8_t pwmSpeed;            /* PWMS (CC 0x19): VBlank frames per step; 0 = off */
+    uint8_t pwmSpeedCounter;     /* counts down from pwmSpeed to the next step */
+    uint8_t pwmStep;             /* current index into the pattern's duty[] */
     uint8_t priority;
     uint8_t currentProgram; /* last program_change index (0-127) */
     ToneData currentVoice;  /* current instrument */
@@ -211,6 +229,7 @@ struct M4AEngine {
     uint8_t songMasterVolume; /* 0-127 */
     uint8_t maxPcmChannels; /* active PCM channel count */
     uint8_t c15;            /* counter 0-14 for CGB envelope double-step */
+    bool pwmActiveFlag;     /* true while any track has pulse-width modulation running */
 
     /* GBA analog output emulation: IIR low-pass filter */
     bool analogFilter;      /* enable/disable the hardware output filter */
