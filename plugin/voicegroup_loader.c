@@ -1322,9 +1322,14 @@ static VoicegroupLocation find_voicegroup(const char *projectRoot,
         if (suffix) {
             char baseName[MAX_SYMBOL_LEN];
             int baseLen = (int)(suffix - vgName);
-            if (baseLen > 0 && baseLen < MAX_SYMBOL_LEN) {
+            /* The drumset file keeps whatever follows "_drumset" (e.g.
+             * voicegroup_emerald_drumset_1 -> drumsets/emerald_1.inc, and
+             * voicegroup_frlg_drumset -> drumsets/frlg.inc), so splice the
+             * "_drumset" infix out rather than truncating the name at it. */
+            const char *tail = suffix + 8; /* strlen("_drumset") */
+            if (baseLen > 0 && baseLen + (int)strlen(tail) < MAX_SYMBOL_LEN) {
                 memcpy(baseName, vgName, baseLen);
-                baseName[baseLen] = '\0';
+                strcpy(baseName + baseLen, tail);
                 /* Explicit <dir>/drumsets/<base>.inc probe for each voicegroup dir */
                 for (int i = 0; i < disc->voicegroupDirs.count; i++) {
                     snprintf(path, sizeof(path), "%s%cdrumsets%c%s.inc",
