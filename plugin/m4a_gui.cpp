@@ -18,6 +18,11 @@
 #include <stdio.h>
 #include <time.h>
 
+/* Timer ID for the internal render timer 
+    Bitwig does not give the plugin a timer, 
+    so we use a timer from Pugl to drive GUI updates */
+static const uintptr_t RENDER_TIMER_ID = 1;
+
 /* ---- Debug logging ---- */
 static const char *s_logPath = nullptr;
 
@@ -81,6 +86,11 @@ struct M4AGuiState {
 
     /* True after the user closes the floating window */
     bool wasClosed;
+
+    /* True when the internal pugl render timer is active */
+    bool internalTimerActive;
+    M4AGuiTimerCallback internalTimerCallback;
+    void *internalTimerUserData;
 
     /* Voice editor state */
     ToneData *liveVoices;
@@ -407,7 +417,6 @@ static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
         if (!gui->glInited) {
             ImGui_ImplOpenGL3_Init("#version 330 core");
             gui->glInited = true;
-            gui_log("pugl_event_handler: PUGL_REALIZE, ImGui_ImplOpenGL3_Init done");
         }
         break;
 
@@ -439,9 +448,17 @@ static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
             render_frame(gui);
         break;
 
+    case PUGL_TIMER:
+        /* The internal Pugl timer drives rendering when the host has no
+         * timer_support. The callback (set in gui_create) routes back into
+         * the plugin's normal timer pump. */
+        if (event->timer.id == RENDER_TIMER_ID && gui->internalTimerCallback)
+            gui->internalTimerCallback(gui->internalTimerUserData);
+        break;
+
     case PUGL_CLOSE:
         gui->wasClosed = true;
-        gui_log("pugl_event_handler: PUGL_CLOSE");
+        m4a_gui_stop_internal_timer(gui);
         if (gui->host) {
             const clap_host_gui_t *hostGui =
                 (const clap_host_gui_t *)gui->host->get_extension(gui->host, CLAP_EXT_GUI);
@@ -457,6 +474,29 @@ static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
         puglGrabFocus(view);
         ImGui_ImplPugl_ProcessEvent(event);
         break;
+
+    case PUGL_BUTTON_RELEASE:
+        ImGui_ImplPugl_ProcessEvent(event);
+        break;
+
+    case PUGL_KEY_PRESS:
+    case PUGL_KEY_RELEASE:
+    {
+        ImGuiIO &io = ImGui::GetIO();
+
+        /* Tells Pugl to not handle spacebar presses *unless* ImGui wants text input
+        See third_party/pugl/mac.m > key_down handler for more details */
+        const PuglMods mods = event->key.state;
+        const bool plainSpace =
+            event->key.key == PUGL_KEY_SPACE &&
+            (mods & (PUGL_MOD_SHIFT | PUGL_MOD_CTRL | PUGL_MOD_ALT | PUGL_MOD_SUPER)) == 0;
+
+        if (gui->isEmbedded && plainSpace && !io.WantTextInput) // in case ur focusing text input
+            return PUGL_UNSUPPORTED;
+
+        ImGui_ImplPugl_ProcessEvent(event);
+        break;
+    }
 
     default:
         /* Forward all other input events to ImGui */
@@ -475,7 +515,6 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
                              const char *log_path)
 {
     s_logPath = log_path;
-    gui_log("m4a_gui_create: begin");
 
     M4AGuiState *gui = new M4AGuiState();
     memset(gui, 0, sizeof(*gui));
@@ -560,7 +599,9 @@ void m4a_gui_destroy(M4AGuiState *gui)
     if (!gui)
         return;
 
-    gui_log("m4a_gui_destroy: begin");
+
+    /* Stop the internal render timer before tearing down GL/ImGui */
+    m4a_gui_stop_internal_timer(gui);
 
     ImGui::SetCurrentContext(gui->imguiCtx);
 
@@ -573,7 +614,6 @@ void m4a_gui_destroy(M4AGuiState *gui)
         ImGui_ImplOpenGL3_Shutdown();
         gui->glInited = false;
         puglLeaveContext(gui->view);
-        gui_log("m4a_gui_destroy: ImGui_ImplOpenGL3_Shutdown done");
     }
 
     ImGui_ImplPugl_Shutdown();
@@ -633,15 +673,16 @@ bool m4a_gui_show(M4AGuiState *gui)
         gui_log("m4a_gui_show: realized as floating");
     }
 
-    puglShow(gui->view, PUGL_SHOW_RAISE);
-    gui_log("m4a_gui_show: shown");
+    /* Embedded views must not manipulate the host's window (orderFront etc.),
+     * so use PUGL_SHOW_PASSIVE.  Floating windows should raise normally. */
+    puglShow(gui->view, gui->isEmbedded ? PUGL_SHOW_PASSIVE : PUGL_SHOW_RAISE);
     return true;
 }
 
 bool m4a_gui_hide(M4AGuiState *gui)
 {
-    gui_log("m4a_gui_hide called");
     if (!gui || !gui->view) return false;
+    m4a_gui_stop_internal_timer(gui);
     puglHide(gui->view);
     return true;
 }
@@ -653,15 +694,25 @@ void m4a_gui_get_size(M4AGuiState *gui, uint32_t *width, uint32_t *height)
         *height = (uint32_t)GUI_H;
         return;
     }
-    *width  = gui->cachedWidth;
-    *height = gui->cachedHeight;
+    /* cachedWidth/Height are in backing pixels (from Pugl CONFIGURE).
+     * The CLAP host expects logical pixels (points on macOS), so divide
+     * by the backing scale factor. */
+    double scale = gui->view ? puglGetScaleFactor(gui->view) : 1.0;
+    if (scale < 1.0) scale = 1.0;
+    *width  = (uint32_t)(gui->cachedWidth  / scale);
+    *height = (uint32_t)(gui->cachedHeight / scale);
 }
 
 bool m4a_gui_set_size(M4AGuiState *gui, uint32_t width, uint32_t height)
 {
     if (!gui || !gui->view) return false;
-    gui_log("m4a_gui_set_size: %ux%u", width, height);
-    puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE, (PuglSpan)width, (PuglSpan)height);
+    /* The host sends logical pixels; Pugl's PUGL_CURRENT_SIZE expects
+     * backing pixels, so scale up. */
+    double scale = puglGetScaleFactor(gui->view);
+    if (scale < 1.0) scale = 1.0;
+    PuglSpan pw = (PuglSpan)(width  * scale);
+    PuglSpan ph = (PuglSpan)(height * scale);
+    puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE, pw, ph);
     return true;
 }
 
@@ -706,6 +757,16 @@ void m4a_gui_tick(M4AGuiState *gui)
     puglUpdate(gui->world, 0.0);
 }
 
+void m4a_gui_set_internal_timer_callback(M4AGuiState *gui,
+                                          M4AGuiTimerCallback callback,
+                                          void *user_data)
+{
+    if (!gui)
+        return;
+    gui->internalTimerCallback = callback;
+    gui->internalTimerUserData = user_data;
+}
+
 void m4a_gui_set_voice_data(M4AGuiState *gui,
                              ToneData *liveVoices,
                              const ToneData *originalVoices,
@@ -736,4 +797,23 @@ bool m4a_gui_poll_voices_dirty(M4AGuiState *gui)
     return true;
 }
 
+void m4a_gui_start_internal_timer(M4AGuiState *gui)
+{
+    if (!gui || !gui->view || !gui->realized)
+        return;
+    if (gui->internalTimerActive)
+        return;
+    PuglStatus st = puglStartTimer(gui->view, RENDER_TIMER_ID, 1.0 / 60.0);
+    if (st == PUGL_SUCCESS)
+        gui->internalTimerActive = true;
+}
+
+void m4a_gui_stop_internal_timer(M4AGuiState *gui)
+{
+    if (!gui || !gui->view || !gui->internalTimerActive)
+        return;
+
+    puglStopTimer(gui->view, RENDER_TIMER_ID);
+    gui->internalTimerActive = false;
+}
 } /* extern "C" */

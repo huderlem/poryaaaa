@@ -585,6 +585,106 @@ static void plugin_log(const char *fmt, ...)
     fclose(f);
 }
 
+/* ---- Timer support extension ---- */
+
+static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+    if (!data->gui)
+        return;
+    /* If the host supports timers, only respond to our registered timer.
+     * If not (e.g. standalone without native timer support), accept any id
+     * so an external driver can call on_timer to pump the GUI. */
+    if (data->guiTimerId != CLAP_INVALID_ID && timer_id != data->guiTimerId)
+        return;
+
+    /* Render one GUI frame */
+    m4a_gui_tick(data->gui);
+
+    /* Handle voice restore requests from the voice editor */
+    int restoreIdx;
+    bool voicesChanged = false;
+    while (m4a_gui_poll_voice_restore(data->gui, &restoreIdx)) {
+        if (data->loadedVg && restoreIdx >= 0 && restoreIdx < VOICEGROUP_SIZE) {
+            data->loadedVg->voices[restoreIdx] = data->originalVoices[restoreIdx];
+            data->voiceOverrides[restoreIdx] = false;
+            voicesChanged = true;
+        }
+    }
+
+    /* If any voice was edited or restored, refresh active tracks */
+    if (m4a_gui_poll_voices_dirty(data->gui))
+        voicesChanged = true;
+    if (voicesChanged && data->activated)
+        m4a_engine_refresh_voices(&data->engine);
+
+    /* Apply any settings the user changed */
+    M4AGuiSettings gs;
+    bool reloadVoicegroup = false;
+    if (!m4a_gui_poll_changes(data->gui, &gs, &reloadVoicegroup))
+        return;
+
+    /* Immediate audio settings - safe to write since they're byte-sized */
+    data->reverbAmount     = gs.reverbAmount;
+    data->masterVolume     = gs.masterVolume;
+    data->songMasterVolume = gs.songMasterVolume;
+    data->analogFilter     = gs.analogFilter;
+    data->maxPcmChannels   = gs.maxPcmChannels;
+
+    if (data->activated) {
+        data->engine.masterVolume = gs.masterVolume;
+        m4a_engine_set_song_volume(&data->engine, gs.songMasterVolume);
+        m4a_reverb_set_amount(&data->engine.reverb, gs.reverbAmount);
+        data->engine.analogFilter = gs.analogFilter;
+        data->engine.maxPcmChannels = gs.maxPcmChannels;
+    }
+
+    if (reloadVoicegroup) {
+        /* Update paths, then ask the host to deactivate/reactivate so the new
+         * voicegroup is loaded cleanly from the audio thread's perspective. */
+        snprintf(data->projectRoot,    sizeof(data->projectRoot),
+                 "%s", gs.projectRoot);
+        snprintf(data->voicegroupName, sizeof(data->voicegroupName),
+                 "%s", gs.voicegroupName);
+        data->restartRequested = true;
+        data->host->request_restart(data->host);
+    }
+
+    /* Register this change with the host's undo stack.
+     *
+     * Prefer the CLAP undo draft extension when available: pass no delta so
+     * the host snapshots state via state->save()/state->load().
+     *
+     * Fall back to mark_dirty() for hosts (e.g. Reaper) that don't implement
+     * the draft extension. Per the CLAP spec, mark_dirty() creates an implicit
+     * undo step as long as the plugin hasn't opted into CLAP_EXT_UNDO. */
+    const clap_host_undo_t *hostUndo =
+        (const clap_host_undo_t *)data->host->get_extension(data->host, CLAP_EXT_UNDO);
+    if (hostUndo && hostUndo->change_made) {
+        const char *name = reloadVoicegroup ? "M4A: Reload Voicegroup"
+                                            : "M4A: Settings Change";
+        hostUndo->change_made(data->host, name, NULL, 0, false);
+    } else {
+        const clap_host_state_t *hostState =
+            (const clap_host_state_t *)data->host->get_extension(data->host, CLAP_EXT_STATE);
+        if (hostState && hostState->mark_dirty)
+            hostState->mark_dirty(data->host);
+    }
+
+    /* Reflect updated status back into the GUI (voicegroupLoaded may change
+     * after request_restart completes, but update the rest immediately). */
+    gs.voicegroupLoaded = (data->loadedVg != NULL);
+    m4a_gui_update_settings(data->gui, &gs);
+}
+
+static void gui_internal_timer_callback(void *user_data)
+{
+    /* The internal Pugl timer only runs when the host has no timer_support,
+     * so guiTimerId is CLAP_INVALID_ID and timer_on_timer ignores the id.
+     * The 0 passed here is therefore never compared against a real id. */
+    timer_on_timer((const clap_plugin_t *)user_data, 0);
+}
+
 static bool gui_is_api_supported(const clap_plugin_t *plugin, const char *api, bool is_floating)
 {
     (void)plugin;
@@ -645,6 +745,7 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
         plugin_log("gui_create: m4a_gui_create() returned NULL");
         return false;
     }
+    m4a_gui_set_internal_timer_callback(data->gui, gui_internal_timer_callback, (void *)plugin);
 
     /* Wire voice data pointers if voicegroup is already loaded */
     if (data->loadedVg)
@@ -652,7 +753,10 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
 
     plugin_log("gui_create: success");
 
-    /* Register a ~60 Hz timer to drive GUI rendering */
+    /* Register a ~60 Hz timer to drive GUI rendering. If the host provides
+     * timer_support, it drives on_timer. Otherwise the internal Pugl timer
+     * (started in gui_show) drives it via gui_internal_timer_callback, which
+     * was already wired up above. */
     const clap_host_timer_support_t *timerExt =
         (const clap_host_timer_support_t *)data->host->get_extension(
             data->host, CLAP_EXT_TIMER_SUPPORT);
@@ -760,7 +864,15 @@ static bool gui_show(const clap_plugin_t *plugin)
 {
     plugin_log("gui_show called");
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
-    return m4a_gui_show(data->gui);
+    bool ok = m4a_gui_show(data->gui);
+
+    /* If the host doesn't provide timer_support, start Pugl's internal
+     * NSTimer to drive rendering at ~60 Hz. Must be called after
+     * gui_show (view must be realized and visible). */
+    if (ok && data->guiTimerId == CLAP_INVALID_ID)
+        m4a_gui_start_internal_timer(data->gui);
+
+    return ok;
 }
 
 static bool gui_hide(const clap_plugin_t *plugin)
@@ -786,98 +898,6 @@ static const clap_plugin_gui_t s_gui = {
     .show              = gui_show,
     .hide              = gui_hide,
 };
-
-/* ---- Timer support extension ---- */
-
-static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
-{
-    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
-    if (!data->gui)
-        return;
-    /* If the host supports timers, only respond to our registered timer.
-     * If not (e.g. standalone without native timer support), accept any id
-     * so an external driver can call on_timer to pump the GUI. */
-    if (data->guiTimerId != CLAP_INVALID_ID && timer_id != data->guiTimerId)
-        return;
-
-    /* Render one GUI frame */
-    m4a_gui_tick(data->gui);
-
-    /* Handle voice restore requests from the voice editor */
-    int restoreIdx;
-    bool voicesChanged = false;
-    while (m4a_gui_poll_voice_restore(data->gui, &restoreIdx)) {
-        if (data->loadedVg && restoreIdx >= 0 && restoreIdx < VOICEGROUP_SIZE) {
-            data->loadedVg->voices[restoreIdx] = data->originalVoices[restoreIdx];
-            data->voiceOverrides[restoreIdx] = false;
-            voicesChanged = true;
-        }
-    }
-
-    /* If any voice was edited or restored, refresh active tracks */
-    if (m4a_gui_poll_voices_dirty(data->gui))
-        voicesChanged = true;
-    if (voicesChanged && data->activated)
-        m4a_engine_refresh_voices(&data->engine);
-
-    /* Apply any settings the user changed */
-    M4AGuiSettings gs;
-    bool reloadVoicegroup = false;
-    if (!m4a_gui_poll_changes(data->gui, &gs, &reloadVoicegroup))
-        return;
-
-    /* Immediate audio settings - safe to write since they're byte-sized */
-    data->reverbAmount     = gs.reverbAmount;
-    data->masterVolume     = gs.masterVolume;
-    data->songMasterVolume = gs.songMasterVolume;
-    data->analogFilter     = gs.analogFilter;
-    data->maxPcmChannels   = gs.maxPcmChannels;
-
-    if (data->activated) {
-        data->engine.masterVolume = gs.masterVolume;
-        m4a_engine_set_song_volume(&data->engine, gs.songMasterVolume);
-        m4a_reverb_set_amount(&data->engine.reverb, gs.reverbAmount);
-        data->engine.analogFilter = gs.analogFilter;
-        data->engine.maxPcmChannels = gs.maxPcmChannels;
-    }
-
-    if (reloadVoicegroup) {
-        /* Update paths, then ask the host to deactivate/reactivate so the new
-         * voicegroup is loaded cleanly from the audio thread's perspective. */
-        snprintf(data->projectRoot,    sizeof(data->projectRoot),
-                 "%s", gs.projectRoot);
-        snprintf(data->voicegroupName, sizeof(data->voicegroupName),
-                 "%s", gs.voicegroupName);
-        data->restartRequested = true;
-        data->host->request_restart(data->host);
-    }
-
-    /* Register this change with the host's undo stack.
-     *
-     * Prefer the CLAP undo draft extension when available: pass no delta so
-     * the host snapshots state via state->save()/state->load().
-     *
-     * Fall back to mark_dirty() for hosts (e.g. Reaper) that don't implement
-     * the draft extension. Per the CLAP spec, mark_dirty() creates an implicit
-     * undo step as long as the plugin hasn't opted into CLAP_EXT_UNDO. */
-    const clap_host_undo_t *hostUndo =
-        (const clap_host_undo_t *)data->host->get_extension(data->host, CLAP_EXT_UNDO);
-    if (hostUndo && hostUndo->change_made) {
-        const char *name = reloadVoicegroup ? "M4A: Reload Voicegroup"
-                                            : "M4A: Settings Change";
-        hostUndo->change_made(data->host, name, NULL, 0, false);
-    } else {
-        const clap_host_state_t *hostState =
-            (const clap_host_state_t *)data->host->get_extension(data->host, CLAP_EXT_STATE);
-        if (hostState && hostState->mark_dirty)
-            hostState->mark_dirty(data->host);
-    }
-
-    /* Reflect updated status back into the GUI (voicegroupLoaded may change
-     * after request_restart completes, but update the rest immediately). */
-    gs.voicegroupLoaded = (data->loadedVg != NULL);
-    m4a_gui_update_settings(data->gui, &gs);
-}
 
 static const clap_plugin_timer_support_t s_timer_support = {
     .on_timer = timer_on_timer,

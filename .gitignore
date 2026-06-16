@@ -6,3 +6,6 @@ build_pugl/
 *.o
 *.d
 poryaaaa.cfg
+.cache
+.DS_Store
+poryaaaa.log

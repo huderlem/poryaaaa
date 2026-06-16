@@ -12,6 +12,7 @@ extern "C" {
 
 /* Opaque GUI state handle */
 typedef struct M4AGuiState M4AGuiState;
+typedef void (*M4AGuiTimerCallback)(void *user_data);
 
 /* Settings shown/edited in the GUI */
 typedef struct {
@@ -64,6 +65,26 @@ bool m4a_gui_set_parent(M4AGuiState *gui, uintptr_t native_parent);
  * Must be called from the main thread.
  */
 void m4a_gui_tick(M4AGuiState *gui);
+
+/*
+ * Set a callback that the internal GUI timer should invoke on the main thread.
+ * When set, the internal Pugl timer uses this instead of calling m4a_gui_tick()
+ * directly so the plugin can reuse its normal timer pump.
+ */
+void m4a_gui_set_internal_timer_callback(M4AGuiState *gui,
+                                          M4AGuiTimerCallback callback,
+                                          void *user_data);
+
+/*
+ * Start an internal Pugl timer to drive rendering at ~60 Hz.
+ * Use this when the CLAP host does not provide timer_support.
+ */
+void m4a_gui_start_internal_timer(M4AGuiState *gui);
+
+/*
+ * Stop the internal Pugl timer if it is active.
+ */
+void m4a_gui_stop_internal_timer(M4AGuiState *gui);
 
 /*
  * Returns true if the GUI window has been closed by the user.

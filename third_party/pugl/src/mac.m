@@ -692,7 +692,13 @@ handleCrossing(PuglWrapperView* view, NSEvent* event, const PuglEventType type)
 
   PuglEvent pressEvent;
   pressEvent.key = ev;
-  puglDispatchEvent(puglview, &pressEvent);
+  const PuglStatus st = puglDispatchEvent(puglview, &pressEvent);
+  /* This is so in the GUI/plugin, you can return PUGL_UNSUPPORTED from pugl_event_handler
+  and send that keypress to the host */
+  if (st == PUGL_UNSUPPORTED) {
+    [[self nextResponder] keyDown:event];
+    return;
+  }
 
   if (!spec) {
     [self interpretKeyEvents:@[event]];
@@ -723,7 +729,11 @@ handleCrossing(PuglWrapperView* view, NSEvent* event, const PuglEventType type)
 
   PuglEvent releaseEvent;
   releaseEvent.key = ev;
-  puglDispatchEvent(puglview, &releaseEvent);
+  const PuglStatus st = puglDispatchEvent(puglview, &releaseEvent);
+
+  if (st == PUGL_UNSUPPORTED) {
+    [[self nextResponder] keyUp:event];
+  }
 }
 
 - (BOOL)hasMarkedText
@@ -1546,7 +1556,7 @@ puglStopTimer(PuglView* view, uintptr_t id)
   NSTimer*  timer    = view->impl->wrapperView->userTimers[idNumber];
 
   if (timer) {
-    [view->impl->wrapperView->userTimers removeObjectForKey:timer];
+    [view->impl->wrapperView->userTimers removeObjectForKey:idNumber];
     [timer invalidate];
     return PUGL_SUCCESS;
   }
