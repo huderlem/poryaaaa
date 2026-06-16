@@ -679,9 +679,9 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
 
 static void gui_internal_timer_callback(void *user_data)
 {
-    /* This timer_id pretending to
-    look like a CLAP timer ID from the host
-    looks like its arbitrarily 0...could be a bug in the future. */
+    /* The internal Pugl timer only runs when the host has no timer_support,
+     * so guiTimerId is CLAP_INVALID_ID and timer_on_timer ignores the id.
+     * The 0 passed here is therefore never compared against a real id. */
     timer_on_timer((const clap_plugin_t *)user_data, 0);
 }
 
@@ -753,14 +753,16 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
 
     plugin_log("gui_create: success");
 
-    /* Register a ~60 Hz timer to drive GUI rendering */
+    /* Register a ~60 Hz timer to drive GUI rendering. If the host provides
+     * timer_support, it drives on_timer. Otherwise the internal Pugl timer
+     * (started in gui_show) drives it via gui_internal_timer_callback, which
+     * was already wired up above. */
     const clap_host_timer_support_t *timerExt =
-    (const clap_host_timer_support_t *)data->host->get_extension(
-        data->host, CLAP_EXT_TIMER_SUPPORT);
+        (const clap_host_timer_support_t *)data->host->get_extension(
+            data->host, CLAP_EXT_TIMER_SUPPORT);
     if (timerExt)
         timerExt->register_timer(data->host, 16 /* ms */, &data->guiTimerId);
-    else 
-        m4a_gui_set_internal_timer_callback(data->gui, gui_internal_timer_callback, (void *)plugin);
+
     return true;
 }
 
@@ -775,7 +777,8 @@ static void gui_destroy(const clap_plugin_t *plugin)
         const clap_host_timer_support_t *timerExt =
             (const clap_host_timer_support_t *)data->host->get_extension(
                 data->host, CLAP_EXT_TIMER_SUPPORT);
-
+        if (timerExt)
+            timerExt->unregister_timer(data->host, data->guiTimerId);
         data->guiTimerId = CLAP_INVALID_ID;
     }
 

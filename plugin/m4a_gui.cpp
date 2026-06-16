@@ -417,7 +417,6 @@ static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
         if (!gui->glInited) {
             ImGui_ImplOpenGL3_Init("#version 330 core");
             gui->glInited = true;
-            // gui_log("pugl_event_handler: PUGL_REALIZE, ImGui_ImplOpenGL3_Init done");
         }
         break;
 
@@ -446,26 +445,20 @@ static PuglStatus pugl_event_handler(PuglView *view, const PuglEvent *event)
     case PUGL_EXPOSE:
         /* GL context active and drawing is allowed */
         if (gui->glInited)
-        render_frame(gui);
+            render_frame(gui);
         break;
+
     case PUGL_TIMER:
-        if (event->timer.id == RENDER_TIMER_ID) {
-            if (gui->internalTimerCallback)
-            // This is currently just an alias to m4a_plugin.c -> timer_on_timer((const clap_plugin_t *)user_data, 0);
-                gui->internalTimerCallback(gui->internalTimerUserData);
-            else {
-                /* This would happen if the host provided a timer *but* somehow 
-                another Pugl timer started (i dont know how or why or if thats possible)*/
-                gui_log("More than 1 Pugl timer is running. That's odd...");
-                m4a_gui_tick(gui);
-                }
-            }
-            break;
+        /* The internal Pugl timer drives rendering when the host has no
+         * timer_support. The callback (set in gui_create) routes back into
+         * the plugin's normal timer pump. */
+        if (event->timer.id == RENDER_TIMER_ID && gui->internalTimerCallback)
+            gui->internalTimerCallback(gui->internalTimerUserData);
+        break;
 
     case PUGL_CLOSE:
         gui->wasClosed = true;
         m4a_gui_stop_internal_timer(gui);
-        // gui_log("pugl_event_handler: PUGL_CLOSE");
         if (gui->host) {
             const clap_host_gui_t *hostGui =
                 (const clap_host_gui_t *)gui->host->get_extension(gui->host, CLAP_EXT_GUI);
@@ -522,7 +515,6 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
                              const char *log_path)
 {
     s_logPath = log_path;
-    // gui_log("m4a_gui_create: begin");
 
     M4AGuiState *gui = new M4AGuiState();
     memset(gui, 0, sizeof(*gui));
@@ -622,7 +614,6 @@ void m4a_gui_destroy(M4AGuiState *gui)
         ImGui_ImplOpenGL3_Shutdown();
         gui->glInited = false;
         puglLeaveContext(gui->view);
-        // gui_log("m4a_gui_destroy: ImGui_ImplOpenGL3_Shutdown done");
     }
 
     ImGui_ImplPugl_Shutdown();

@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.24)
-project(poryaaaa C CXX OBJC OBJCXX)
+project(poryaaaa C CXX)
+
+# Objective-C/C++ are only needed for the macOS Pugl backend (mac.m, mac_gl.m).
+# Enabling them unconditionally in project() forces every platform to have an
+# Objective-C compiler, which breaks Linux/Windows configuration.
+if(APPLE)
+    enable_language(OBJC)
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)

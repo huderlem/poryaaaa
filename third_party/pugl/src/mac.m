@@ -1556,7 +1556,7 @@ puglStopTimer(PuglView* view, uintptr_t id)
   NSTimer*  timer    = view->impl->wrapperView->userTimers[idNumber];
 
   if (timer) {
-    [view->impl->wrapperView->userTimers removeObjectForKey:timer];
+    [view->impl->wrapperView->userTimers removeObjectForKey:idNumber];
     [timer invalidate];
     return PUGL_SUCCESS;
   }
