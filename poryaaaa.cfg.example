@@ -36,6 +36,9 @@ song_master_volume=127
 # These extend the stock m4a engine and are off by default. They can also be
 # toggled at runtime from the GUI's "Options" menu and are saved per project.
 # Set to 1 to enable, 0 to disable.
+#
+# These features require the matching m4a engine extensions in your project.
+# See: https://github.com/huderlem/pokeemerald/tree/m4a_extensions
 
 # Respect base MIDI key for PCM (DirectSound) voices: treat the voice's key
 # field as the sample's base note so pressed notes play at the intended pitch.

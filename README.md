@@ -50,6 +50,8 @@ Loop options (when MIDI contains '[' / ']' text events):
                                 (fadeout occupies the final --fadeout seconds)
 ```
 
+The opt-in effect features require the matching m4a engine extensions in your project. See [huderlem/pokeemerald @ m4a_extensions](https://github.com/huderlem/pokeemerald/tree/m4a_extensions).
+
 Examples:
 
 ```bash
@@ -160,6 +162,8 @@ The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings ca
 | `voicegroup_paths` | *(auto)* | Extra voicegroup search directories or files |
 | `sample_dirs` | *(auto)* | Extra `.wav` sample search directories |
 | `log` | *(off)* | Diagnostic log file path |
+
+The opt-in effect features (`respect_base_midi_key`, `portamento`, `pwm`) require the matching m4a engine extensions in your project. See [huderlem/pokeemerald @ m4a_extensions](https://github.com/huderlem/pokeemerald/tree/m4a_extensions).
 
 #### GUI
 
