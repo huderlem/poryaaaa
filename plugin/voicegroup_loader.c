@@ -6,14 +6,78 @@
 #include <math.h>
 #include <time.h>
 #include <stdarg.h>
-#include <dirent.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <dirent.h>
+#endif
 
 #ifdef _WIN32
 #define PATH_SEP '\\'
 #else
 #define PATH_SEP '/'
 #endif
+
+/* MSVC's sys/stat.h lacks the POSIX S_IS* predicate macros. */
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+#endif
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#endif
+
+#ifdef _WIN32
+/*
+ * Minimal dirent shim over FindFirstFile.  Only d_name is used in this file,
+ * and directory iteration is strictly sequential (never concurrent), so a
+ * single static dirent entry per stream is sufficient.
+ */
+struct dirent {
+    char d_name[MAX_PATH];
+};
+
+typedef struct {
+    HANDLE handle;
+    WIN32_FIND_DATAA findData;
+    int first;
+    struct dirent entry;
+} DIR;
+
+static DIR *opendir(const char *path)
+{
+    char pattern[MAX_PATH];
+    if (snprintf(pattern, sizeof(pattern), "%s\\*", path) >= (int)sizeof(pattern))
+        return NULL;
+    DIR *d = (DIR *)calloc(1, sizeof(DIR));
+    if (!d) return NULL;
+    d->handle = FindFirstFileA(pattern, &d->findData);
+    if (d->handle == INVALID_HANDLE_VALUE) {
+        free(d);
+        return NULL;
+    }
+    d->first = 1;
+    return d;
+}
+
+static struct dirent *readdir(DIR *d)
+{
+    if (d->first)
+        d->first = 0;
+    else if (!FindNextFileA(d->handle, &d->findData))
+        return NULL;
+    snprintf(d->entry.d_name, sizeof(d->entry.d_name), "%s", d->findData.cFileName);
+    return &d->entry;
+}
+
+static int closedir(DIR *d)
+{
+    FindClose(d->handle);
+    free(d);
+    return 0;
+}
+#endif /* _WIN32 */
 
 #define MAX_LINE 1024
 #define MAX_PATH_LEN 512
