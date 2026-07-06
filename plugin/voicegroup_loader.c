@@ -180,6 +180,7 @@ static int parse_programmable_wave_data_file(const char *filePath, const char *p
 static int parse_keysplit_tables_file(const char *filePath, KeySplitMap *map);
 static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *relativeBinPath);
 static WaveData *load_wav_from_path(const char *absoluteWavPath);
+static WaveData *load_aif_from_path(const char *absoluteAifPath);
 static WaveData *load_wave_data(const char *projectRoot, const char *relativePath);
 static uint32_t *load_prog_wave(const char *projectRoot, const char *relativePath);
 /* ---- WaveData deduplication cache ---- */
@@ -563,7 +564,8 @@ static void visit_for_voicegroup_and_wav_dirs(const char *dirPath, void *ctx)
     CombinedDirVisitorCtx *vctx = (CombinedDirVisitorCtx *)ctx;
     if (dir_has_voice_macros(dirPath))
         pathlist_add(&vctx->disc->voicegroupDirs, dirPath);
-    if (dir_has_files_with_ext(dirPath, ".wav"))
+    if (dir_has_files_with_ext(dirPath, ".wav") ||
+        dir_has_files_with_ext(dirPath, ".aif"))
         pathlist_add(&vctx->disc->wavSampleDirs, dirPath);
     probe_keysplit_data_in_dir(dirPath, vctx->disc);
 }
@@ -1232,10 +1234,218 @@ static WaveData *load_wav_from_path(const char *absoluteWavPath)
     return wd;
 }
 
+/* 80-bit IEEE 754 extended float, big-endian (AIFF COMM sampleRate). */
+static double read_extended80(const uint8_t *b)
+{
+    int sign = (b[0] & 0x80) ? -1 : 1;
+    int exponent = ((b[0] & 0x7F) << 8) | b[1];
+    uint64_t mantissa = 0;
+    for (int i = 0; i < 8; i++)
+        mantissa = (mantissa << 8) | b[2 + i];
+    if (exponent == 0 && mantissa == 0)
+        return 0.0;
+    /* Explicit integer bit: value = mantissa * 2^(exponent - 16383 - 63). */
+    return sign * ldexp((double)mantissa, exponent - 16383 - 63);
+}
+
 /*
- * Load a PCM instrument sample from a .wav file.
- * Derives the .wav path by replacing the .bin extension in relativeBinPath.
- * Falls back to load_wave_data() if the .wav is not found.
+ * Load an .aif (AIFF) file from an absolute path — the sample source format
+ * of projects that predate pret's .wav conversion. Mirrors aif2pcm so the
+ * result matches loading the .bin it would generate: freq = COMM rate * 1024
+ * (the INST base note is ignored, as aif2pcm ignores it), loopStart / size
+ * from the INST sustain-loop MARK positions (size = loop-end position, else
+ * COMM frame count, minus one), 8-bit data used as-is (AIFF PCM is signed),
+ * 16-bit big-endian data reduced to its high byte.
+ */
+static WaveData *load_aif_from_path(const char *absoluteAifPath)
+{
+    FILE *f = fopen(absoluteAifPath, "rb");
+    if (!f) return NULL;
+
+    uint8_t formHdr[12];
+    if (fread(formHdr, 1, 12, f) != 12 ||
+        memcmp(formHdr, "FORM", 4) != 0 ||
+        memcmp(formHdr + 8, "AIFF", 4) != 0) {
+        fclose(f);
+        fprintf(stderr, "voicegroup_loader: invalid FORM/AIFF header in %s\n", absoluteAifPath);
+        return NULL;
+    }
+
+    int commFound = 0, ssndFound = 0;
+    uint32_t numFrames = 0;
+    int sampleSize = 0;
+    double sampleRate = 0.0;
+
+    /* INST sustain loop: marker ids resolved against the MARK chunk. */
+    int haveSustainLoop = 0;
+    uint16_t loopStartId = 0, loopEndId = 0;
+
+    struct { uint16_t id; uint32_t position; } *markers = NULL;
+    uint16_t numMarkers = 0;
+
+    long ssndDataOffset = 0;
+    uint32_t ssndDataBytes = 0;
+
+    while (1) {
+        uint8_t chunkHdr[8];
+        if (fread(chunkHdr, 1, 8, f) != 8)
+            break;
+        uint32_t chunkLen = ((uint32_t)chunkHdr[4] << 24) | ((uint32_t)chunkHdr[5] << 16) |
+                            ((uint32_t)chunkHdr[6] << 8) | chunkHdr[7];
+        long chunkDataStart = ftell(f);
+
+        if (memcmp(chunkHdr, "COMM", 4) == 0 && chunkLen >= 18) {
+            uint8_t d[18];
+            if (fread(d, 1, 18, f) == 18) {
+                int numChannels = (d[0] << 8) | d[1];
+                numFrames = ((uint32_t)d[2] << 24) | ((uint32_t)d[3] << 16) |
+                            ((uint32_t)d[4] << 8) | d[5];
+                sampleSize = (d[6] << 8) | d[7];
+                sampleRate = read_extended80(d + 8);
+                if (numChannels != 1) {
+                    fprintf(stderr, "voicegroup_loader: %s has %d channels, must be mono\n",
+                            absoluteAifPath, numChannels);
+                    free(markers);
+                    fclose(f);
+                    return NULL;
+                }
+                if (sampleSize != 8 && sampleSize != 16) {
+                    fprintf(stderr, "voicegroup_loader: unsupported AIFF sample size %d in %s\n",
+                            sampleSize, absoluteAifPath);
+                    free(markers);
+                    fclose(f);
+                    return NULL;
+                }
+                commFound = 1;
+            }
+        } else if (memcmp(chunkHdr, "MARK", 4) == 0 && chunkLen >= 2 && !markers) {
+            uint8_t d[6];
+            if (fread(d, 1, 2, f) == 2) {
+                numMarkers = (uint16_t)((d[0] << 8) | d[1]);
+                if (numMarkers > 0)
+                    markers = calloc(numMarkers, sizeof(*markers));
+                for (uint16_t i = 0; markers && i < numMarkers; i++) {
+                    if (fread(d, 1, 6, f) != 6)
+                        break;
+                    markers[i].id = (uint16_t)((d[0] << 8) | d[1]);
+                    markers[i].position = ((uint32_t)d[2] << 24) | ((uint32_t)d[3] << 16) |
+                                          ((uint32_t)d[4] << 8) | d[5];
+                    /* Pascal-style name, padded so the record length is even. */
+                    int nameSize;
+                    if ((nameSize = fgetc(f)) == EOF)
+                        break;
+                    if (fseek(f, nameSize + !(nameSize & 1), SEEK_CUR) != 0)
+                        break;
+                }
+            }
+        } else if (memcmp(chunkHdr, "INST", 4) == 0 && chunkLen >= 20) {
+            uint8_t d[20];
+            if (fread(d, 1, 20, f) == 20) {
+                /* d[0] base note, d[1..7] detune/keys/velocities/gain. */
+                int loopType = (d[8] << 8) | d[9];
+                if (loopType) {
+                    loopStartId = (uint16_t)((d[10] << 8) | d[11]);
+                    loopEndId = (uint16_t)((d[12] << 8) | d[13]);
+                    haveSustainLoop = 1;
+                }
+                /* d[14..19] release loop, unused. */
+            }
+        } else if (memcmp(chunkHdr, "SSND", 4) == 0 && chunkLen >= 8) {
+            /* Skip offset and blockSize. */
+            ssndDataOffset = chunkDataStart + 8;
+            ssndDataBytes = chunkLen - 8;
+            ssndFound = 1;
+        }
+
+        long nextChunk = chunkDataStart + (long)chunkLen;
+        if (chunkLen & 1) nextChunk++;
+        if (fseek(f, nextChunk, SEEK_SET) != 0)
+            break;
+    }
+
+    if (!commFound || !ssndFound) {
+        fprintf(stderr, "voicegroup_loader: missing COMM or SSND chunk in %s\n", absoluteAifPath);
+        free(markers);
+        fclose(f);
+        return NULL;
+    }
+
+    /* Resolve the loop markers exactly as aif2pcm does: the end marker's
+     * position bounds the sample, and the smaller of the two positions is
+     * the loop start (guards marker-order mistakes in hand-made files). */
+    int loopEnabled = 0;
+    uint32_t loopStart = 0;
+    uint32_t numSamples = numFrames;
+    if (haveSustainLoop) {
+        for (uint16_t i = 0; i < numMarkers; i++) {
+            if (markers[i].id == loopStartId) {
+                loopStart = markers[i].position;
+                loopEnabled = 1;
+                break;
+            }
+        }
+        for (uint16_t i = 0; i < numMarkers; i++) {
+            if (markers[i].id == loopEndId) {
+                if (markers[i].position < loopStart || !loopEnabled) {
+                    loopStart = markers[i].position;
+                    loopEnabled = 1;
+                }
+                numSamples = markers[i].position;
+                break;
+            }
+        }
+    }
+    free(markers);
+
+    uint32_t size = (numSamples > 0) ? numSamples - 1 : 0;
+    uint32_t bytesPerSample = (sampleSize == 16) ? 2 : 1;
+    uint32_t availableSamples = ssndDataBytes / bytesPerSample;
+    if (size > availableSamples)
+        size = availableSamples;
+
+    WaveData *wd = malloc(sizeof(WaveData) + (size_t)size + 1);
+    if (!wd) {
+        fclose(f);
+        return NULL;
+    }
+    wd->type      = 0;
+    wd->status    = loopEnabled ? 0x4000 : 0;
+    wd->freq      = (uint32_t)(sampleRate * 1024.0);
+    wd->loopStart = loopStart;
+    wd->size      = size;
+    wd->data      = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+
+    size_t rawBytes = (size_t)size * bytesPerSample;
+    if (rawBytes > 0) {
+        uint8_t *rawData = malloc(rawBytes);
+        if (!rawData) {
+            free(wd);
+            fclose(f);
+            return NULL;
+        }
+        size_t bytesRead = 0;
+        if (fseek(f, ssndDataOffset, SEEK_SET) == 0)
+            bytesRead = fread(rawData, 1, rawBytes, f);
+        if (bytesRead < rawBytes)
+            memset(rawData + bytesRead, 0, rawBytes - bytesRead);
+        if (bytesPerSample == 1) {
+            memcpy(wd->data, rawData, size);
+        } else {
+            for (uint32_t i = 0; i < size; i++)
+                wd->data[i] = (int8_t)rawData[(size_t)i * 2]; /* big-endian high byte */
+        }
+        free(rawData);
+    }
+    fclose(f);
+
+    wd->data[size] = (size > 0) ? wd->data[size - 1] : 0;
+    return wd;
+}
+
+/*
+ * Load a PCM instrument sample from a source audio file.
+ * Derives the .wav then .aif path by replacing the .bin extension in
+ * relativeBinPath. Falls back to load_wave_data() if neither is found.
  */
 static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *relativeBinPath)
 {
@@ -1259,7 +1469,12 @@ static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *re
     WaveData *wd = load_wav_from_path(fullPath);
     if (wd) return wd;
 
-    /* .wav not found or failed — fall back to .bin loader */
+    ext[1] = 'a'; ext[2] = 'i'; ext[3] = 'f';
+    build_path(fullPath, sizeof(fullPath), projectRoot, relativeWavPath);
+    wd = load_aif_from_path(fullPath);
+    if (wd) return wd;
+
+    /* Neither source format found — fall back to the .bin build artifact */
     return load_wave_data(projectRoot, relativeBinPath);
 }
 
@@ -1354,7 +1569,8 @@ static uint32_t *load_prog_wave(const char *projectRoot, const char *relativePat
 /* ---- Sample fallback resolution ---- */
 
 /*
- * Try to find and load a .wav sample by searching discovered wav directories.
+ * Try to find and load a .wav or .aif sample by searching discovered sample
+ * directories.
  */
 static WaveData *resolve_sample_from_wav_dirs(const char *symbol,
                                                const ProjectDiscovery *disc)
@@ -1363,6 +1579,9 @@ static WaveData *resolve_sample_from_wav_dirs(const char *symbol,
         char wavPath[MAX_PATH_LEN];
         snprintf(wavPath, sizeof(wavPath), "%s%c%s.wav", disc->wavSampleDirs.paths[i], PATH_SEP, symbol);
         WaveData *wd = load_wav_from_path(wavPath);
+        if (wd) return wd;
+        snprintf(wavPath, sizeof(wavPath), "%s%c%s.aif", disc->wavSampleDirs.paths[i], PATH_SEP, symbol);
+        wd = load_aif_from_path(wavPath);
         if (wd) return wd;
     }
     return NULL;
@@ -1429,19 +1648,23 @@ static WaveData *resolve_and_load_sample(const char *projectRoot, const char *sy
             return wd;
         }
     }
-    /* Fallback: search wav directories */
+    /* Fallback: search sample directories (.wav, then .aif) */
     if (disc) {
         for (int i = 0; i < disc->wavSampleDirs.count; i++) {
-            char wavPath[MAX_PATH_LEN];
-            snprintf(wavPath, sizeof(wavPath), "%s%c%s.wav",
-                     disc->wavSampleDirs.paths[i], PATH_SEP, symbol);
-            WaveData *cached = wave_cache_find(waveCache, wavPath);
-            if (cached) return cached;
-            WaveData *wd = load_wav_from_path(wavPath);
-            if (wd) {
-                vg_register_wavedata(vg, wd);
-                wave_cache_insert(waveCache, wavPath, wd);
-                return wd;
+            for (int fmt = 0; fmt < 2; fmt++) {
+                char wavPath[MAX_PATH_LEN];
+                snprintf(wavPath, sizeof(wavPath), "%s%c%s.%s",
+                         disc->wavSampleDirs.paths[i], PATH_SEP, symbol,
+                         fmt == 0 ? "wav" : "aif");
+                WaveData *cached = wave_cache_find(waveCache, wavPath);
+                if (cached) return cached;
+                WaveData *wd = fmt == 0 ? load_wav_from_path(wavPath)
+                                        : load_aif_from_path(wavPath);
+                if (wd) {
+                    vg_register_wavedata(vg, wd);
+                    wave_cache_insert(waveCache, wavPath, wd);
+                    return wd;
+                }
             }
         }
     }
