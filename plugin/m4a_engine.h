@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define MAX_PCM_CHANNELS 12
+#define MAX_PCM_CHANNELS 15
 #define MAX_CGB_CHANNELS 4
 /* The engine keeps a second "shadow" pool of channels after the real ones.
  * Shadow channels never participate in normal note allocation; they exist so

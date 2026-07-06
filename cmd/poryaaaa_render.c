@@ -716,7 +716,7 @@ static void print_usage(const char *prog)
         "  --respect-base-midi-key     Opt-in: treat a PCM voice's key as the sample's base MIDI note (default: off)\n"
         "  --portamento                Opt-in: enable the portamento glide effect, CC 5 (default: off)\n"
         "  --pwm                       Opt-in: enable pulse-width modulation on CGB square channels, CC 0x17/0x19 (default: off)\n"
-        "  --polyphony <1-12>          Max simultaneous PCM channels (default: 5)\n"
+        "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
         "  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate; 0 means same as sample-rate (default: 13379)\n"
         "  --tail <seconds>            Silence after last event, no loop markers (default: 3.0)\n"

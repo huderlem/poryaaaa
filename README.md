@@ -34,7 +34,7 @@ Audio options:
   --song-volume <0-127>       Song master volume (default: 127)
   --reverb <0-127>            Reverb amount (default: 0)
   --analog-filter             Enable GBA analog low-pass filter (default: off)
-  --polyphony <1-12>          Max simultaneous PCM channels (default: 5)
+  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)
   --sample-rate <hz>          Sample rate in Hz (default: 44100)
   --pcm-mix-rate <hz>         DirectSound (PCM) mix rate; 0 means same as sample-rate (default: 13379)
   --tail <seconds>            Silence after last event, no loop markers (default: 3.0)
@@ -156,7 +156,7 @@ The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings ca
 | `reverb` | `0` | Reverb amount (0–127) |
 | `master_volume` | `15` | M4A master volume (0–15) |
 | `song_master_volume` | `127` | Song-level volume multiplier (0–127) |
-| `max_channels` | `5` | Max simultaneous PCM (DirectSound) channels (1–12) |
+| `max_channels` | `5` | Max simultaneous PCM (DirectSound) channels (1–15) |
 | `pcm_mix_rate` | `13379` | DirectSound (PCM) mix rate in Hz; `13379` = GBA-accurate aliasing, `0` = follow host rate (clean) |
 | `respect_base_midi_key` | `0` | Opt-in: treat a PCM voice's key as the sample's base MIDI note so pressed notes play at the intended pitch |
 | `portamento` | `0` | Opt-in: enable the portamento glide effect (CC 5 = glide time in ticks) |

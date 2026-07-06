@@ -227,7 +227,7 @@ static void render_general_tab(M4AGuiState *gui)
     }
     {
         int v = (int)gui->settings.maxPcmChannels;
-        if (ImGui::SliderInt("Polyphony (1-12)", &v, 1, MAX_PCM_CHANNELS)) {
+        if (ImGui::SliderInt("Polyphony (1-15)", &v, 1, MAX_PCM_CHANNELS)) {
             gui->settings.maxPcmChannels = (uint8_t)v;
             gui->settingsChanged = true;
         }
