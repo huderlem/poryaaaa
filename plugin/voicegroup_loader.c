@@ -222,7 +222,8 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                                   const SymbolMap *dsMap, const SymbolMap *pwMap,
                                   const KeySplitMap *ksMap,
                                   const ProjectDiscovery *disc,
-                                  WaveCache *waveCache);
+                                  WaveCache *waveCache,
+                                  int startIndex, int contiguousFill, int noSubRecurse);
 
 /* Helper: trim leading whitespace */
 static char *ltrim(char *s)
@@ -1866,6 +1867,66 @@ static VoicegroupLocation find_voicegroup(const char *projectRoot,
 
 /* ---- Voicegroup parsing ---- */
 
+/* Helper: last path component (handles both separators). */
+static const char *path_basename(const char *path)
+{
+    const char *base = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/' || *p == '\\')
+            base = p + 1;
+    }
+    return base;
+}
+
+/*
+ * ROM-contiguity successor of a per-file voicegroup: voicegroups are
+ * assembled back to back in voice_groups.inc include order, so indexing past
+ * one group's end reads the next included group's entries on the GBA.
+ * Finds the .include line matching currentFilePath's basename and returns
+ * (in outPath) the absolute path of the next included file that exists.
+ */
+static int next_included_voicegroup(const char *projectRoot, const char *currentFilePath,
+                                    char *outPath, size_t outSize)
+{
+    static const char *indexFiles[] = {"sound/voice_groups.inc", "sound/voicegroups.inc"};
+    const char *curBase = path_basename(currentFilePath);
+
+    for (size_t i = 0; i < sizeof(indexFiles) / sizeof(indexFiles[0]); i++) {
+        char indexPath[MAX_PATH_LEN];
+        build_path(indexPath, sizeof(indexPath), projectRoot, indexFiles[i]);
+        FILE *f = fopen(indexPath, "r");
+        if (!f) continue;
+
+        char line[MAX_LINE];
+        int foundCurrent = 0;
+        while (fgets(line, sizeof(line), f)) {
+            strip_comment(line);
+            char *trimmed = ltrim(line);
+            char incPath[MAX_PATH_LEN];
+            if (sscanf(trimmed, ".include \"%511[^\"]\"", incPath) != 1)
+                continue;
+            if (foundCurrent) {
+                char absPath[MAX_PATH_LEN];
+                build_path(absPath, sizeof(absPath), projectRoot, incPath);
+                if (file_exists(absPath)) {
+                    strncpy(outPath, absPath, outSize - 1);
+                    outPath[outSize - 1] = '\0';
+                    fclose(f);
+                    return 1;
+                }
+                /* Included file missing on disk: contiguity is unknowable */
+                break;
+            }
+            if (strcmp(path_basename(incPath), curBase) == 0)
+                foundCurrent = 1;
+        }
+        fclose(f);
+        if (foundCurrent)
+            break; /* current file located in this index; don't try others */
+    }
+    return 0;
+}
+
 /*
  * Load a sub-voicegroup (for keysplit/keysplit_all references).
  */
@@ -1906,16 +1967,40 @@ static ToneData *load_sub_voicegroup(const char *projectRoot, const char *vgSymb
     memset(vg->voices, 0, sizeof(vg->voices));
     memset(vg->voiceNames, 0, sizeof(vg->voiceNames));
 
+    /* contiguousFill: a sub-voicegroup shorter than 128 voices keeps going
+     * into whatever is assembled after it on the GBA, and old-style drumsets
+     * index into that overflow region deliberately. Within a monolithic file
+     * the parse itself continues across labels; for per-file layouts, keep
+     * filling from the following files in voice_groups.inc include order. */
     const char *startLabel = loc.label[0] ? loc.label : NULL;
-    int parseResult = parse_voicegroup_file(projectRoot, loc.filePath, startLabel,
-                                            vg, dsMap, pwMap, ksMap, disc, waveCache);
-    if (parseResult == 0)
+    int endIndex = parse_voicegroup_file(projectRoot, loc.filePath, startLabel,
+                                         vg, dsMap, pwMap, ksMap, disc, waveCache,
+                                         0, 1, 0);
+    if (endIndex > 0 && !startLabel) {
+        char curPath[MAX_PATH_LEN];
+        strncpy(curPath, loc.filePath, sizeof(curPath) - 1);
+        curPath[sizeof(curPath) - 1] = '\0';
+        for (int hops = 0; endIndex < VOICEGROUP_SIZE && hops < VOICEGROUP_SIZE; hops++) {
+            char nextPath[MAX_PATH_LEN];
+            if (!next_included_voicegroup(projectRoot, curPath, nextPath, sizeof(nextPath)))
+                break;
+            int r = parse_voicegroup_file(projectRoot, nextPath, NULL,
+                                          vg, dsMap, pwMap, ksMap, disc, waveCache,
+                                          endIndex, 0, 1);
+            if (r <= endIndex)
+                break; /* nothing gained: stop rather than spin */
+            endIndex = r;
+            strncpy(curPath, nextPath, sizeof(curPath) - 1);
+            curPath[sizeof(curPath) - 1] = '\0';
+        }
+    }
+    if (endIndex >= 0)
         memcpy(subVg, vg->voices, sizeof(ToneData) * VOICEGROUP_SIZE);
     memcpy(vg->voices, savedVoices, sizeof(vg->voices));
     memcpy(vg->voiceNames, savedNames, sizeof(vg->voiceNames));
     free(savedVoices);
     free(savedNames);
-    if (parseResult != 0) {
+    if (endIndex < 0) {
         free(subVg);
         return NULL;
     }
@@ -1954,6 +2039,20 @@ static void vg_set_voice_name(LoadedVoiceGroup *vg, int voiceIndex, const char *
  * When startLabel is non-NULL, scanning starts at the "<startLabel>::" label
  * and stops when a new label or .align 2 is encountered (monolithic file mode).
  * When startLabel is NULL, the entire file is parsed (individual file mode).
+ *
+ * Slot numbering begins at startIndex; returns the slot index after the last
+ * parsed voice, or -1 if the file can't be opened.
+ *
+ * contiguousFill emulates ROM layout for sub-voicegroups: instead of stopping
+ * at the section end, parsing continues across label/.align boundaries so
+ * indexing past a group's end reaches the neighbors assembled after it, as it
+ * does on the GBA (old-style drumsets rely on this: e.g. a 29-voice
+ * voicegroup001 whose kick at key 36 is really voicegroup002's slot 7).
+ * Voices beyond the first boundary — and every voice when noSubRecurse is set
+ * (used for cross-file continuation) — do not load nested sub-voicegroups:
+ * the hardware never substitutes a keysplit twice, and not recursing there
+ * keeps include-order cycles (group A's overflow reaching a keysplit back
+ * into A) from looping forever.
  */
 static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                                   const char *startLabel,
@@ -1961,9 +2060,11 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                                   const SymbolMap *dsMap, const SymbolMap *pwMap,
                                   const KeySplitMap *ksMap,
                                   const ProjectDiscovery *disc,
-                                  WaveCache *waveCache)
+                                  WaveCache *waveCache,
+                                  int startIndex, int contiguousFill, int noSubRecurse)
 {
-    vg_log("parse_voicegroup_file: '%s' label='%s'", filePath, startLabel ? startLabel : "(none)");
+    vg_log("parse_voicegroup_file: '%s' label='%s' start=%d", filePath,
+           startLabel ? startLabel : "(none)", startIndex);
     FILE *f = fopen(filePath, "r");
     if (!f) {
         fprintf(stderr, "voicegroup_loader: cannot open %s\n", filePath);
@@ -1971,9 +2072,10 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
     }
 
     char line[MAX_LINE];
-    int voiceIndex = 0;
+    int voiceIndex = startIndex;
     int inSection = (startLabel == NULL); /* if no startLabel, parse from the beginning */
     int voicesParsedInSection = 0;
+    int inContinuation = 0; /* past the section end under contiguousFill */
 
     /* If startLabel is set, build the search string */
     char searchLabel[MAX_SYMBOL_LEN + 4];
@@ -1998,20 +2100,27 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         }
 
         /* In monolithic mode, stop at the next label or .align 2 after parsing voices */
-        if (startLabel && inSection && voicesParsedInSection > 0) {
+        if (startLabel && inSection && voicesParsedInSection > 0 && !inContinuation) {
             /* Check for a new label (word followed by ::) */
             char *cc = strstr(trimmed, "::");
-            if (cc && cc > trimmed && !isspace((unsigned char)trimmed[0])) {
-                break;
-            }
-            /* Check for .align 2 which separates voicegroups */
-            if (strncmp(trimmed, ".align", 6) == 0) {
-                break;
+            int boundary = (cc && cc > trimmed && !isspace((unsigned char)trimmed[0]))
+                           || strncmp(trimmed, ".align", 6) == 0;
+            if (boundary) {
+                if (!contiguousFill)
+                    break;
+                /* ROM contiguity: keep filling from the next group's voices.
+                 * The boundary line itself matches no macro and is skipped. */
+                inContinuation = 1;
             }
         }
 
         /* Parse voice_group declaration for starting_note offset */
         if (strncmp(trimmed, "voice_group ", 12) == 0) {
+            /* A comma-form declaration makes the label virtual (it points
+             * before the file's data), so contiguity can't continue through
+             * one — and its slot jump must not apply mid-fill. */
+            if (inContinuation || noSubRecurse)
+                break;
             char vgDeclName[MAX_SYMBOL_LEN];
             int startingNote = 0;
             if (sscanf(trimmed + 12, "%[^,\n], %d", vgDeclName, &startingNote) >= 2) {
@@ -2255,9 +2364,11 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_KEYSPLIT_ALL;
 
-                ToneData *subVg = load_sub_voicegroup(projectRoot, vgSymbol,
-                                                       vg, dsMap, pwMap, ksMap, disc, waveCache);
-                td->subGroup = subVg;
+                if (!noSubRecurse && !inContinuation) {
+                    ToneData *subVg = load_sub_voicegroup(projectRoot, vgSymbol,
+                                                           vg, dsMap, pwMap, ksMap, disc, waveCache);
+                    td->subGroup = subVg;
+                }
             }
             voiceIndex++;
             voicesParsedInSection++;
@@ -2271,9 +2382,11 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_KEYSPLIT;
 
-                ToneData *subVg = load_sub_voicegroup(projectRoot, vgSymbol,
-                                                       vg, dsMap, pwMap, ksMap, disc, waveCache);
-                td->subGroup = subVg;
+                if (!noSubRecurse && !inContinuation) {
+                    ToneData *subVg = load_sub_voicegroup(projectRoot, vgSymbol,
+                                                           vg, dsMap, pwMap, ksMap, disc, waveCache);
+                    td->subGroup = subVg;
+                }
 
                 KeySplitDef *ksDef = keysplit_map_find(ksMap, ksSymbol);
                 if (ksDef) {
@@ -2340,7 +2453,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
 
     vg_log("parse_voicegroup_file: done, voiceIndex=%d", voiceIndex);
     fclose(f);
-    return 0;
+    return voiceIndex;
 }
 
 /*
@@ -2403,7 +2516,8 @@ LoadedVoiceGroup *voicegroup_load(const char *projectRoot, const char *voicegrou
     const char *startLabel = loc.label[0] ? loc.label : NULL;
     vg_log("voicegroup_load: parsing voicegroup file");
     if (parse_voicegroup_file(projectRoot, loc.filePath, startLabel,
-                               vg, &dsMap, &pwMap, &ksMap, disc, &waveCache) != 0) {
+                               vg, &dsMap, &pwMap, &ksMap, disc, &waveCache,
+                               0, 0, 0) < 0) {
         vg_log("voicegroup_load: parse_voicegroup_file failed");
         goto fail;
     }
