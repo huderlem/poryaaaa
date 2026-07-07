@@ -227,6 +227,23 @@ typedef struct {
     uint8_t panMask;
     uint8_t modify;
 
+    /* Square-1 (NR10) hardware frequency-sweep unit, modeled on mGBA's
+     * gb/audio.c.  `sweep` above holds the NR10 byte captured at note-on
+     * (0x08 = inert): bits 6-4 = step time in 128 Hz clocks (0 -> 8),
+     * bit 3 = direction (1 = down), bits 2-0 = shift.  Every `time` clocks
+     * the unit recomputes the frequency from its internal shadow register,
+     * f' = f +/- (f >> shift); an upward sweep overflowing 2047 silences the
+     * channel (sweepMuted) until the next retrigger.  CgbSound rewrites NRx4
+     * with the trigger bit whenever a channel's volume changes (MO_VOL), so
+     * the unit is re-armed -- shadow reloaded from the frequency register,
+     * timer reset, overflow recheck -- at note start, every envelope phase
+     * transition, and every track volume change. */
+    uint16_t sweepShadowFreq;
+    uint8_t sweepStep;       /* countdown to the next sweep calculation */
+    bool sweepEnabled;
+    bool sweepMuted;
+    float sweepClockAccum;   /* fractional 128 Hz clock, advanced per sample */
+
     uint32_t frequency;
     uint32_t phase;         /* phase accumulator for synthesis */
     uint32_t *wavePointer;  /* programmable wave data */

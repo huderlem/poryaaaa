@@ -306,6 +306,96 @@ void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
  * Matches CgbSound() in m4a.c
  */
 
+/*
+ * Square-1 frequency sweep (NR10).
+ *
+ * The m4a engine programs the sweep once per note: ply_note stores the
+ * voice's pan_sweep byte in the channel (forced to the inert value 8 when the
+ * byte holds a pan or its time bits are zero) and CgbSound writes it to NR10
+ * at note start.  From then on the Game Boy hardware sweeps on its own, so
+ * this emulation follows mGBA's sweep unit (_writeSweep / _resetSweep /
+ * _updateSweep in src/gb/audio.c) rather than anything in m4a.c:
+ *
+ *  - a 128 Hz clock (frame-sequencer steps 2 and 6) decrements sweepStep;
+ *    when it hits 0 the unit computes f' = f +/- (f >> shift) from its
+ *    internal shadow register and writes the result to both the shadow and
+ *    the frequency register (downward only when f' >= 0, upward only when
+ *    shift != 0 and f' < 2048; an upward result >= 2048 disables the channel)
+ *  - a trigger (NRx4 bit 7) re-enables the channel, reloads the shadow from
+ *    the frequency register, resets the timer, and -- when shift != 0 --
+ *    immediately runs one overflow check that never writes the frequency.
+ *
+ * Because CgbSound sets the trigger bit on every MO_VOL register update, the
+ * unit is retriggered at every envelope phase transition and track volume
+ * change; MO_PIT frequency writes do NOT touch the shadow, so vibrato/bend on
+ * a sweeping note is overridden at the unit's next calculation.
+ */
+
+static inline int cgb_sweep_time(const M4ACGBChannel *ch)
+{
+    int time = (ch->sweep >> 4) & 7;
+    return time ? time : 8;
+}
+
+/* One sweep calculation.  `initial` is the trigger-time overflow check, which
+ * computes but never writes.  Returns false when an upward sweep overflows
+ * past 2047 (the hardware then clears the channel's NR52 enable bit). */
+static bool cgb_sweep_calc(M4ACGBChannel *ch, bool initial)
+{
+    int shift = ch->sweep & 7;
+
+    if (initial || cgb_sweep_time(ch) != 8) {
+        int32_t freq = ch->sweepShadowFreq;
+        if (ch->sweep & 0x08) {
+            freq -= freq >> shift;
+            if (!initial && freq >= 0) {
+                ch->sweepShadowFreq = (uint16_t)freq;
+                ch->frequency = (uint32_t)freq;
+            }
+        } else {
+            freq += freq >> shift;
+            if (freq >= 2048)
+                return false;
+            if (!initial && shift) {
+                ch->sweepShadowFreq = (uint16_t)freq;
+                ch->frequency = (uint32_t)freq;
+                /* Writing a new frequency immediately re-runs the overflow
+                 * check against the next step's value. */
+                if (!cgb_sweep_calc(ch, true))
+                    return false;
+            }
+        }
+    }
+
+    ch->sweepStep = (uint8_t)cgb_sweep_time(ch);
+    return true;
+}
+
+/* NRx4 trigger-bit write as seen by the sweep unit. */
+static void cgb_sweep_retrigger(M4ACGBChannel *ch)
+{
+    int time = cgb_sweep_time(ch);
+    int shift = ch->sweep & 7;
+
+    ch->sweepMuted = false;
+    ch->sweepShadowFreq = (uint16_t)(ch->frequency & 0x7FF);
+    ch->sweepStep = (uint8_t)time;
+    ch->sweepEnabled = (time != 8) || shift != 0;
+    if (shift && !cgb_sweep_calc(ch, true))
+        ch->sweepMuted = true;
+}
+
+/* One 128 Hz frame-sequencer sweep clock. */
+static void cgb_sweep_clock(M4ACGBChannel *ch)
+{
+    if (!ch->sweepEnabled || ch->sweepMuted)
+        return;
+    if (--ch->sweepStep != 0)
+        return;
+    if (!cgb_sweep_calc(ch, false))
+        ch->sweepMuted = true;
+}
+
 void m4a_cgb_channel_start(M4ACGBChannel *ch)
 {
     ch->status = CHN_ENV_ATTACK;
@@ -339,6 +429,14 @@ void m4a_cgb_channel_start(M4ACGBChannel *ch)
     /* Cancel any in-progress declick so the new note starts cleanly. */
     ch->declickSample = 0;
     ch->declickSamplesRemaining = 0;
+
+    /* Square 1: note start writes NR10 and sets the NRx4 trigger bit,
+     * (re)arming the hardware frequency sweep unit.  The caller has already
+     * set ch->sweep and ch->frequency. */
+    if (ch->type == 1) {
+        ch->sweepClockAccum = 0.0f;
+        cgb_sweep_retrigger(ch);
+    }
 
     /* Initialize LFSR for noise channel.
      * Bit 3 of frequency is the period/mode bit (NR43 bit 3):
@@ -545,6 +643,10 @@ step_complete:
     }
 
 envelope_complete:
+    /* CgbSound applies MO_VOL by rewriting NRx2 and setting the NRx4 trigger
+     * bit, which retriggers the square-1 hardware sweep unit. */
+    if (ch->type == 1 && (ch->modify & 0x01))
+        cgb_sweep_retrigger(ch);
     ch->modify = 0;
 }
 
@@ -570,6 +672,23 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
 
     int32_t sample = 0;
     uint8_t cgbType = ch->type;
+
+    if (cgbType == 1) {
+        /* Advance the frequency sweep's 128 Hz clock (frame-sequencer rate,
+         * independent of the engine tick). */
+        if (ch->sweepEnabled) {
+            ch->sweepClockAccum += 128.0f / sampleRate;
+            while (ch->sweepClockAccum >= 1.0f) {
+                ch->sweepClockAccum -= 1.0f;
+                cgb_sweep_clock(ch);
+            }
+        }
+        /* An overflowed upward sweep has cleared the channel's NR52 enable
+         * bit: no output until a retrigger re-evaluates the overflow check
+         * (the software envelope keeps running, unaware). */
+        if (ch->sweepMuted)
+            return;
+    }
 
     if (cgbType == 1 || cgbType == 2) {
         /* Square wave synthesis */

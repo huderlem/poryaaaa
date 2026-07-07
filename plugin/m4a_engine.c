@@ -620,8 +620,15 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
 
         if (voiceType == 1 || voiceType == 2) {
             ch->dutyCycle = (uint8_t)(uintptr_t)voice->wavePointer & 0x03;
-            if (voiceType == 1)
-                ch->sweep = (voice->panSweep & 0x70) ? voice->panSweep : 0x08;
+            if (voiceType == 1) {
+                /* panSweep is an NR10 sweep value only when the pan bit is
+                 * clear AND the sweep-time bits are nonzero; otherwise the
+                 * hardware gets the inert value 8 (ply_note in m4a_1.s). */
+                if ((voice->panSweep & 0x80) || !(voice->panSweep & 0x70))
+                    ch->sweep = 0x08;
+                else
+                    ch->sweep = voice->panSweep;
+            }
 
             /* Pulse-width modulation (opt-in): if the effect is active on this
              * track, start the note on the pattern's first duty cycle and reset
@@ -850,6 +857,10 @@ static inline void refresh_volumes(M4AEngine *engine, M4ATrack *track, int track
         if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
             cgb_chn_vol_set(ch, track);
             m4a_cgb_mod_vol(ch);
+            /* MPlayMain flags MO_VOL on CGB channels when the track volume
+             * changes; the next CgbSound applies it with an NRx4 trigger
+             * write, retriggering the square-1 sweep unit. */
+            ch->modify |= 0x01;
         }
     }
 }
@@ -1198,6 +1209,11 @@ static void m4a_lfo_tick(M4AEngine *engine)
                 if ((ch->status & CHN_ON) && ch->trackIndex == i) {
                     cgb_chn_vol_set(ch, track);
                     m4a_cgb_mod_vol(ch);
+                    /* Tremolo/autopan LFO steps are volume changes (VOLCHG ->
+                     * MO_VOL on the GBA), so they retrigger the square-1
+                     * sweep; vibrato steps are MO_PIT and do not. */
+                    if (track->modT != 0)
+                        ch->modify |= 0x01;
                     if (track->modT == 0) {
                         int32_t finalKey = (int32_t)ch->key + track->keyM;
                         if (finalKey < 0) finalKey = 0;

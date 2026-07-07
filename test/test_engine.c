@@ -1025,6 +1025,94 @@ static void test_pwm(void)
     m4a_engine_destroy(&engine);
 }
 
+/* Square-1 hardware frequency sweep (NR10): a square-1 voice whose pan_sweep
+ * byte holds a sweep value glides its frequency in "hardware" at 128 Hz,
+ * f' = f +/- (f >> shift) every `time` clocks; an upward sweep that overflows
+ * the 11-bit register silences the channel.  Matches ply_note/CgbSound in
+ * pokeemerald and the sweep unit in mGBA's gb/audio.c. */
+static void test_sweep(void)
+{
+    printf("Testing square-1 frequency sweep...\n");
+
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    /* voice 0: sweep down -- time=1, dir=down, shift=3 (NR10 = 0x1B) */
+    voices[0].type = VOICE_SQUARE_1;
+    voices[0].key = 60;
+    voices[0].wavePointer = (uint32_t *)(uintptr_t)2;  /* 50% duty */
+    voices[0].sustain = 15;
+    voices[0].release = 3;
+    voices[0].panSweep = 0x1B;
+    /* voice 1: sweep up -- time=1, dir=up, shift=1 (NR10 = 0x11) */
+    voices[1] = voices[0];
+    voices[1].panSweep = 0x11;
+    /* voice 2: pan bit set -- pan_sweep is a pan, not a sweep */
+    voices[2] = voices[0];
+    voices[2].panSweep = 0xC0;
+
+    M4AEngine engine;
+    float outL[1024], outR[1024];
+
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ACGBChannel *sq = &engine.cgbChannels[0];  /* SQUARE_1 -> cgb ch 0 */
+
+    /* --- Downward sweep: f' = f - (f >> 3) every 1/128 s --- */
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    ASSERT_EQ(sq->sweep, 0x1B, "sweep: NR10 byte captured at note-on");
+    ASSERT(sq->sweepEnabled, "sweep: unit armed at note-on");
+    ASSERT(!sq->sweepMuted, "sweep: downward sweep never mutes");
+    uint32_t f0 = sq->frequency;
+    ASSERT_EQ(sq->sweepShadowFreq, f0, "sweep: shadow loaded from frequency register");
+
+    /* The 128 Hz sweep clock first fires after 44100/128 = ~344.5 samples. */
+    m4a_engine_process(&engine, outL, outR, 300);
+    ASSERT_EQ(sq->frequency, f0, "sweep: no change before the first 128 Hz clock");
+    m4a_engine_process(&engine, outL, outR, 100);
+    uint32_t f1 = f0 - (f0 >> 3);
+    ASSERT_EQ(sq->frequency, f1, "sweep: first step lowers frequency by f>>3");
+    m4a_engine_process(&engine, outL, outR, 345);
+    ASSERT_EQ(sq->frequency, f1 - (f1 >> 3), "sweep: second step compounds");
+
+    /* A long downward sweep decays toward register 0 and keeps sounding. */
+    for (int i = 0; i < 44; i++)
+        m4a_engine_process(&engine, outL, outR, 1000);
+    ASSERT(sq->frequency < 16, "sweep: downward sweep decays toward register 0");
+    ASSERT(!sq->sweepMuted, "sweep: downward sweep stays audible");
+    ASSERT(sq->status & CHN_ON, "sweep: software envelope unaffected by sweeping");
+
+    /* --- Upward sweep: overflow past 2047 silences the channel --- */
+    m4a_engine_all_sound_off(&engine);
+    m4a_engine_program_change(&engine, 0, 1);
+    m4a_engine_note_on(&engine, 0, 36, 100);  /* low key: passes the initial check */
+    ASSERT(!sq->sweepMuted, "sweep: low-key upward sweep passes initial overflow check");
+    uint32_t fu0 = sq->frequency;
+    for (int i = 0; i < 44 && !sq->sweepMuted; i++)
+        m4a_engine_process(&engine, outL, outR, 1000);
+    ASSERT(sq->sweepMuted, "sweep: upward overflow silences the channel");
+    ASSERT(sq->frequency > fu0, "sweep: frequency rose before the overflow");
+    ASSERT(sq->frequency < 2048, "sweep: register never exceeds 11 bits");
+    ASSERT(sq->status & CHN_ON, "sweep: software envelope keeps running while muted");
+    m4a_engine_process(&engine, outL, outR, 1024);
+    float energy = 0.0f;
+    for (int i = 0; i < 1024; i++)
+        energy += fabsf(outL[i]) + fabsf(outR[i]);
+    ASSERT(energy == 0.0f, "sweep: overflowed channel renders silence");
+
+    /* --- pan_sweep with the pan bit (or zero time bits) is not a sweep --- */
+    m4a_engine_all_sound_off(&engine);
+    m4a_engine_program_change(&engine, 0, 2);
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    ASSERT_EQ(sq->sweep, 0x08, "sweep: pan-bearing pan_sweep maps to inert NR10 value 8");
+    ASSERT(!sq->sweepEnabled, "sweep: inert value disables the unit");
+    uint32_t fi = sq->frequency;
+    m4a_engine_process(&engine, outL, outR, 1000);
+    ASSERT_EQ(sq->frequency, fi, "sweep: no sweeping on a pan-bearing voice");
+
+    m4a_engine_destroy(&engine);
+}
+
 /*
  * The LFO (mod-wheel vibrato) advances inside the engine's tempo loop, so its
  * rate is proportional to the tempo set via m4a_engine_set_tempo_bpm: each
@@ -1268,6 +1356,7 @@ int main(void)
     test_portamento();
     test_portamento_prev_key_tracking();
     test_pwm();
+    test_sweep();
     test_lfo_tempo_scaling();
     test_golden_sun_synth();
     test_golden_sun_synth_waveforms();
