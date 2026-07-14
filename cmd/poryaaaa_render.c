@@ -729,6 +729,25 @@ static void print_usage(const char *prog)
         prog);
 }
 
+/* Loop-expansion bookkeeping: which notes are keyed on (note-on emitted, no
+ * note-off yet), per engine track and key, so each loop wrap can release the
+ * ones whose note-off lies beyond the loop end.  keyedEv keeps the note-on
+ * event so a synthetic note-off dispatches to the same engine track. */
+static void track_keyed_note(bool keyed[MAX_TRACKS][128],
+                             RenderEvent keyedEv[MAX_TRACKS][128],
+                             const RenderEvent *ev, int useTrackIndex)
+{
+    int idx = useTrackIndex ? ev->track : ev->channel;
+    if (idx >= MAX_TRACKS || ev->data0 >= 128)
+        return;
+    if (ev->type == 0x9) {
+        keyed[idx][ev->data0] = true;
+        keyedEv[idx][ev->data0] = *ev;
+    } else if (ev->type == 0x8) {
+        keyed[idx][ev->data0] = false;
+    }
+}
+
 /* Dispatch one RenderEvent to the engine */
 static void dispatch_event(M4AEngine *engine, const RenderEvent *ev,
                             int useTrackIndex)
@@ -938,6 +957,14 @@ int main(int argc, char *argv[])
          * Within each iteration events are added in original sorted order, so
          * note-offs at the loop boundary naturally precede the note-ons of the
          * next iteration at the same sample position.
+         *
+         * Notes get two extra rules, matching the GBA (mid2agb orders the
+         * loop-end GOTO after same-tick note-ends but before note-starts):
+         *   - A note-on exactly at the loop end is dropped — its note-off
+         *     lies beyond the loop end, which looping playback never reaches,
+         *     so it would be held (and re-triggered) forever.
+         *   - Any note still keyed on at a wrap gets a synthetic note-off at
+         *     the wrap position (covers notes spanning the loop end).
          */
         int extCap   = events->count + 256;
         int extCount = 0;
@@ -947,6 +974,10 @@ int main(int argc, char *argv[])
             free(events->events); free(events);
             return 1;
         }
+
+        bool keyed[MAX_TRACKS][128] = {{false}};
+        RenderEvent keyedEv[MAX_TRACKS][128];
+        memset(keyedEv, 0, sizeof(keyedEv));
 
         /* Pre-loop */
         for (int i = 0; i < events->count; i++) {
@@ -958,6 +989,7 @@ int main(int argc, char *argv[])
                     extEvts = p;
                 }
                 extEvts[extCount++] = events->events[i];
+                track_keyed_note(keyed, keyedEv, &events->events[i], useTrackIndex);
             }
         }
 
@@ -967,6 +999,7 @@ int main(int argc, char *argv[])
                 for (int i = 0; i < events->count; i++) {
                     uint64_t op = events->events[i].samplePos;
                     if (op < loopStartSample || op > loopEndSample) continue;
+                    if (events->events[i].type == 0x9 && op == loopEndSample) continue;
                     uint64_t sp = op + off;
                     if (sp >= totalSamples) continue;
                     if (extCount >= extCap) {
@@ -978,6 +1011,28 @@ int main(int argc, char *argv[])
                     RenderEvent ev = events->events[i];
                     ev.samplePos = sp;
                     extEvts[extCount++] = ev;
+                    track_keyed_note(keyed, keyedEv, &ev, useTrackIndex);
+                }
+
+                /* Release notes the wrap orphans from their note-off. */
+                uint64_t wrapPos = loopEndSample + off;
+                for (int t = 0; t < MAX_TRACKS; t++) {
+                    for (int k = 0; k < 128; k++) {
+                        if (!keyed[t][k]) continue;
+                        keyed[t][k] = false;
+                        if (wrapPos >= totalSamples) continue;
+                        if (extCount >= extCap) {
+                            extCap = extCap * 2 + 16;
+                            RenderEvent *p = realloc(extEvts, (size_t)extCap * sizeof(RenderEvent));
+                            if (!p) { free(extEvts); extEvts = NULL; goto oom; }
+                            extEvts = p;
+                        }
+                        RenderEvent offEv = keyedEv[t][k];
+                        offEv.type = 0x8;
+                        offEv.data1 = 0;
+                        offEv.samplePos = wrapPos;
+                        extEvts[extCount++] = offEv;
+                    }
                 }
             }
         }
