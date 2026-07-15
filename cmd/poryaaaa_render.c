@@ -177,6 +177,7 @@ typedef struct {
 /* A rendered event with its absolute sample position */
 typedef struct {
     uint64_t samplePos;
+    uint64_t tick;     /* absolute SMF tick (0 for synthetic events) */
     uint8_t  channel;
     uint8_t  track;    /* SMF track index */
     uint8_t  type;
@@ -418,6 +419,7 @@ static RenderEvent make_tempo_event(uint64_t samplePos, double bpm)
     if (b > 0x3FFF) b = 0x3FFF;
     RenderEvent ev;
     ev.samplePos = samplePos;
+    ev.tick      = 0;
     ev.channel   = 0;
     ev.track     = 0;
     ev.type      = RENDER_EVT_TEMPO;
@@ -437,8 +439,11 @@ typedef struct {
  * On success returns a heap-allocated RenderEventArray (caller must free
  * both ->events and the struct itself).  Writes the sample index of the last
  * MIDI event into *totalMidiSamples.  If '[' / ']' loop-marker text events
- * are found in any track, their sample positions are written to
- * *loopStartSampleOut / *loopEndSampleOut; otherwise UINT64_MAX is written.
+ * are found in any track, their sample and tick positions are written to
+ * *loopStartSampleOut / *loopEndSampleOut / *loopStartTickOut /
+ * *loopEndTickOut; otherwise UINT64_MAX is written.  The file's ticks per
+ * quarter note go to *tpqnOut, and the tempo map to *temposOut (ownership
+ * passes to the caller, who must free ->events).
  *
  * Returns NULL on error.
  */
@@ -446,10 +451,19 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
                                      uint64_t *totalMidiSamples,
                                      uint64_t *loopStartSampleOut,
                                      uint64_t *loopEndSampleOut,
+                                     uint64_t *loopStartTickOut,
+                                     uint64_t *loopEndTickOut,
+                                     uint32_t *tpqnOut,
+                                     TempoArray *temposOut,
                                      uint16_t *midiFormatOut)
 {
     *loopStartSampleOut = UINT64_MAX;
     *loopEndSampleOut   = UINT64_MAX;
+    *loopStartTickOut   = UINT64_MAX;
+    *loopEndTickOut     = UINT64_MAX;
+    temposOut->events   = NULL;
+    temposOut->count    = 0;
+    temposOut->capacity = 0;
 
     /* ---- Load file into memory ---- */
     FILE *f = fopen(path, "rb");
@@ -569,6 +583,7 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
         noteEvts[i].samplePos = tick_to_sample(re->tick,
                                                tempos.events, tempos.count,
                                                tpqn, sampleRate);
+        noteEvts[i].tick      = re->tick;
         noteEvts[i].channel   = re->channel;
         noteEvts[i].track     = re->track;
         noteEvts[i].type      = re->type;
@@ -627,7 +642,10 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
     free(tempoEvts);
     free(noteEvts);
     free(rawEvents.events);
-    free(tempos.events);
+    *loopStartTickOut = loopStartTick;
+    *loopEndTickOut   = loopEndTick;
+    *tpqnOut          = tpqn;
+    *temposOut        = tempos; /* caller owns the tempo map now */
     return result;
 }
 
@@ -723,6 +741,9 @@ static void print_usage(const char *prog)
         "\n"
         "Loop options (when MIDI contains '[' / ']' text events):\n"
         "  --loop-count <n>            Number of loop body repetitions (default: 2)\n"
+        "  --extended-clocks           Song is built with mid2agb -X (48 clocks/beat),\n"
+        "                              which raises the length at which a note crossing\n"
+        "                              the loop end is tied (held forever, as on hardware)\n"
         "  --fadeout <seconds>         Fadeout duration after final loop (default: 5.0)\n"
         "  --total-duration-seconds <s>  Override loop-count; set exact total duration\n"
         "                                (fadeout occupies the final --fadeout seconds)\n",
@@ -746,6 +767,14 @@ static void track_keyed_note(bool keyed[MAX_TRACKS][128],
     } else if (ev->type == 0x8) {
         keyed[idx][ev->data0] = false;
     }
+}
+
+/* Order RenderEvents by sample position (for the gate-carry merge). */
+static int cmp_render_event_pos(const void *a, const void *b)
+{
+    uint64_t pa = ((const RenderEvent *)a)->samplePos;
+    uint64_t pb = ((const RenderEvent *)b)->samplePos;
+    return (pa > pb) - (pa < pb);
 }
 
 /* Dispatch one RenderEvent to the engine */
@@ -820,6 +849,7 @@ int main(int argc, char *argv[])
     float       pcmMixRate    = 13379.0f; /* GBA-accurate DirectSound mix rate; 0 = host rate */
     double      tailSeconds   = 3.0;
     int         loopCount     = 2;
+    bool        extendedClocks = false; /* mid2agb -X: 48 clocks/beat */
     double      fadeoutSeconds = 5.0;
     double      totalDurSeconds = -1.0; /* -1 = not set */
 
@@ -862,6 +892,8 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--loop-count") == 0 && i + 1 < argc) {
             loopCount = atoi(argv[++i]);
             if (loopCount < 1) loopCount = 1;
+        } else if (strcmp(argv[i], "--extended-clocks") == 0) {
+            extendedClocks = true;
         } else if (strcmp(argv[i], "--fadeout") == 0 && i + 1 < argc) {
             fadeoutSeconds = atof(argv[++i]);
             if (fadeoutSeconds < 0.0) fadeoutSeconds = 0.0;
@@ -895,10 +927,15 @@ int main(int argc, char *argv[])
     uint64_t totalMidiSamples = 0;
     uint64_t loopStartSample  = UINT64_MAX;
     uint64_t loopEndSample    = UINT64_MAX;
+    uint64_t loopStartTick    = UINT64_MAX;
+    uint64_t loopEndTick      = UINT64_MAX;
+    uint32_t tpqn             = 24;
+    TempoArray tempoMap       = { NULL, 0, 0 };
     uint16_t midiFormat       = 0;
     RenderEventArray *events = parse_midi(midiPath, sampleRate, &totalMidiSamples,
                                            &loopStartSample, &loopEndSample,
-                                           &midiFormat);
+                                           &loopStartTick, &loopEndTick,
+                                           &tpqn, &tempoMap, &midiFormat);
     if (!events) return 1;
 
     /* For Type 1 MIDI files, use SMF track numbers as engine track indices.
@@ -958,13 +995,21 @@ int main(int argc, char *argv[])
          * note-offs at the loop boundary naturally precede the note-ons of the
          * next iteration at the same sample position.
          *
-         * Notes get two extra rules, matching the GBA (mid2agb orders the
-         * loop-end GOTO after same-tick note-ends but before note-starts):
+         * Notes get extra rules, matching the GBA (mid2agb orders the
+         * loop-end GOTO after same-tick note-ends but before note-starts,
+         * and the GOTO touches no sound-channel state):
          *   - A note-on exactly at the loop end is dropped — its note-off
          *     lies beyond the loop end, which looping playback never reaches,
          *     so it would be held (and re-triggered) forever.
-         *   - Any note still keyed on at a wrap gets a synthetic note-off at
-         *     the wrap position (covers notes spanning the loop end).
+         *   - A note still keyed on at a wrap crosses the loop end. If it is
+         *     <= 96 mid2agb clocks, mid2agb emits a direct note command whose
+         *     channel gate keeps counting through the GOTO: the note releases
+         *     at its written duration, so its note-off is rescheduled at the
+         *     wrapped position (gate-carry).
+         *   - A longer crossing note becomes TIE + EOT with the EOT beyond
+         *     the loop end, unreachable: no note-off is emitted at all, so it
+         *     is held forever, stacking a fresh instance every pass — exactly
+         *     as on hardware.
          */
         int extCap   = events->count + 256;
         int extCount = 0;
@@ -978,6 +1023,13 @@ int main(int argc, char *argv[])
         bool keyed[MAX_TRACKS][128] = {{false}};
         RenderEvent keyedEv[MAX_TRACKS][128];
         memset(keyedEv, 0, sizeof(keyedEv));
+
+        /* Gate-carried note-offs land inside a later pass, out of append
+         * order, so they collect here and merge in at the end. */
+        RenderEvent *carryOffs = NULL;
+        int carryCount = 0, carryCap = 0;
+        const uint64_t loopLenTicks = loopEndTick - loopStartTick;
+        const uint64_t clocksPerBeat = extendedClocks ? 48 : 24;
 
         /* Pre-loop */
         for (int i = 0; i < events->count; i++) {
@@ -1014,17 +1066,70 @@ int main(int argc, char *argv[])
                     track_keyed_note(keyed, keyedEv, &ev, useTrackIndex);
                 }
 
-                /* Release notes the wrap orphans from their note-off. */
+                /* Notes still keyed on cross the loop end (their note-off
+                 * lies beyond it): gate-carry the short ones, hold the tied
+                 * ones forever — see the rules above. */
                 uint64_t wrapPos = loopEndSample + off;
                 for (int t = 0; t < MAX_TRACKS; t++) {
                     for (int k = 0; k < 128; k++) {
                         if (!keyed[t][k]) continue;
                         keyed[t][k] = false;
+
+                        /* The note's off event: first matching off past the
+                         * note-on, which is also how mid2agb pairs notes. */
+                        const RenderEvent *noteOff = NULL;
+                        for (int i = 0; i < events->count; i++) {
+                            const RenderEvent *e = &events->events[i];
+                            if (e->type != 0x8 || e->data0 != k) continue;
+                            if ((useTrackIndex ? e->track : e->channel) != t) continue;
+                            if (e->tick <= keyedEv[t][k].tick) continue;
+                            noteOff = e;
+                            break;
+                        }
+                        if (noteOff) {
+                            uint64_t durTicks = noteOff->tick - keyedEv[t][k].tick;
+                            uint64_t clocks = clocksPerBeat * durTicks / tpqn;
+                            if (clocks == 0) clocks = 1;
+                            if (clocks > 96)
+                                continue; /* TIE + EOT: unreachable — held forever */
+
+                            /* Gate-carry: the release lands rr ticks into a
+                             * later pass (usually the next one). */
+                            uint64_t rr = noteOff->tick - loopEndTick;
+                            uint64_t passDelta = 1;
+                            while (rr > loopLenTicks) {
+                                rr -= loopLenTicks;
+                                passDelta++;
+                            }
+                            uint64_t releasePos =
+                                tick_to_sample(loopStartTick + rr, tempoMap.events,
+                                               tempoMap.count, tpqn, sampleRate)
+                                + off + passDelta * loopDuration;
+                            if (releasePos >= totalSamples) continue;
+                            if (carryCount >= carryCap) {
+                                carryCap = carryCap * 2 + 64;
+                                RenderEvent *p = realloc(carryOffs,
+                                                         (size_t)carryCap * sizeof(RenderEvent));
+                                if (!p) {
+                                    free(carryOffs); free(extEvts); extEvts = NULL;
+                                    goto oom;
+                                }
+                                carryOffs = p;
+                            }
+                            RenderEvent offEv = keyedEv[t][k];
+                            offEv.type = 0x8;
+                            offEv.data1 = 0;
+                            offEv.samplePos = releasePos;
+                            carryOffs[carryCount++] = offEv;
+                            continue;
+                        }
+
+                        /* No note-off in the file: release at the wrap. */
                         if (wrapPos >= totalSamples) continue;
                         if (extCount >= extCap) {
                             extCap = extCap * 2 + 16;
                             RenderEvent *p = realloc(extEvts, (size_t)extCap * sizeof(RenderEvent));
-                            if (!p) { free(extEvts); extEvts = NULL; goto oom; }
+                            if (!p) { free(carryOffs); free(extEvts); extEvts = NULL; goto oom; }
                             extEvts = p;
                         }
                         RenderEvent offEv = keyedEv[t][k];
@@ -1036,6 +1141,30 @@ int main(int argc, char *argv[])
                 }
             }
         }
+
+        /* Merge the gate-carried releases into the (already ordered)
+         * expanded list.  At equal positions the release goes first: on
+         * hardware the channel gate hits zero as the clock advances, before
+         * that clock's track commands run. */
+        if (carryCount > 0) {
+            qsort(carryOffs, (size_t)carryCount, sizeof(RenderEvent),
+                  cmp_render_event_pos);
+            RenderEvent *merged = malloc((size_t)(extCount + carryCount)
+                                         * sizeof(RenderEvent));
+            if (!merged) { free(carryOffs); free(extEvts); extEvts = NULL; goto oom; }
+            int a = 0, b = 0, o = 0;
+            while (a < extCount || b < carryCount) {
+                bool takeCarry;
+                if (a >= extCount)          takeCarry = true;
+                else if (b >= carryCount)   takeCarry = false;
+                else takeCarry = (carryOffs[b].samplePos <= extEvts[a].samplePos);
+                merged[o++] = takeCarry ? carryOffs[b++] : extEvts[a++];
+            }
+            free(extEvts);
+            extEvts  = merged;
+            extCount = o;
+        }
+        free(carryOffs);
 
         renderEvts      = extEvts;
         renderEvtCount  = extCount;
@@ -1051,10 +1180,13 @@ int main(int argc, char *argv[])
            (double)totalSamples / sampleRate,
            (unsigned long long)totalSamples);
 
+    free(tempoMap.events); /* only needed while expanding the loop */
+    tempoMap.events = NULL;
+
     if (0) {
 oom:
         fprintf(stderr, "Out of memory building event list\n");
-        free(events->events); free(events);
+        free(events->events); free(events); free(tempoMap.events);
         return 1;
     }
 
