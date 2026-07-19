@@ -186,6 +186,9 @@ typedef struct {
 
     /* Owner */
     int trackIndex;
+    /* Started by a host audition (engine->auditionNote at note-on): stays
+     * audible in the polyphony-overflow invert mode. */
+    bool audition;
     bool isLoop;
     int32_t loopLen;        /* loop length in samples */
     int8_t *loopStart;      /* pointer to loop start in sample data */
@@ -266,6 +269,9 @@ typedef struct {
     uint16_t lfsr;          /* noise LFSR state */
 
     int trackIndex;
+    /* Started by a host audition (engine->auditionNote at note-on): stays
+     * audible in the polyphony-overflow invert mode. */
+    bool audition;
 
     /* Wave channel (type 3) declick: avoids a pop when the note ends by
      * smoothly fading the last sample to zero over DECLICK_SAMPLES frames. */
@@ -361,6 +367,13 @@ struct M4AEngine {
      * Single writer: must be written from the same thread that drives
      * note-ons (the audio thread), never from a GUI thread. */
     uint32_t polyEventClock;
+    /* Host-set flag marking the next note-on(s) as auditions (live preview
+     * notes, not sequenced playback): the channels they start stay audible
+     * in the invert mode, so the user can play against the lost sounds
+     * they're investigating.  Same single-writer contract as
+     * polyEventClock; hosts that never set it (default false) get the
+     * plain invert behavior. */
+    bool auditionNote;
     uint32_t polyDropCount[MAX_TRACKS];    /* notes that never sounded */
     uint32_t polyStealCount[MAX_TRACKS];   /* active notes cut off */
     uint32_t polyTailCutCount[MAX_TRACKS]; /* releasing tails cut off */

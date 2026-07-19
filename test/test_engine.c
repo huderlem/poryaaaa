@@ -575,6 +575,31 @@ static void test_poly_overflow_debug(void)
     }
     m4a_engine_destroy(&engine);
 
+    /* ---- Invert mode: host audition notes stay audible ---- */
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    engine.maxPcmChannels = 1;
+    m4a_engine_set_poly_debug_invert(&engine, true);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 7, 127);
+    engine.auditionNote = true;
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    ASSERT(engine.pcmChannels[0].audition, "poly invert: audition flag copied to channel");
+    m4a_engine_process(&engine, outL, outR, 1024);
+    {
+        float maxVal = 0;
+        for (int i = 0; i < 1024; i++) {
+            if (fabs(outL[i]) > maxVal) maxVal = fabs(outL[i]);
+            if (fabs(outR[i]) > maxVal) maxVal = fabs(outR[i]);
+        }
+        ASSERT(maxVal > 0.001f, "poly invert: audition note is audible");
+    }
+    engine.auditionNote = false;
+    m4a_engine_note_on(&engine, 0, 62, 100); /* sequenced reuse of the channel */
+    ASSERT(!engine.pcmChannels[0].audition,
+           "poly invert: sequenced reuse clears the audition flag");
+    m4a_engine_destroy(&engine);
+
     /* ---- Invert mode: a stolen note's remainder survives on a shadow channel ---- */
     m4a_engine_init(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);

@@ -607,6 +607,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         ch->velocity = velocity;
         ch->priority = combinedPriority;
         ch->trackIndex = trackIndex;
+        ch->audition = engine->auditionNote;
         ch->rhythmPan = rhythmPan;
         ch->attack = voice->attack;
         ch->decay = voice->decay;
@@ -701,6 +702,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         ch->velocity = velocity;
         ch->priority = combinedPriority;
         ch->trackIndex = trackIndex;
+        ch->audition = engine->auditionNote;
         ch->rhythmPan = rhythmPan;
         ch->attack = voice->attack;
         ch->decay = voice->decay;
@@ -1418,7 +1420,10 @@ void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamp
             for (int ch = 0; ch < TOTAL_PCM_CHANNELS; ch++) {
                 if (!(engine->pcmChannels[ch].status & CHN_ON))
                     continue;
-                bool audible = ((ch >= MAX_PCM_CHANNELS) == invert);
+                /* Real-pool audition notes stay audible in invert mode so the
+                 * user can play against the lost sounds. */
+                bool audible = ((ch >= MAX_PCM_CHANNELS) == invert)
+                            || (ch < MAX_PCM_CHANNELS && engine->pcmChannels[ch].audition);
                 m4a_pcm_channel_render(&engine->pcmChannels[ch],
                                        audible ? &pcmL : &mutedL,
                                        audible ? &pcmR : &mutedR);
@@ -1444,7 +1449,8 @@ void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamp
         {
             int32_t mutedL = 0, mutedR = 0;
             for (int ch = 0; ch < TOTAL_CGB_CHANNELS; ch++) {
-                bool audible = ((ch >= MAX_CGB_CHANNELS) == invert);
+                bool audible = ((ch >= MAX_CGB_CHANNELS) == invert)
+                            || (ch < MAX_CGB_CHANNELS && engine->cgbChannels[ch].audition);
                 m4a_cgb_channel_render(&engine->cgbChannels[ch],
                                        audible ? &mixL : &mutedL,
                                        audible ? &mixR : &mutedR,
