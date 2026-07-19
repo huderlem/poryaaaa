@@ -471,6 +471,8 @@ static void test_poly_overflow_debug(void)
     ASSERT_EQ(engine.polyEvents[0].trackIndex, 1, "poly: event track");
     ASSERT_EQ(engine.polyEvents[0].midiKey, 67, "poly: event key");
     ASSERT_EQ(engine.polyEvents[0].program, 2, "poly: event records losing track's program");
+    ASSERT_EQ(engine.polyEvents[0].tick, M4A_POLY_TICK_NONE,
+              "poly: event tick defaults to none when host never sets the clock");
     {
         int shadowActive = 0;
         for (int i = MAX_PCM_CHANNELS; i < TOTAL_PCM_CHANNELS; i++)
@@ -487,12 +489,14 @@ static void test_poly_overflow_debug(void)
     m4a_engine_program_change(&engine, 1, 0);
     m4a_engine_note_on(&engine, 1, 60, 100);
     /* Equal priority, occupant trackIndex (1) >= new (0): the channel is stolen. */
+    engine.polyEventClock = 1234;  /* host timeline position of the thief's note-on */
     m4a_engine_note_on(&engine, 0, 67, 100);
     ASSERT_EQ(engine.polyStealCount[1], 1, "poly: steal counted for victim track");
     ASSERT_EQ(engine.polyEvents[0].type, M4A_POLY_STOLEN, "poly: event type stolen");
     ASSERT_EQ(engine.polyEvents[0].trackIndex, 1, "poly: steal victim track");
     ASSERT_EQ(engine.polyEvents[0].midiKey, 60, "poly: steal victim key");
     ASSERT_EQ(engine.polyEvents[0].byTrack, 0, "poly: steal attributed to new track");
+    ASSERT_EQ(engine.polyEvents[0].tick, 1234, "poly: event stamped with host-set clock");
     m4a_engine_destroy(&engine);
 
     /* ---- Tail cut: reusing a releasing channel is logged separately ---- */

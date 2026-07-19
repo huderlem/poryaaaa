@@ -218,6 +218,7 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     engine->masterVolume = 15;
     engine->songMasterVolume = MAX_SONG_VOLUME;
     engine->maxPcmChannels = 5;  /* default, matches Pokemon Emerald init */
+    engine->polyEventClock = M4A_POLY_TICK_NONE;
     engine->c15 = 14;
     engine->tempoD = 150;
     engine->tempoU = 0x100;
@@ -339,6 +340,7 @@ static void record_poly_event(M4AEngine *engine, uint8_t type, uint8_t trackInde
     ev->midiKey = midiKey;
     ev->byTrack = byTrack;
     ev->program = program;
+    ev->tick = engine->polyEventClock;
     engine->polyEventTotal++;
 }
 

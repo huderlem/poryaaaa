@@ -281,12 +281,19 @@ typedef struct {
 #define M4A_POLY_STOLEN   1  /* active note cut off by a new note */
 #define M4A_POLY_TAIL_CUT 2  /* releasing note's tail cut off by a new note */
 
+/* Sentinel for M4APolyEvent.tick: the host was not sequencing when the sound
+ * was lost (live/preview note, or a host that never sets polyEventClock). */
+#define M4A_POLY_TICK_NONE 0xFFFFFFFFu
+
 typedef struct {
     uint8_t type;       /* M4A_POLY_* */
     uint8_t trackIndex; /* track whose sound was lost */
     uint8_t midiKey;    /* MIDI key of the lost sound */
     uint8_t byTrack;    /* STOLEN/TAIL_CUT: track of the note that took the channel */
     uint8_t program;    /* losing track's program (voicegroup index) at event time */
+    uint32_t tick;      /* host timeline position (copied from polyEventClock).
+                         * DROPPED: the dropped note's own tick; STOLEN/TAIL_CUT:
+                         * the tick of the note-on that took the channel. */
 } M4APolyEvent;
 
 /* Ring-buffer capacity for recent overflow events (power of two not required;
@@ -348,6 +355,12 @@ struct M4AEngine {
      * polyEventTotal is incremented after the ring entry is filled in, so the
      * GUI never sees a half-written event. */
     bool polyDebugInvert;
+    /* Host-set timeline clock (ticks) stamped into new poly events, or
+     * M4A_POLY_TICK_NONE when not sequencing.  A sequencing host sets this
+     * directly (like maxPcmChannels) before each note-on it dispatches.
+     * Single writer: must be written from the same thread that drives
+     * note-ons (the audio thread), never from a GUI thread. */
+    uint32_t polyEventClock;
     uint32_t polyDropCount[MAX_TRACKS];    /* notes that never sounded */
     uint32_t polyStealCount[MAX_TRACKS];   /* active notes cut off */
     uint32_t polyTailCutCount[MAX_TRACKS]; /* releasing tails cut off */
