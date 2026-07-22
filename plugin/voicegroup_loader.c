@@ -2538,6 +2538,53 @@ fail:
     return NULL;
 }
 
+LoadedSampleSet *voicegroup_load_samples(const char *projectRoot,
+                                         const char *const *symbols, int count,
+                                         const VoicegroupLoaderConfig *config)
+{
+    LoadedSampleSet *set = calloc(1, sizeof(LoadedSampleSet));
+    if (!set) return NULL;
+    set->container = calloc(1, sizeof(LoadedVoiceGroup));
+    set->waves = calloc(count > 0 ? count : 1, sizeof(WaveData *));
+    ProjectDiscovery *disc = calloc(1, sizeof(ProjectDiscovery));
+    if (!set->container || !set->waves || !disc) {
+        free(disc);
+        voicegroup_free_samples(set);
+        return NULL;
+    }
+    set->count = count;
+
+    vg_log("voicegroup_load_samples: start root='%s' count=%d", projectRoot, count);
+    discover_project(projectRoot, config, disc);
+
+    /* The dedup cache caps at WAVE_CACHE_CAPACITY entries; past that, symbols
+     * aliasing one file merely load their own copy (each registered in the
+     * container, so cleanup stays correct). */
+    WaveCache waveCache;
+    wave_cache_init(&waveCache);
+
+    SymbolMap dsMap;
+    symbol_map_init(&dsMap);
+    parse_all_direct_sound_data(disc, projectRoot, &dsMap);
+
+    for (int i = 0; i < count; i++)
+        set->waves[i] = resolve_and_load_sample(projectRoot, symbols[i], &dsMap,
+                                                disc, set->container, &waveCache);
+
+    symbol_map_free(&dsMap);
+    free(disc);
+    vg_log("voicegroup_load_samples: done");
+    return set;
+}
+
+void voicegroup_free_samples(LoadedSampleSet *set)
+{
+    if (!set) return;
+    voicegroup_free(set->container);
+    free(set->waves);
+    free(set);
+}
+
 void voicegroup_free(LoadedVoiceGroup *vg)
 {
     if (!vg) return;

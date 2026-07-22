@@ -79,6 +79,33 @@ LoadedVoiceGroup *voicegroup_load(const char *projectRoot, const char *voicegrou
 void voicegroup_free(LoadedVoiceGroup *vg);
 
 /*
+ * A batch of DirectSound samples loaded by symbol, outside any voicegroup.
+ * waves[i] answers symbols[i] from the load call: the same WaveData the
+ * voicegroup loader would hand the engine (identical .wav/.aif/.bin
+ * resolution and header math), or NULL when the symbol didn't resolve.
+ * The WaveData memory is owned by the set; free with
+ * voicegroup_free_samples().
+ */
+typedef struct {
+    WaveData **waves;
+    int count;
+    LoadedVoiceGroup *container; /* internal ownership holder */
+} LoadedSampleSet;
+
+/*
+ * Load DirectSound samples by symbol name, sharing one project discovery and
+ * sound-data parse across the whole batch. Symbols that fail to resolve get
+ * a NULL entry rather than failing the batch.
+ *
+ * Returns NULL only on allocation failure.
+ */
+LoadedSampleSet *voicegroup_load_samples(const char *projectRoot,
+                                         const char *const *symbols, int count,
+                                         const VoicegroupLoaderConfig *config);
+
+void voicegroup_free_samples(LoadedSampleSet *set);
+
+/*
  * Set an optional file path for diagnostic logging inside the voicegroup loader.
  * Pass NULL to disable. The same path used by the plugin's "log=" config key works.
  * Call before voicegroup_load() for the output to be useful.
