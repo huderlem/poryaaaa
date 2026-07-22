@@ -79,29 +79,48 @@ LoadedVoiceGroup *voicegroup_load(const char *projectRoot, const char *voicegrou
 void voicegroup_free(LoadedVoiceGroup *vg);
 
 /*
- * A batch of DirectSound samples loaded by symbol, outside any voicegroup.
- * waves[i] answers symbols[i] from the load call: the same WaveData the
- * voicegroup loader would hand the engine (identical .wav/.aif/.bin
- * resolution and header math), or NULL when the symbol didn't resolve.
- * The WaveData memory is owned by the set; free with
+ * A keysplit instrument loaded by symbol: the sub-voicegroup's ToneData
+ * array (VOICEGROUP_SIZE entries) and the 128-byte key-to-index table,
+ * exactly as a voice_keysplit line would resolve them. Either pointer is
+ * NULL when its symbol didn't resolve.
+ */
+typedef struct {
+    ToneData *subGroup;
+    uint8_t *table;
+} LoadedKeysplit;
+
+/*
+ * A batch of instruments loaded by symbol, outside any voicegroup — the
+ * same data the voicegroup loader would hand the engine (identical
+ * resolution and header math). Each array is parallel to the corresponding
+ * symbol list from the load call, with NULL entries where a symbol didn't
+ * resolve. All memory is owned by the set; free with
  * voicegroup_free_samples().
  */
 typedef struct {
-    WaveData **waves;
+    WaveData **waves; /* DirectSound samples */
     int count;
+    uint32_t **progWaves; /* programmable waves (16 packed bytes each) */
+    int progWaveCount;
+    LoadedKeysplit *keysplits;
+    int keysplitCount;
     LoadedVoiceGroup *container; /* internal ownership holder */
 } LoadedSampleSet;
 
 /*
- * Load DirectSound samples by symbol name, sharing one project discovery and
- * sound-data parse across the whole batch. Symbols that fail to resolve get
- * a NULL entry rather than failing the batch.
+ * Load DirectSound samples, programmable waves, and keysplit instruments by
+ * symbol name, sharing one project discovery and sound-data parse across
+ * the whole batch. keysplitTableSymbols pairs with keysplitSymbols (the two
+ * symbols of a voice_keysplit line). Symbols that fail to resolve get a
+ * NULL entry rather than failing the batch. Any list may be empty.
  *
  * Returns NULL only on allocation failure.
  */
-LoadedSampleSet *voicegroup_load_samples(const char *projectRoot,
-                                         const char *const *symbols, int count,
-                                         const VoicegroupLoaderConfig *config);
+LoadedSampleSet *voicegroup_load_samples(
+    const char *projectRoot, const char *const *sampleSymbols, int sampleCount,
+    const char *const *waveSymbols, int waveCount,
+    const char *const *keysplitSymbols, const char *const *keysplitTableSymbols,
+    int keysplitCount, const VoicegroupLoaderConfig *config);
 
 void voicegroup_free_samples(LoadedSampleSet *set);
 

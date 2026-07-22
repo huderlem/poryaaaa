@@ -2538,23 +2538,32 @@ fail:
     return NULL;
 }
 
-LoadedSampleSet *voicegroup_load_samples(const char *projectRoot,
-                                         const char *const *symbols, int count,
-                                         const VoicegroupLoaderConfig *config)
+LoadedSampleSet *voicegroup_load_samples(
+    const char *projectRoot, const char *const *sampleSymbols, int sampleCount,
+    const char *const *waveSymbols, int waveCount,
+    const char *const *keysplitSymbols, const char *const *keysplitTableSymbols,
+    int keysplitCount, const VoicegroupLoaderConfig *config)
 {
     LoadedSampleSet *set = calloc(1, sizeof(LoadedSampleSet));
     if (!set) return NULL;
     set->container = calloc(1, sizeof(LoadedVoiceGroup));
-    set->waves = calloc(count > 0 ? count : 1, sizeof(WaveData *));
+    set->waves = calloc(sampleCount > 0 ? sampleCount : 1, sizeof(WaveData *));
+    set->progWaves = calloc(waveCount > 0 ? waveCount : 1, sizeof(uint32_t *));
+    set->keysplits =
+        calloc(keysplitCount > 0 ? keysplitCount : 1, sizeof(LoadedKeysplit));
     ProjectDiscovery *disc = calloc(1, sizeof(ProjectDiscovery));
-    if (!set->container || !set->waves || !disc) {
+    if (!set->container || !set->waves || !set->progWaves || !set->keysplits
+        || !disc) {
         free(disc);
         voicegroup_free_samples(set);
         return NULL;
     }
-    set->count = count;
+    set->count = sampleCount;
+    set->progWaveCount = waveCount;
+    set->keysplitCount = keysplitCount;
 
-    vg_log("voicegroup_load_samples: start root='%s' count=%d", projectRoot, count);
+    vg_log("voicegroup_load_samples: start root='%s' samples=%d waves=%d keysplits=%d",
+           projectRoot, sampleCount, waveCount, keysplitCount);
     discover_project(projectRoot, config, disc);
 
     /* The dedup cache caps at WAVE_CACHE_CAPACITY entries; past that, symbols
@@ -2563,15 +2572,50 @@ LoadedSampleSet *voicegroup_load_samples(const char *projectRoot,
     WaveCache waveCache;
     wave_cache_init(&waveCache);
 
-    SymbolMap dsMap;
+    SymbolMap dsMap, pwMap;
+    KeySplitMap ksMap;
     symbol_map_init(&dsMap);
+    symbol_map_init(&pwMap);
+    keysplit_map_init(&ksMap);
     parse_all_direct_sound_data(disc, projectRoot, &dsMap);
+    if (waveCount > 0 || keysplitCount > 0)
+        parse_all_programmable_wave_data(disc, projectRoot, &pwMap);
+    if (keysplitCount > 0)
+        parse_all_keysplit_tables(disc, &ksMap);
 
-    for (int i = 0; i < count; i++)
-        set->waves[i] = resolve_and_load_sample(projectRoot, symbols[i], &dsMap,
-                                                disc, set->container, &waveCache);
+    for (int i = 0; i < sampleCount; i++)
+        set->waves[i] = resolve_and_load_sample(projectRoot, sampleSymbols[i],
+                                                &dsMap, disc, set->container,
+                                                &waveCache);
+
+    for (int i = 0; i < waveCount; i++) {
+        const char *wavePath = symbol_map_find(&pwMap, waveSymbols[i]);
+        if (!wavePath) continue;
+        uint32_t *pw = load_prog_wave(projectRoot, wavePath);
+        if (!pw) continue;
+        vg_register_progwave(set->container, pw);
+        set->progWaves[i] = pw;
+    }
+
+    for (int i = 0; i < keysplitCount; i++) {
+        set->keysplits[i].subGroup =
+            load_sub_voicegroup(projectRoot, keysplitSymbols[i], set->container,
+                                &dsMap, &pwMap, &ksMap, disc, &waveCache);
+        const KeySplitDef *ksDef =
+            keysplit_map_find(&ksMap, keysplitTableSymbols[i]);
+        if (ksDef) {
+            uint8_t *table = malloc(128);
+            if (table) {
+                memcpy(table, ksDef->table, 128);
+                vg_register_keysplittable(set->container, table);
+                set->keysplits[i].table = table;
+            }
+        }
+    }
 
     symbol_map_free(&dsMap);
+    symbol_map_free(&pwMap);
+    keysplit_map_free(&ksMap);
     free(disc);
     vg_log("voicegroup_load_samples: done");
     return set;
@@ -2582,6 +2626,8 @@ void voicegroup_free_samples(LoadedSampleSet *set)
     if (!set) return;
     voicegroup_free(set->container);
     free(set->waves);
+    free(set->progWaves);
+    free(set->keysplits);
     free(set);
 }
 
