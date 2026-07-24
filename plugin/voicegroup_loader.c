@@ -143,6 +143,10 @@ typedef struct {
     PathList voicegroupDirs;         /* directories with individual .inc/.s voicegroup files */
     PathList monolithicVGFiles;      /* files containing multiple voicegroups (voice_groups.inc) */
     PathList wavSampleDirs;          /* directories with .wav sample files */
+    /* Lazy deep scan (see discovery_ensure_deep_scan) */
+    char projectRoot[MAX_PATH_LEN];
+    const VoicegroupLoaderConfig *cfg;   /* borrowed; valid for the load call */
+    int deepScanned;
 } ProjectDiscovery;
 
 typedef struct {
@@ -180,6 +184,9 @@ typedef struct {
     KeySplitDef *entries;
     int count;
     int capacity;
+    /* How many ProjectDiscovery keySplitTableFiles entries have been parsed
+     * into this map; the lazy deep scan appends files past this index. */
+    int parsedFileCount;
 } KeySplitMap;
 
 /* Forward declarations */
@@ -237,8 +244,8 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                                   const char *startLabel,
                                   LoadedVoiceGroup *vg,
                                   const SymbolMap *dsMap, const SymbolMap *pwMap,
-                                  const KeySplitMap *ksMap,
-                                  const ProjectDiscovery *disc,
+                                  KeySplitMap *ksMap,
+                                  ProjectDiscovery *disc,
                                   WaveCache *waveCache,
                                   int startIndex, int contiguousFill, int noSubRecurse);
 
@@ -440,6 +447,7 @@ static void keysplit_map_init(KeySplitMap *map)
     map->entries = NULL;
     map->count = 0;
     map->capacity = 0;
+    map->parsedFileCount = 0;
 }
 
 static void keysplit_map_free(KeySplitMap *map)
@@ -692,6 +700,8 @@ static void discover_project(const char *projectRoot,
                              ProjectDiscovery *out)
 {
     memset(out, 0, sizeof(ProjectDiscovery));
+    snprintf(out->projectRoot, sizeof(out->projectRoot), "%s", projectRoot);
+    out->cfg = cfg;
 
     char path[MAX_PATH_LEN];
     char soundDir[MAX_PATH_LEN];
@@ -773,18 +783,40 @@ static void discover_project(const char *projectRoot,
             pathlist_add(&out->voicegroupDirs, subPath);
     }
 
-    /* 4. Scan under sound/ for voicegroup dirs AND wav dirs in one pass */
-    vg_log("discover_project: scanning for voicegroup and wav dirs under '%s'", soundDir);
-    if (is_directory(soundDir))
-        discover_scan_tree(soundDir, 0, 3, out);
-    vg_log("discover_project: dir scan done, vgDirs=%d wavDirs=%d",
-           out->voicegroupDirs.count, out->wavSampleDirs.count);
+    /* 4. The recursive scan under sound/ for voicegroup dirs and wav dirs is
+     * deferred to discovery_ensure_deep_scan(): it runs only when a lookup
+     * misses the eager entries above (stock layouts never need it). */
 
     /* 5. Check for monolithic voicegroup files */
     build_path(path, sizeof(path), projectRoot, "sound/voice_groups.inc");
     vg_log("discover_project: checking monolithic '%s' exists=%d", path, file_exists(path));
     if (file_exists(path) && is_monolithic_voicegroup_file(path))
         pathlist_add(&out->monolithicVGFiles, path);
+}
+
+/*
+ * Run discover_project's deferred recursive sound/ scan (step 4), at most
+ * once per discovery. The scan exists only to support nonstandard project
+ * layouts (e.g. the eventide fork); on stock projects every lookup is
+ * satisfied by the eager entries and this never runs. Deferral preserves
+ * behavior: the scan appends to PathLists that already hold the eager
+ * entries, and every consumer iterates them in order, first-hit-wins, so
+ * eager hits resolve identically with or without the scanned tail.
+ *
+ * NOTE: this is lazy work within a single voicegroup_load(_samples) call,
+ * not cross-call caching — disc still lives and dies with the call.
+ */
+static void discovery_ensure_deep_scan(ProjectDiscovery *disc)
+{
+    if (disc->deepScanned) return;
+    disc->deepScanned = 1;
+    vg_log("discovery: deep scan triggered");
+    char soundDir[MAX_PATH_LEN];
+    build_path(soundDir, sizeof(soundDir), disc->projectRoot, "sound");
+    if (is_directory(soundDir))
+        discover_scan_tree(soundDir, 0, 3, disc);
+    vg_log("discovery: deep scan done, vgDirs=%d wavDirs=%d",
+           disc->voicegroupDirs.count, disc->wavSampleDirs.count);
 }
 
 /* ---- Symbol data file parsing (parameterized by file path) ---- */
@@ -1046,11 +1078,39 @@ static void parse_all_programmable_wave_data(const ProjectDiscovery *disc, const
     }
 }
 
-static void parse_all_keysplit_tables(const ProjectDiscovery *disc, KeySplitMap *map)
+static void parse_keysplit_tables_range(const ProjectDiscovery *disc, KeySplitMap *map, int fromIndex)
 {
-    for (int i = 0; i < disc->keySplitTableFiles.count; i++) {
+    for (int i = fromIndex; i < disc->keySplitTableFiles.count; i++) {
         parse_keysplit_tables_file(disc->keySplitTableFiles.paths[i], map);
     }
+    map->parsedFileCount = disc->keySplitTableFiles.count;
+}
+
+static void parse_all_keysplit_tables(const ProjectDiscovery *disc, KeySplitMap *map)
+{
+    parse_keysplit_tables_range(disc, map, 0);
+}
+
+/*
+ * keysplit_map_find with a lazy-deep-scan miss hook: on a miss, run the
+ * deferred sound/ scan (if it hasn't run yet) and parse only the keysplit
+ * table files it appended, then look again. Precedence is preserved:
+ * eagerly-discovered files were parsed first and keysplit_map_find returns
+ * the first match, same as when discovery was fully eager. The parsedFileCount
+ * check (not just deepScanned) matters when another lookup already triggered
+ * the scan: the appended table files still need parsing into this map.
+ */
+static KeySplitDef *keysplit_map_find_or_rescan(KeySplitMap *map, const char *name,
+                                                ProjectDiscovery *disc)
+{
+    KeySplitDef *ks = keysplit_map_find(map, name);
+    if (ks || !disc)
+        return ks;
+    if (disc->deepScanned && map->parsedFileCount >= disc->keySplitTableFiles.count)
+        return NULL;
+    discovery_ensure_deep_scan(disc);
+    parse_keysplit_tables_range(disc, map, map->parsedFileCount);
+    return keysplit_map_find(map, name);
 }
 
 /* ---- Sample loading ---- */
@@ -1638,31 +1698,12 @@ static uint32_t *load_prog_wave(const char *projectRoot, const char *relativePat
 /* ---- Sample fallback resolution ---- */
 
 /*
- * Try to find and load a .wav or .aif sample by searching discovered sample
- * directories.
- */
-static WaveData *resolve_sample_from_wav_dirs(const char *symbol,
-                                               const ProjectDiscovery *disc)
-{
-    for (int i = 0; i < disc->wavSampleDirs.count; i++) {
-        char wavPath[MAX_PATH_LEN];
-        snprintf(wavPath, sizeof(wavPath), "%s%c%s.wav", disc->wavSampleDirs.paths[i], PATH_SEP, symbol);
-        WaveData *wd = load_wav_from_path(wavPath);
-        if (wd) return wd;
-        snprintf(wavPath, sizeof(wavPath), "%s%c%s.aif", disc->wavSampleDirs.paths[i], PATH_SEP, symbol);
-        wd = load_aif_from_path(wavPath);
-        if (wd) return wd;
-    }
-    return NULL;
-}
-
-/*
  * Unified sample resolution: try symbol map first, then fallback to wav dirs.
  * Uses waveCache to avoid loading the same file more than once.
  * Registers newly loaded WaveData with vg; cache hits are NOT re-registered.
  */
 static WaveData *resolve_and_load_sample(const char *projectRoot, const char *symbol,
-                                          const SymbolMap *dsMap, const ProjectDiscovery *disc,
+                                          const SymbolMap *dsMap, ProjectDiscovery *disc,
                                           LoadedVoiceGroup *vg, WaveCache *waveCache)
 {
     /* Inline Golden Sun synth definition (set_synth_* macros)?  Build the
@@ -1717,8 +1758,13 @@ static WaveData *resolve_and_load_sample(const char *projectRoot, const char *sy
             return wd;
         }
     }
-    /* Fallback: search sample directories (.wav, then .aif) */
+    /* Fallback: search sample directories (.wav, then .aif). Only the deep
+     * scan populates wavSampleDirs beyond config overrides, so a lookup that
+     * reaches this point needs it to have run. On stock projects every
+     * symbol resolves via dsMap above and the scan never fires. */
     if (disc) {
+        if (!disc->deepScanned)
+            discovery_ensure_deep_scan(disc);
         for (int i = 0; i < disc->wavSampleDirs.count; i++) {
             for (int fmt = 0; fmt < 2; fmt++) {
                 char wavPath[MAX_PATH_LEN];
@@ -1756,11 +1802,11 @@ static int dir_last_component_is(const char *dirPath, const char *name)
 }
 
 /*
- * Search for a voicegroup by name across all discovered locations.
+ * Search for a voicegroup by name across all currently discovered locations.
  */
-static VoicegroupLocation find_voicegroup(const char *projectRoot,
-                                           const char *vgName,
-                                           const ProjectDiscovery *disc)
+static VoicegroupLocation find_voicegroup_probe(const char *projectRoot,
+                                                const char *vgName,
+                                                const ProjectDiscovery *disc)
 {
     VoicegroupLocation loc;
     memset(&loc, 0, sizeof(loc));
@@ -1933,6 +1979,22 @@ static VoicegroupLocation find_voicegroup(const char *projectRoot,
     return loc;
 }
 
+/*
+ * Search for a voicegroup by name; on a miss, run the deferred deep scan
+ * (which can add voicegroup dirs from nonstandard layouts) and probe again.
+ */
+static VoicegroupLocation find_voicegroup(const char *projectRoot,
+                                          const char *vgName,
+                                          ProjectDiscovery *disc)
+{
+    VoicegroupLocation loc = find_voicegroup_probe(projectRoot, vgName, disc);
+    if (!loc.found && !disc->deepScanned) {
+        discovery_ensure_deep_scan(disc);
+        loc = find_voicegroup_probe(projectRoot, vgName, disc);
+    }
+    return loc;
+}
+
 /* ---- Voicegroup parsing ---- */
 
 /* Helper: last path component (handles both separators). */
@@ -2001,8 +2063,8 @@ static int next_included_voicegroup(const char *projectRoot, const char *current
 static ToneData *load_sub_voicegroup(const char *projectRoot, const char *vgSymbol,
                                       LoadedVoiceGroup *vg,
                                       const SymbolMap *dsMap, const SymbolMap *pwMap,
-                                      const KeySplitMap *ksMap,
-                                      const ProjectDiscovery *disc,
+                                      KeySplitMap *ksMap,
+                                      ProjectDiscovery *disc,
                                       WaveCache *waveCache)
 {
     const char *name = vgSymbol;
@@ -2126,8 +2188,8 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                                   const char *startLabel,
                                   LoadedVoiceGroup *vg,
                                   const SymbolMap *dsMap, const SymbolMap *pwMap,
-                                  const KeySplitMap *ksMap,
-                                  const ProjectDiscovery *disc,
+                                  KeySplitMap *ksMap,
+                                  ProjectDiscovery *disc,
                                   WaveCache *waveCache,
                                   int startIndex, int contiguousFill, int noSubRecurse)
 {
@@ -2456,7 +2518,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                     td->subGroup = subVg;
                 }
 
-                KeySplitDef *ksDef = keysplit_map_find(ksMap, ksSymbol);
+                KeySplitDef *ksDef = keysplit_map_find_or_rescan(ksMap, ksSymbol, disc);
                 if (ksDef) {
                     uint8_t *table = malloc(128);
                     memcpy(table, ksDef->table, 128);
@@ -2670,7 +2732,7 @@ LoadedSampleSet *voicegroup_load_samples(
             load_sub_voicegroup(projectRoot, keysplitSymbols[i], set->container,
                                 &dsMap, &pwMap, &ksMap, disc, &waveCache);
         const KeySplitDef *ksDef =
-            keysplit_map_find(&ksMap, keysplitTableSymbols[i]);
+            keysplit_map_find_or_rescan(&ksMap, keysplitTableSymbols[i], disc);
         if (ksDef) {
             uint8_t *table = malloc(128);
             if (table) {
