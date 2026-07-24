@@ -30,12 +30,20 @@
 
 #ifdef _WIN32
 /*
- * Minimal dirent shim over FindFirstFile.  Only d_name is used in this file,
- * and directory iteration is strictly sequential (never concurrent), so a
- * single static dirent entry per stream is sufficient.
+ * Minimal dirent shim over FindFirstFile.  Only d_name and d_type are used in
+ * this file, and directory iteration is strictly sequential (never
+ * concurrent), so a single static dirent entry per stream is sufficient.
  */
+
+/* POSIX d_type values the loader uses; define for the shim. */
+#define DT_UNKNOWN 0
+#define DT_DIR     4
+#define DT_REG     8
+#define DT_LNK     10
+
 struct dirent {
     char d_name[MAX_PATH];
+    unsigned char d_type;
 };
 
 typedef struct {
@@ -52,7 +60,9 @@ static DIR *opendir(const char *path)
         return NULL;
     DIR *d = (DIR *)calloc(1, sizeof(DIR));
     if (!d) return NULL;
-    d->handle = FindFirstFileA(pattern, &d->findData);
+    d->handle = FindFirstFileExA(pattern, FindExInfoBasic, &d->findData,
+                                 FindExSearchNameMatch, NULL,
+                                 FIND_FIRST_EX_LARGE_FETCH);
     if (d->handle == INVALID_HANDLE_VALUE) {
         free(d);
         return NULL;
@@ -68,6 +78,13 @@ static struct dirent *readdir(DIR *d)
     else if (!FindNextFileA(d->handle, &d->findData))
         return NULL;
     snprintf(d->entry.d_name, sizeof(d->entry.d_name), "%s", d->findData.cFileName);
+    DWORD attrs = d->findData.dwFileAttributes;
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+        d->entry.d_type = DT_LNK;      /* forces the stat() fallback below */
+    else if (attrs & FILE_ATTRIBUTE_DIRECTORY)
+        d->entry.d_type = DT_DIR;
+    else
+        d->entry.d_type = DT_REG;
     return &d->entry;
 }
 
@@ -274,6 +291,21 @@ static int is_directory(const char *path)
     struct stat st;
     if (stat(path, &st) != 0) return 0;
     return S_ISDIR(st.st_mode);
+}
+
+/*
+ * Entry-type check that avoids a stat() when readdir already told us.
+ * DT_UNKNOWN/DT_LNK (possible on Linux for some filesystems, and for
+ * symlinks/reparse points everywhere) fall back to stat(), which follows
+ * links -- matching the previous behavior exactly.
+ */
+static int dirent_is_dir(const char *parentPath, const struct dirent *ent)
+{
+    if (ent->d_type == DT_DIR) return 1;
+    if (ent->d_type == DT_REG) return 0;
+    char p[MAX_PATH_LEN];
+    snprintf(p, sizeof(p), "%s%c%s", parentPath, PATH_SEP, ent->d_name);
+    return is_directory(p);
 }
 
 /* Helper: add a path to a PathList if not already present and not full */
@@ -503,11 +535,10 @@ static void scan_dirs_recursive(const char *basePath, int depth, int maxDepth, d
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.') continue;
+        if (!dirent_is_dir(basePath, ent)) continue;
         char subPath[MAX_PATH_LEN];
         snprintf(subPath, sizeof(subPath), "%s%c%s", basePath, PATH_SEP, ent->d_name);
-        if (is_directory(subPath)) {
-            scan_dirs_recursive(subPath, depth + 1, maxDepth, visit, ctx);
-        }
+        scan_dirs_recursive(subPath, depth + 1, maxDepth, visit, ctx);
     }
     closedir(d);
 }
