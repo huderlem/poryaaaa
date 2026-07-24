@@ -462,85 +462,26 @@ static KeySplitDef *keysplit_map_find(const KeySplitMap *map, const char *name)
 /* ---- Directory scanning helpers ---- */
 
 /*
- * Check if a directory contains files matching a given extension.
- * Returns 1 if at least one matching file is found.
+ * Check the first 50 lines of a file for voice macro keywords
+ * (voice_directsound, voice_square, voice_keysplit, etc.).
  */
-static int dir_has_files_with_ext(const char *dirPath, const char *ext)
+static int file_has_voice_macros(const char *filePath)
 {
-    DIR *d = opendir(dirPath);
-    if (!d) return 0;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
-        if (str_ends_with_ci(ent->d_name, ext)) {
-            closedir(d);
+    FILE *f = fopen(filePath, "r");
+    if (!f) return 0;
+    char line[MAX_LINE];
+    int lineCount = 0;
+    while (fgets(line, sizeof(line), f) && lineCount < 50) {
+        if (strstr(line, "voice_directsound") || strstr(line, "voice_square") ||
+            strstr(line, "voice_programmable_wave") || strstr(line, "voice_noise") ||
+            strstr(line, "voice_keysplit") || strstr(line, "voice_group")) {
+            fclose(f);
             return 1;
         }
+        lineCount++;
     }
-    closedir(d);
+    fclose(f);
     return 0;
-}
-
-/*
- * Check if a directory contains any voice macro definitions (.inc or .s files
- * with voice_directsound, voice_square, voice_keysplit, etc.).
- * Quick heuristic: check first few matching files for voice macro keywords.
- */
-static int dir_has_voice_macros(const char *dirPath)
-{
-    DIR *d = opendir(dirPath);
-    if (!d) return 0;
-    struct dirent *ent;
-    int checked = 0;
-    while ((ent = readdir(d)) != NULL && checked < 5) {
-        if (ent->d_name[0] == '.') continue;
-        if (!str_ends_with_ci(ent->d_name, ".inc") && !str_ends_with_ci(ent->d_name, ".s"))
-            continue;
-        char filePath[MAX_PATH_LEN];
-        snprintf(filePath, sizeof(filePath), "%s%c%s", dirPath, PATH_SEP, ent->d_name);
-        FILE *f = fopen(filePath, "r");
-        if (!f) continue;
-        char line[MAX_LINE];
-        int lineCount = 0;
-        while (fgets(line, sizeof(line), f) && lineCount < 50) {
-            if (strstr(line, "voice_directsound") || strstr(line, "voice_square") ||
-                strstr(line, "voice_programmable_wave") || strstr(line, "voice_noise") ||
-                strstr(line, "voice_keysplit") || strstr(line, "voice_group")) {
-                fclose(f);
-                closedir(d);
-                return 1;
-            }
-            lineCount++;
-        }
-        fclose(f);
-        checked++;
-    }
-    closedir(d);
-    return 0;
-}
-
-/*
- * Recursively scan under a base directory for subdirectories, up to maxDepth levels.
- * Calls the provided callback for each directory found (including basePath itself).
- */
-typedef void (*dir_visit_fn)(const char *dirPath, void *ctx);
-
-static void scan_dirs_recursive(const char *basePath, int depth, int maxDepth, dir_visit_fn visit, void *ctx)
-{
-    visit(basePath, ctx);
-    if (depth >= maxDepth) return;
-
-    DIR *d = opendir(basePath);
-    if (!d) return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (ent->d_name[0] == '.') continue;
-        if (!dirent_is_dir(basePath, ent)) continue;
-        char subPath[MAX_PATH_LEN];
-        snprintf(subPath, sizeof(subPath), "%s%c%s", basePath, PATH_SEP, ent->d_name);
-        scan_dirs_recursive(subPath, depth + 1, maxDepth, visit, ctx);
-    }
-    closedir(d);
 }
 
 /*
@@ -586,20 +527,118 @@ static void probe_keysplit_data_in_dir(const char *dirPath, ProjectDiscovery *ou
     }
 }
 
-/* Combined visitor context for voicegroup and wav directory discovery */
-typedef struct {
-    ProjectDiscovery *disc;
-} CombinedDirVisitorCtx;
+/* Facts about one directory, collected in a single readdir() pass. */
+#define MAX_DIRENT_NAME 260
 
-static void visit_for_voicegroup_and_wav_dirs(const char *dirPath, void *ctx)
+typedef struct {
+    int hasWavOrAif;
+    int hasKeysplitTablesInc;   /* entry named exactly "keysplit_tables.inc" */
+    int hasKeysplitTablesS;     /* entry named exactly "keysplit_tables.s"  */
+    int hasKeysplitsSubdir;     /* directory entry named exactly "keysplits" */
+    char macroCandidates[5][MAX_DIRENT_NAME];
+    int macroCandidateCount;    /* first 5 .inc/.s files, readdir order */
+    char (*subdirs)[MAX_DIRENT_NAME];   /* heap; readdir order */
+    int subdirCount, subdirCapacity;
+} DirFacts;
+
+/*
+ * Recursively discover voicegroup dirs, wav sample dirs, and keysplit table
+ * files under dirPath, enumerating each directory exactly once: collect all
+ * facts in a single readdir() pass, apply them (parent's adds before its
+ * children's, so PathList ordering matches the old multi-pass scan), then
+ * recurse into subdirectories in readdir order.
+ */
+static void discover_scan_tree(const char *dirPath, int depth, int maxDepth,
+                               ProjectDiscovery *out)
 {
-    CombinedDirVisitorCtx *vctx = (CombinedDirVisitorCtx *)ctx;
-    if (dir_has_voice_macros(dirPath))
-        pathlist_add(&vctx->disc->voicegroupDirs, dirPath);
-    if (dir_has_files_with_ext(dirPath, ".wav") ||
-        dir_has_files_with_ext(dirPath, ".aif"))
-        pathlist_add(&vctx->disc->wavSampleDirs, dirPath);
-    probe_keysplit_data_in_dir(dirPath, vctx->disc);
+    DirFacts facts;
+    memset(&facts, 0, sizeof(facts));
+
+    DIR *d = opendir(dirPath);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            if (dirent_is_dir(dirPath, ent)) {
+                if (strcmp(ent->d_name, "keysplits") == 0)
+                    facts.hasKeysplitsSubdir = 1;
+                if (facts.subdirCount >= facts.subdirCapacity) {
+                    facts.subdirCapacity = facts.subdirCapacity ? facts.subdirCapacity * 2 : INITIAL_CAPACITY;
+                    facts.subdirs = realloc(facts.subdirs, sizeof(*facts.subdirs) * facts.subdirCapacity);
+                }
+                snprintf(facts.subdirs[facts.subdirCount], sizeof(facts.subdirs[0]), "%s", ent->d_name);
+                facts.subdirCount++;
+            } else {
+                if (str_ends_with_ci(ent->d_name, ".wav") || str_ends_with_ci(ent->d_name, ".aif"))
+                    facts.hasWavOrAif = 1;
+                if (strcmp(ent->d_name, "keysplit_tables.inc") == 0)
+                    facts.hasKeysplitTablesInc = 1;
+                else if (strcmp(ent->d_name, "keysplit_tables.s") == 0)
+                    facts.hasKeysplitTablesS = 1;
+                if (facts.macroCandidateCount < 5 &&
+                    (str_ends_with_ci(ent->d_name, ".inc") || str_ends_with_ci(ent->d_name, ".s"))) {
+                    snprintf(facts.macroCandidates[facts.macroCandidateCount],
+                             sizeof(facts.macroCandidates[0]), "%s", ent->d_name);
+                    facts.macroCandidateCount++;
+                }
+            }
+        }
+        closedir(d);
+    }
+
+    char p[MAX_PATH_LEN];
+
+    for (int i = 0; i < facts.macroCandidateCount; i++) {
+        snprintf(p, sizeof(p), "%s%c%s", dirPath, PATH_SEP, facts.macroCandidates[i]);
+        if (file_has_voice_macros(p)) {
+            pathlist_add(&out->voicegroupDirs, dirPath);
+            break;
+        }
+    }
+
+    if (facts.hasWavOrAif)
+        pathlist_add(&out->wavSampleDirs, dirPath);
+
+    /* The directory listing already proved these exist; no stat() probes. */
+    if (facts.hasKeysplitTablesInc) {
+        snprintf(p, sizeof(p), "%s%ckeysplit_tables.inc", dirPath, PATH_SEP);
+        pathlist_add(&out->keySplitTableFiles, p);
+    }
+    if (facts.hasKeysplitTablesS) {
+        snprintf(p, sizeof(p), "%s%ckeysplit_tables.s", dirPath, PATH_SEP);
+        pathlist_add(&out->keySplitTableFiles, p);
+    }
+
+    if (facts.hasKeysplitsSubdir) {
+        /* Enumerate <dirPath>/keysplits here even though the recursion below
+         * may also visit it: a keysplits/ sitting at depth maxDepth + 1 is out
+         * of the recursion's reach, and pathlist_add dedups the overlap when
+         * it isn't. */
+        char ksDir[MAX_PATH_LEN];
+        snprintf(ksDir, sizeof(ksDir), "%s%ckeysplits", dirPath, PATH_SEP);
+        DIR *ks = opendir(ksDir);
+        if (ks) {
+            struct dirent *ent;
+            while ((ent = readdir(ks)) != NULL) {
+                if (ent->d_name[0] == '.') continue;
+                if (!str_ends_with_ci(ent->d_name, ".s") &&
+                    !str_ends_with_ci(ent->d_name, ".inc"))
+                    continue;
+                snprintf(p, sizeof(p), "%s%c%s", ksDir, PATH_SEP, ent->d_name);
+                pathlist_add(&out->keySplitTableFiles, p);
+            }
+            closedir(ks);
+        }
+    }
+
+    if (depth < maxDepth) {
+        for (int i = 0; i < facts.subdirCount; i++) {
+            char subPath[MAX_PATH_LEN];
+            snprintf(subPath, sizeof(subPath), "%s%c%s", dirPath, PATH_SEP, facts.subdirs[i]);
+            discover_scan_tree(subPath, depth + 1, maxDepth, out);
+        }
+    }
+    free(facts.subdirs);
 }
 
 /*
@@ -736,10 +775,8 @@ static void discover_project(const char *projectRoot,
 
     /* 4. Scan under sound/ for voicegroup dirs AND wav dirs in one pass */
     vg_log("discover_project: scanning for voicegroup and wav dirs under '%s'", soundDir);
-    if (is_directory(soundDir)) {
-        CombinedDirVisitorCtx vctx = { .disc = out };
-        scan_dirs_recursive(soundDir, 0, 3, visit_for_voicegroup_and_wav_dirs, &vctx);
-    }
+    if (is_directory(soundDir))
+        discover_scan_tree(soundDir, 0, 3, out);
     vg_log("discover_project: dir scan done, vgDirs=%d wavDirs=%d",
            out->voicegroupDirs.count, out->wavSampleDirs.count);
 
