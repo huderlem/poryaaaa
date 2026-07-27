@@ -868,6 +868,27 @@ static int parse_synth_macro_line(const char *trimmed, uint8_t desc[6])
 }
 
 /*
+ * If a (trimmed) line begins with a "Name::" or "Name:" label, copy the name
+ * into out and return 1.  GAS accepts both forms — a single colon merely
+ * makes the symbol file-local, which still assembles and links because
+ * sample data lives in the same assembly unit as the voicegroups that
+ * reference it.  Voicegroup labels elsewhere stay strictly "::": songs
+ * reference those from separate assembly units.
+ */
+static int parse_sample_label(const char *trimmed, char *out, size_t outSize)
+{
+    size_t nameLen = strspn(trimmed, "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                     "abcdefghijklmnopqrstuvwxyz0123456789_");
+    if (nameLen == 0 || trimmed[nameLen] != ':')
+        return 0;
+    if (nameLen >= outSize)
+        nameLen = outSize - 1;
+    memcpy(out, trimmed, nameLen);
+    out[nameLen] = '\0';
+    return 1;
+}
+
+/*
  * Parse a direct_sound_data .inc file.
  * Builds symbol name -> file path mapping.
  */
@@ -888,14 +909,9 @@ static int parse_direct_sound_data_file(const char *filePath, const char *projec
         rtrim(line);
         char *trimmed = ltrim(line);
 
-        /* Look for label:: lines */
-        char *colonColon = strstr(trimmed, "::");
-        if (colonColon && colonColon > trimmed) {
-            *colonColon = '\0';
-            strncpy(currentSymbol, trimmed, MAX_SYMBOL_LEN - 1);
-            currentSymbol[MAX_SYMBOL_LEN - 1] = '\0';
+        /* Look for "label::" / "label:" lines */
+        if (parse_sample_label(trimmed, currentSymbol, MAX_SYMBOL_LEN))
             continue;
-        }
 
         /* Look for .incbin lines */
         if (currentSymbol[0] && strstr(trimmed, ".incbin")) {
@@ -944,13 +960,8 @@ static int parse_programmable_wave_data_file(const char *filePath, const char *p
         rtrim(line);
         char *trimmed = ltrim(line);
 
-        char *colonColon = strstr(trimmed, "::");
-        if (colonColon && colonColon > trimmed) {
-            *colonColon = '\0';
-            strncpy(currentSymbol, trimmed, MAX_SYMBOL_LEN - 1);
-            currentSymbol[MAX_SYMBOL_LEN - 1] = '\0';
+        if (parse_sample_label(trimmed, currentSymbol, MAX_SYMBOL_LEN))
             continue;
-        }
 
         if (currentSymbol[0] && strstr(trimmed, ".incbin")) {
             char *quote1 = strchr(trimmed, '"');
