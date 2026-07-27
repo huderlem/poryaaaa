@@ -274,10 +274,19 @@ static void strip_comment(char *s)
     if (p) *p = '\0';
 }
 
-/* Helper: build a path */
+/* Helper: build a path. A path that doesn't fit would name the wrong file
+ * if truncated, so it becomes an empty (inert) string instead. */
 static void build_path(char *dest, size_t destSize, const char *base, const char *relative)
 {
-    snprintf(dest, destSize, "%s%c%s", base, PATH_SEP, relative);
+    size_t baseLen = strlen(base);
+    size_t relLen = strlen(relative);
+    if (baseLen + 1 + relLen >= destSize) {
+        dest[0] = '\0';
+        return;
+    }
+    memcpy(dest, base, baseLen);
+    dest[baseLen] = PATH_SEP;
+    memcpy(dest + baseLen + 1, relative, relLen + 1);
     /* Normalize separators */
     for (char *p = dest; *p; p++) {
         if (*p == '/' || *p == '\\')
@@ -311,7 +320,7 @@ static int dirent_is_dir(const char *parentPath, const struct dirent *ent)
     if (ent->d_type == DT_DIR) return 1;
     if (ent->d_type == DT_REG) return 0;
     char p[MAX_PATH_LEN];
-    snprintf(p, sizeof(p), "%s%c%s", parentPath, PATH_SEP, ent->d_name);
+    build_path(p, sizeof(p), parentPath, ent->d_name);
     return is_directory(p);
 }
 
@@ -508,15 +517,15 @@ static void probe_keysplit_data_in_dir(const char *dirPath, ProjectDiscovery *ou
 {
     char p[MAX_PATH_LEN];
 
-    snprintf(p, sizeof(p), "%s%ckeysplit_tables.inc", dirPath, PATH_SEP);
+    build_path(p, sizeof(p), dirPath, "keysplit_tables.inc");
     if (file_exists(p))
         pathlist_add(&out->keySplitTableFiles, p);
-    snprintf(p, sizeof(p), "%s%ckeysplit_tables.s", dirPath, PATH_SEP);
+    build_path(p, sizeof(p), dirPath, "keysplit_tables.s");
     if (file_exists(p))
         pathlist_add(&out->keySplitTableFiles, p);
 
     char ksDir[MAX_PATH_LEN];
-    snprintf(ksDir, sizeof(ksDir), "%s%ckeysplits", dirPath, PATH_SEP);
+    build_path(ksDir, sizeof(ksDir), dirPath, "keysplits");
     if (is_directory(ksDir)) {
         DIR *d = opendir(ksDir);
         if (d) {
@@ -527,7 +536,7 @@ static void probe_keysplit_data_in_dir(const char *dirPath, ProjectDiscovery *ou
                     !str_ends_with_ci(ent->d_name, ".inc"))
                     continue;
                 char fp[MAX_PATH_LEN];
-                snprintf(fp, sizeof(fp), "%s%c%s", ksDir, PATH_SEP, ent->d_name);
+                build_path(fp, sizeof(fp), ksDir, ent->d_name);
                 pathlist_add(&out->keySplitTableFiles, fp);
             }
             closedir(d);
@@ -597,7 +606,7 @@ static void discover_scan_tree(const char *dirPath, int depth, int maxDepth,
     char p[MAX_PATH_LEN];
 
     for (int i = 0; i < facts.macroCandidateCount; i++) {
-        snprintf(p, sizeof(p), "%s%c%s", dirPath, PATH_SEP, facts.macroCandidates[i]);
+        build_path(p, sizeof(p), dirPath, facts.macroCandidates[i]);
         if (file_has_voice_macros(p)) {
             pathlist_add(&out->voicegroupDirs, dirPath);
             break;
@@ -609,11 +618,11 @@ static void discover_scan_tree(const char *dirPath, int depth, int maxDepth,
 
     /* The directory listing already proved these exist; no stat() probes. */
     if (facts.hasKeysplitTablesInc) {
-        snprintf(p, sizeof(p), "%s%ckeysplit_tables.inc", dirPath, PATH_SEP);
+        build_path(p, sizeof(p), dirPath, "keysplit_tables.inc");
         pathlist_add(&out->keySplitTableFiles, p);
     }
     if (facts.hasKeysplitTablesS) {
-        snprintf(p, sizeof(p), "%s%ckeysplit_tables.s", dirPath, PATH_SEP);
+        build_path(p, sizeof(p), dirPath, "keysplit_tables.s");
         pathlist_add(&out->keySplitTableFiles, p);
     }
 
@@ -623,7 +632,7 @@ static void discover_scan_tree(const char *dirPath, int depth, int maxDepth,
          * of the recursion's reach, and pathlist_add dedups the overlap when
          * it isn't. */
         char ksDir[MAX_PATH_LEN];
-        snprintf(ksDir, sizeof(ksDir), "%s%ckeysplits", dirPath, PATH_SEP);
+        build_path(ksDir, sizeof(ksDir), dirPath, "keysplits");
         DIR *ks = opendir(ksDir);
         if (ks) {
             struct dirent *ent;
@@ -632,7 +641,7 @@ static void discover_scan_tree(const char *dirPath, int depth, int maxDepth,
                 if (!str_ends_with_ci(ent->d_name, ".s") &&
                     !str_ends_with_ci(ent->d_name, ".inc"))
                     continue;
-                snprintf(p, sizeof(p), "%s%c%s", ksDir, PATH_SEP, ent->d_name);
+                build_path(p, sizeof(p), ksDir, ent->d_name);
                 pathlist_add(&out->keySplitTableFiles, p);
             }
             closedir(ks);
@@ -642,7 +651,7 @@ static void discover_scan_tree(const char *dirPath, int depth, int maxDepth,
     if (depth < maxDepth) {
         for (int i = 0; i < facts.subdirCount; i++) {
             char subPath[MAX_PATH_LEN];
-            snprintf(subPath, sizeof(subPath), "%s%c%s", dirPath, PATH_SEP, facts.subdirs[i]);
+            build_path(subPath, sizeof(subPath), dirPath, facts.subdirs[i]);
             discover_scan_tree(subPath, depth + 1, maxDepth, out);
         }
     }
@@ -728,7 +737,7 @@ static void discover_project(const char *projectRoot,
                         if (ent->d_name[0] == '.') continue;
                         if (str_ends_with_ci(ent->d_name, ".inc") || str_ends_with_ci(ent->d_name, ".s")) {
                             char fpath[MAX_PATH_LEN];
-                            snprintf(fpath, sizeof(fpath), "%s%c%s", path, PATH_SEP, ent->d_name);
+                            build_path(fpath, sizeof(fpath), path, ent->d_name);
                             if (is_monolithic_voicegroup_file(fpath))
                                 pathlist_add(&out->monolithicVGFiles, fpath);
                         }
@@ -775,10 +784,10 @@ static void discover_project(const char *projectRoot,
         pathlist_add(&out->voicegroupDirs, path);
         /* Also add keysplits/ and drumsets/ subdirs */
         char subPath[MAX_PATH_LEN];
-        snprintf(subPath, sizeof(subPath), "%s%ckeysplits", path, PATH_SEP);
+        build_path(subPath, sizeof(subPath), path, "keysplits");
         if (is_directory(subPath))
             pathlist_add(&out->voicegroupDirs, subPath);
-        snprintf(subPath, sizeof(subPath), "%s%cdrumsets", path, PATH_SEP);
+        build_path(subPath, sizeof(subPath), path, "drumsets");
         if (is_directory(subPath))
             pathlist_add(&out->voicegroupDirs, subPath);
     }
