@@ -296,7 +296,9 @@ void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
  */
 void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program)
 {
-    if (trackIndex < 0 || trackIndex >= MAX_TRACKS || !engine->voiceGroup)
+    /* voiceGroup holds exactly 128 entries; a wild program must not pick a
+     * voice from whatever memory follows it. */
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS || !engine->voiceGroup || program > 127)
         return;
 
     M4ATrack *track = &engine->tracks[trackIndex];
@@ -512,7 +514,8 @@ static void portamento_note_started(M4AEngine *engine, M4ATrack *track,
  */
 void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity)
 {
-    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
+    /* Keysplit/rhythm voices index 128-entry tables by key. */
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS || key > 127)
         return;
 
     M4ATrack *track = &engine->tracks[trackIndex];
@@ -785,7 +788,8 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
  */
 void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key)
 {
-    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
+    /* No note-on ever registers a key above 127 (see m4a_engine_note_on). */
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS || key > 127)
         return;
 
     /* Stop matching PCM channels (shadow channels release too, so a lost
