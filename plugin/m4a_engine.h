@@ -268,6 +268,23 @@ typedef struct {
 
     uint16_t lfsr;          /* noise LFSR state */
 
+    /* GBA hardware envelope unit (NRx2 low bits + NRx4 trigger), modeled on
+     * mGBA's gb/audio.c.  CgbSound drives the AUDIBLE volume through this
+     * unit: every MO_VOL apply rewrites NRx2 as (envelopeVolume << 4) |
+     * hwEnvStepDir and sets the trigger bit, reloading the unit.  Between
+     * writes the unit steps on its own free-running 64 Hz clock (one volume
+     * step per `stepTime` clocks), while the software envelope is silent
+     * bookkeeping that only surfaces at phase transitions.  Percussive
+     * envelopes (sustain 0) therefore decay ~2x faster than the software
+     * envelope alone, with a per-note phase variation (the 64 Hz clock is not
+     * reset by the trigger).  Types 1, 2, 4 only; the wave channel has no
+     * hardware envelope (NR32 volume shift, driven per-frame by MO_VOL). */
+    uint8_t hwEnvStepDir;   /* NRx2 low nibble: step time 0-7, 0x08 = increase */
+    uint8_t hwEnvVolume;    /* current hardware volume 0-15: the audible level */
+    uint8_t hwEnvNextStep;  /* 64 Hz clocks until the next step */
+    uint8_t hwEnvDead;      /* nonzero = unit stopped (step time 0 or clamped) */
+    float hwEnvClockAccum;  /* fractional free-running 64 Hz clock */
+
     int trackIndex;
     /* Started by a host audition (engine->auditionNote at note-on): stays
      * audible in the polyphony-overflow invert mode. */

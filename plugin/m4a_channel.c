@@ -396,6 +396,32 @@ static void cgb_sweep_clock(M4ACGBChannel *ch)
         ch->sweepMuted = true;
 }
 
+/* CgbSound's MO_VOL register write as seen by the hardware envelope unit:
+ * NRx2 = (envelopeVolume << 4) | hwEnvStepDir plus the NRx4 trigger bit.
+ * The trigger reloads the unit's volume and step counter (mGBA
+ * _resetEnvelope) and resets the noise LFSR.  The 64 Hz clock accumulator is
+ * deliberately NOT reset: the frame sequencer free-runs on hardware, which is
+ * what gives identical percussion hits their audible level variation. */
+static void cgb_hw_env_write(M4ACGBChannel *ch)
+{
+    uint8_t stepTime = ch->hwEnvStepDir & 0x07;
+    bool dirInc = (ch->hwEnvStepDir & 0x08) != 0;
+
+    ch->hwEnvVolume = ch->envelopeVolume & 0x0F;
+    ch->hwEnvNextStep = stepTime;
+    if (stepTime == 0)
+        ch->hwEnvDead = 1;
+    else if (!dirInc && ch->hwEnvVolume == 0)
+        ch->hwEnvDead = 1;
+    else if (dirInc && ch->hwEnvVolume == 15)
+        ch->hwEnvDead = 1;
+    else
+        ch->hwEnvDead = 0;
+
+    if (ch->type == 4)
+        ch->lfsr = (ch->frequency & 0x08) ? 0x7F : 0x7FFF;
+}
+
 void m4a_cgb_channel_start(M4ACGBChannel *ch)
 {
     ch->status = CHN_ENV_ATTACK;
@@ -413,17 +439,21 @@ void m4a_cgb_channel_start(M4ACGBChannel *ch)
         ch->envelopeVolume = ch->envelopeGoal;
         ch->status = CHN_ENV_DECAY;
         ch->envelopeCounter = ch->decay;
+        ch->hwEnvStepDir = ch->decay & 0x07;
         if (ch->decay == 0) {
             /* Skip decay too */
             if (ch->sustain == 0) {
                 ch->status = CHN_ENV_RELEASE;
+                ch->hwEnvStepDir = ch->release & 0x07;
             } else {
                 ch->envelopeVolume = ch->sustainGoal;
                 ch->status = CHN_ENV_SUSTAIN;
+                ch->hwEnvStepDir = 0x08; /* step 0: frozen at sustain */
             }
         }
     } else {
         ch->envelopeVolume = 0;
+        ch->hwEnvStepDir = (ch->attack & 0x07) | 0x08;
     }
 
     /* Cancel any in-progress declick so the new note starts cleanly. */
@@ -447,6 +477,15 @@ void m4a_cgb_channel_start(M4ACGBChannel *ch)
         else
             ch->lfsr = 0x7FFF;  /* 15-bit */
     }
+
+    /* Note start is CgbSound's first MO_VOL write: arm the hardware envelope
+     * from the initial software value (goal, or 0 for a real attack).  m4a
+     * performs the start-frame register writes and clears `modify` in the same
+     * CgbSound pass; this start path runs outside the tick, so clear it here
+     * or the next tick would re-apply the write and re-arm the step timer. */
+    if (ch->type != 3)
+        cgb_hw_env_write(ch);
+    ch->modify = 0;
 }
 
 void m4a_cgb_channel_stop(M4ACGBChannel *ch)
@@ -531,17 +570,20 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15)
         ch->envelopeCounter = ch->attack;
         if (ch->attack != 0) {
             ch->envelopeVolume = 0;
+            ch->hwEnvStepDir = (ch->attack & 0x07) | 0x08;
         } else {
             /* skip attack */
             ch->envelopeVolume = ch->envelopeGoal;
             ch->status = CHN_ENV_DECAY;
             ch->envelopeCounter = ch->decay;
+            ch->hwEnvStepDir = ch->decay & 0x07;
             if (ch->decay == 0) {
                 if (ch->sustain == 0) {
                     goto pseudo_echo;
                 }
                 ch->status = CHN_ENV_SUSTAIN;
                 ch->envelopeVolume = ch->sustainGoal;
+                ch->hwEnvStepDir = 0x08;
             }
         }
         goto step_complete;
@@ -563,6 +605,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15)
         ch->envelopeCounter = ch->release;
         if (ch->release != 0) {
             ch->modify |= 0x01;
+            ch->hwEnvStepDir = ch->release & 0x07;
             goto step_complete;
         } else {
             goto pseudo_echo;
@@ -583,6 +626,7 @@ step_repeat:
                     if (ch->envelopeVolume) {
                         ch->status |= CHN_IEC;
                         ch->modify |= 0x01;
+                        ch->hwEnvStepDir = 0x08; /* step 0: frozen at echo volume */
                         goto envelope_complete;
                     } else {
                         if (ch->type == 3)
@@ -604,6 +648,7 @@ step_repeat:
                     }
                     ch->status--;  /* decay -> sustain */
                     ch->modify |= 0x01;
+                    ch->hwEnvStepDir = 0x08; /* step 0: frozen at sustain */
                     ch->envelopeVolume = ch->sustainGoal;
                     ch->envelopeCounter = 7;
                     goto step_complete;
@@ -617,6 +662,7 @@ step_repeat:
                     ch->envelopeCounter = ch->decay;
                     if (ch->decay != 0) {
                         ch->modify |= 0x01;
+                        ch->hwEnvStepDir = ch->decay & 0x07;
                         ch->envelopeVolume = ch->envelopeGoal;
                     } else {
                         if (ch->sustain == 0) {
@@ -624,6 +670,8 @@ step_repeat:
                             goto pseudo_echo;
                         }
                         ch->status--;
+                        ch->modify |= 0x01;
+                        ch->hwEnvStepDir = 0x08; /* step 0: frozen at sustain */
                         ch->envelopeVolume = ch->sustainGoal;
                         ch->envelopeCounter = 7;
                     }
@@ -644,9 +692,14 @@ step_complete:
 
 envelope_complete:
     /* CgbSound applies MO_VOL by rewriting NRx2 and setting the NRx4 trigger
-     * bit, which retriggers the square-1 hardware sweep unit. */
-    if (ch->type == 1 && (ch->modify & 0x01))
-        cgb_sweep_retrigger(ch);
+     * bit, which retriggers the square-1 hardware sweep unit and reloads the
+     * hardware envelope from the software value. */
+    if (ch->modify & 0x01) {
+        if (ch->type == 1)
+            cgb_sweep_retrigger(ch);
+        if (ch->type != 3)
+            cgb_hw_env_write(ch);
+    }
     ch->modify = 0;
 }
 
@@ -672,6 +725,34 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
 
     int32_t sample = 0;
     uint8_t cgbType = ch->type;
+
+    /* Advance the hardware envelope's free-running 64 Hz clock (frame
+     * sequencer rate, independent of the engine tick).  One volume step per
+     * `stepTime` clocks; the unit stops at the 0/15 bound (mGBA
+     * _updateEnvelope) until the next MO_VOL write reloads it. */
+    if (cgbType != 3) {
+        ch->hwEnvClockAccum += 64.0f / sampleRate;
+        while (ch->hwEnvClockAccum >= 1.0f) {
+            ch->hwEnvClockAccum -= 1.0f;
+            if (ch->hwEnvDead || (ch->hwEnvStepDir & 0x07) == 0)
+                continue;
+            if (--ch->hwEnvNextStep != 0)
+                continue;
+            if (ch->hwEnvStepDir & 0x08) {
+                if (++ch->hwEnvVolume >= 15) {
+                    ch->hwEnvVolume = 15;
+                    ch->hwEnvDead = 1;
+                } else {
+                    ch->hwEnvNextStep = ch->hwEnvStepDir & 0x07;
+                }
+            } else {
+                if (--ch->hwEnvVolume == 0)
+                    ch->hwEnvDead = 1;
+                else
+                    ch->hwEnvNextStep = ch->hwEnvStepDir & 0x07;
+            }
+        }
+    }
 
     if (cgbType == 1) {
         /* Advance the frequency sweep's 128 Hz clock (frame-sequencer rate,
@@ -812,14 +893,12 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
     }
 
     /* Apply envelope volume (for non-wave channels).
-     * envelopeVolume is the 4-bit GBA hardware volume (0-15), matching what
-     * CgbSound writes to NR12/NR22/NR42. */
-    if (cgbType != 3) {
-        /* Mask to 4 bits: envelopeVolume can reach 31 (unclamped center-pan
-         * goal), but the NRx2 write is (envelopeVolume << 4) truncated to a
-         * byte, so hardware plays envelopeVolume & 0xF. */
-        sample = (sample * (ch->envelopeVolume & 0x0F)) >> 4;
-    }
+     * The audible level is the HARDWARE envelope unit's volume, reloaded from
+     * the software envelope at every MO_VOL write and stepping on its own
+     * 64 Hz clock in between (the software value alone would hold percussive
+     * envelopes too long -- see hwEnv* in the channel struct). */
+    if (cgbType != 3)
+        sample = (sample * ch->hwEnvVolume) >> 4;
 
     /* Scale CGB to match the GBA hardware mixing ratio.
      * SOUNDCNT_H is initialised with SOUND_ALL_MIX_FULL (volume bits = 2), so

@@ -1383,6 +1383,66 @@ static void test_golden_sun_synth_waveforms(void)
     }
 }
 
+/* The audible CGB volume is the hardware envelope unit (NRx2 low bits +
+ * trigger), reloaded by CgbSound's MO_VOL writes and stepping on its own
+ * free-running 64 Hz clock -- not the ~60 Hz software envelope, which during
+ * decay/release is silent bookkeeping.  A percussive noise voice (attack 0,
+ * decay 1, sustain 0) at envelope goal 2 must drop to level 1 at the first
+ * 64 Hz clock (~15.6 ms) and be silent by ~31 ms; the software envelope alone
+ * holds the goal for two engine frames and would still be sounding at 40 ms. */
+static void test_cgb_hw_envelope(void)
+{
+    printf("Testing CGB hardware envelope...\n");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_NOISE;
+    voices[0].key = 60;
+    voices[0].attack = 0;
+    voices[0].decay = 1;
+    voices[0].sustain = 0;
+    voices[0].release = 1;
+    /* wavePointer NULL: NR43 period bit 0 = 15-bit LFSR */
+
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 7, 127);
+
+    /* Velocity 20 at full track volume: left+right = 38 -> envelope goal 2 */
+    m4a_engine_note_on(&engine, 0, 80, 20);
+
+    /* Render 60 ms and record the peak level of three windows:
+     * W0 = 0-14 ms (goal level 2), W1 = 17-30 ms (level 1 after the first
+     * 64 Hz step), W2 = 35-45 ms (hardware envelope dead at 31.25 ms). */
+    float peakW0 = 0, peakW1 = 0, peakW2 = 0;
+    float outL[480], outR[480];
+    for (int block = 0; block < 6; block++) {
+        m4a_engine_process(&engine, outL, outR, 480);
+        for (int i = 0; i < 480; i++) {
+            int s = block * 480 + i;
+            float v = fabsf(outL[i]);
+            if (fabsf(outR[i]) > v) v = fabsf(outR[i]);
+            if (s < 672) {
+                if (v > peakW0) peakW0 = v;
+            } else if (s >= 816 && s < 1440) {
+                if (v > peakW1) peakW1 = v;
+            } else if (s >= 1680 && s < 2160) {
+                if (v > peakW2) peakW2 = v;
+            }
+        }
+    }
+
+    ASSERT(peakW0 > 0.01f, "hw env: goal level audible at note start");
+    ASSERT(peakW1 > 0.005f, "hw env: level 1 audible after first 64 Hz step");
+    ASSERT(peakW1 < peakW0 * 0.75f, "hw env: level dropped at ~15.6 ms");
+    ASSERT(peakW2 == 0.0f, "hw env: silent once the unit reaches zero (~31 ms)");
+
+    m4a_engine_destroy(&engine);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -1403,6 +1463,7 @@ int main(void)
     test_lfo_tempo_scaling();
     test_golden_sun_synth();
     test_golden_sun_synth_waveforms();
+    test_cgb_hw_envelope();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
