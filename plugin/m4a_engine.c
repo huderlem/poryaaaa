@@ -974,6 +974,14 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         track->pwmPattern = pattern;
         track->pwmStep = 0;
         track->pwmSpeedCounter = track->pwmSpeed;
+        /* If the speed was already set, this command re-enables the effect on
+         * its own, so mark the engine active again.  Without this, the sequence
+         * "PWMS n ... PWMC 0 ... PWMC m" would leave the effect permanently
+         * dead: m4a_pwm_tick clears pwmActiveFlag while all patterns are 0,
+         * and only the PWMS handler would ever set it again.  Mirrors the
+         * matching fix in ply_pwmc on the GBA. */
+        if (pattern != 0 && track->pwmSpeed != 0)
+            engine->pwmActiveFlag = true;
         break;
     }
     case 0x19: /* Pulse-width mod speed (PWMS), VBlank frames per step; 0 = off.

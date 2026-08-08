@@ -1051,6 +1051,20 @@ static void test_pwm(void)
     m4a_engine_cc(&engine, 0, 0x17, 200);
     ASSERT_EQ(engine.tracks[0].pwmPattern, 0, "pwm: out-of-range pattern clamps to 0");
 
+    /* Regression: PWMC alone must re-arm the engine's active flag when the
+     * track's speed is still set.  The sequence "PWMS n ... PWMC 0 ... PWMC m"
+     * previously left the effect permanently dead, because pwmActiveFlag
+     * decays while all patterns are 0 and only the PWMS handler set it. */
+    m4a_engine_cc(&engine, 0, 0x19, 2);  /* PWMS 2: speed set, effect armed */
+    m4a_engine_cc(&engine, 0, 0x17, 0);  /* PWMC 0: pattern off */
+    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);
+    ASSERT(!engine.pwmActiveFlag, "pwm: active flag decays while all patterns are 0");
+    m4a_engine_cc(&engine, 0, 0x17, 2);  /* PWMC alone re-enables the effect */
+    ASSERT(engine.pwmActiveFlag, "pwm: PWMC alone re-arms the active flag");
+    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);
+    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);
+    ASSERT_EQ(sq->dutyCycle, 1, "pwm: modulation resumes after PWMC re-arm");
+
     m4a_engine_destroy(&engine);
 }
 
