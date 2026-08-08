@@ -828,6 +828,10 @@ static void render_frames(M4AEngine *engine, float *outL, float *outR,
 
 int main(int argc, char *argv[])
 {
+    /* Line-buffer stdout even when piped so progress prints stay visible
+     * (diagnosing a hang otherwise requires stdbuf). */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     if (argc < 4) {
         print_usage(argv[0]);
         return 1;
@@ -1094,12 +1098,33 @@ int main(int argc, char *argv[])
                                 continue; /* TIE + EOT: unreachable — held forever */
 
                             /* Gate-carry: the release lands rr ticks into a
-                             * later pass (usually the next one). */
-                            uint64_t rr = noteOff->tick - loopEndTick;
-                            uint64_t passDelta = 1;
-                            while (rr > loopLenTicks) {
-                                rr -= loopLenTicks;
-                                passDelta++;
+                             * later pass (usually the next one).  rr ends up
+                             * in (0, loopLenTicks] with passDelta >= 1.
+                             *
+                             * A note can also still be keyed on at the wrap
+                             * with its off tick NOT past the loop end: the
+                             * off event was clipped by the render-length
+                             * limit (sp >= totalSamples) rather than by the
+                             * loop end, or boundary rounding put it just
+                             * outside the sample-position filter.  Then the
+                             * release belongs inside the *current* pass at
+                             * its own tick (passDelta 0) — computing it that
+                             * way lands it at the off's original position,
+                             * which the totalSamples check below drops in
+                             * the clipped case, i.e. the note simply holds
+                             * to the end of the render as it would on
+                             * hardware.  (The old repeated-subtraction loop
+                             * underflowed here and spun ~2^64 iterations.) */
+                            uint64_t rr, passDelta;
+                            if (noteOff->tick > loopEndTick && loopLenTicks > 0) {
+                                uint64_t past = noteOff->tick - loopEndTick;
+                                passDelta = 1 + (past - 1) / loopLenTicks;
+                                rr = past - (passDelta - 1) * loopLenTicks;
+                            } else {
+                                passDelta = 0;
+                                rr = noteOff->tick > loopStartTick
+                                         ? noteOff->tick - loopStartTick
+                                         : 0;
                             }
                             uint64_t releasePos =
                                 tick_to_sample(loopStartTick + rr, tempoMap.events,
@@ -1169,11 +1194,25 @@ int main(int argc, char *argv[])
         renderEvts      = extEvts;
         renderEvtCount  = extCount;
     } else {
-        /* No loop: use original events + tail silence */
-        uint64_t tailSamps = (uint64_t)(tailSeconds * sampleRate + 0.5);
-        totalSamples       = totalMidiSamples + tailSamps;
-        renderEvts         = events->events;
-        renderEvtCount     = events->count;
+        /* No loop: use original events + tail silence.  An explicit
+         * --total-duration-seconds overrides the natural length exactly:
+         * events beyond it are dropped (the render loop stops at
+         * totalSamples), a longer duration pads with silence, and the
+         * fadeout occupies the final --fadeout seconds just as in the
+         * looped path. */
+        if (totalDurSeconds >= 0.0) {
+            uint64_t fadeoutSamps = (uint64_t)(fadeoutSeconds * sampleRate + 0.5);
+            totalSamples    = (uint64_t)(totalDurSeconds * sampleRate + 0.5);
+            fadeStartSample = totalSamples > fadeoutSamps
+                              ? totalSamples - fadeoutSamps : 0;
+            printf("  Fadeout: starts %.3f s, duration %.2f s\n",
+                   (double)fadeStartSample / sampleRate, fadeoutSeconds);
+        } else {
+            uint64_t tailSamps = (uint64_t)(tailSeconds * sampleRate + 0.5);
+            totalSamples       = totalMidiSamples + tailSamps;
+        }
+        renderEvts     = events->events;
+        renderEvtCount = events->count;
     }
 
     printf("  Total render: %.2f s (%llu samples)\n",
