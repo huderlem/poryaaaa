@@ -880,7 +880,7 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
         gui->settings = *initial;
     } else {
         memset(&gui->settings, 0, sizeof(gui->settings));
-        gui->settings.masterVolume     = 15;
+        gui->settings.masterVolume     = 12;
         gui->settings.songMasterVolume = 127;
         gui->settings.pcmMixRate       = 13379.0f;
     }

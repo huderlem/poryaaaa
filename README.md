@@ -154,7 +154,7 @@ The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings ca
 | `project_root` | *(required)* | Path to project root |
 | `voicegroup` | *(required)* | Voicegroup name |
 | `reverb` | `0` | Reverb amount (0–127) |
-| `master_volume` | `15` | M4A master volume (0–15) |
+| `master_volume` | `12` | M4A master volume (0–15; 12 matches Pokemon Emerald's `m4aSoundInit`) |
 | `song_master_volume` | `127` | Song-level volume multiplier (0–127) |
 | `max_channels` | `5` | Max simultaneous PCM (DirectSound) channels (1–15) |
 | `pcm_mix_rate` | `13379` | DirectSound (PCM) mix rate in Hz; `13379` = GBA-accurate aliasing, `0` = follow host rate (clean) |

@@ -184,7 +184,7 @@ static void load_config_file(M4APluginData *data)
 static bool plugin_init(const clap_plugin_t *plugin)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
-    data->masterVolume = 15;
+    data->masterVolume = 12;
     data->songMasterVolume = MAX_SONG_VOLUME;
     data->reverbAmount = 0;
     data->analogFilter = false;

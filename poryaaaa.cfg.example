@@ -22,8 +22,9 @@ voicegroup=petalburg
 # Reverb amount (0 = none, 127 = maximum).
 reverb=0
 
-# Master volume (0-15). 15 matches the GBA's default.
-master_volume=15
+# Master volume (0-15). 12 matches Pokemon Emerald's m4aSoundInit; it scales
+# only DirectSound channels, so raising it unbalances them against the PSG.
+master_volume=12
 
 # Song Master volume (0-127)
 song_master_volume=127

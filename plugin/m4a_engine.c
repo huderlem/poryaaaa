@@ -215,7 +215,10 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     engine->pcmResampleAccum = 0.0f;
     engine->pcmPrevL = engine->pcmPrevR = 0;
     engine->pcmCurL = engine->pcmCurR = 0;
-    engine->masterVolume = 15;
+    /* 12 matches Pokemon Emerald's m4aSoundInit (12 << SOUND_MODE_MASVOL_SHIFT).
+     * masterVolume scales only the PCM path -- CGB channels bypass it -- so a
+     * higher value makes DirectSound too loud relative to PSG. */
+    engine->masterVolume = 12;
     engine->songMasterVolume = MAX_SONG_VOLUME;
     engine->maxPcmChannels = 5;  /* default, matches Pokemon Emerald init */
     engine->polyEventClock = M4A_POLY_TICK_NONE;
