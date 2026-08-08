@@ -1443,6 +1443,67 @@ static void test_cgb_hw_envelope(void)
     m4a_engine_destroy(&engine);
 }
 
+/* The noise LFSR clocks at up to 524288 Hz -- ~11 steps per 48 kHz output
+ * sample at the highest keys -- so each output sample must be the
+ * time-weighted average of every LFSR level inside its window (mGBA's
+ * _coalesceNoiseChannel).  Point-sampling the LFSR instead aliases the fast
+ * clock into a rail-to-rail two-level square: every sample sits at +/-peak.
+ * A sustained key-80 noise note (NR43 0x00, 524288 Hz) must therefore
+ * produce mostly INTERMEDIATE values, well inside the rails. */
+static void test_cgb_noise_band_limiting(void)
+{
+    printf("Testing CGB noise band-limiting...\n");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_NOISE;
+    voices[0].key = 60;
+    voices[0].attack = 0;
+    voices[0].decay = 0;
+    voices[0].sustain = 15;  /* hold at full level: isolate the LFSR shape */
+    voices[0].release = 0;
+    /* wavePointer NULL: NR43 period bit 0 = 15-bit LFSR */
+
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 7, 127);
+
+    /* Key 80 = gNoiseTable[59] = 0x00: the fastest LFSR clock (524288 Hz). */
+    m4a_engine_note_on(&engine, 0, 80, 127);
+
+    float outL[480], outR[480];
+    /* Skip the first block (note-start ramp), then gather statistics. */
+    m4a_engine_process(&engine, outL, outR, 480);
+    float peak = 0;
+    int total = 0, interior = 0, positive = 0, negative = 0;
+    float samples[1920];
+    for (int block = 0; block < 4; block++) {
+        m4a_engine_process(&engine, outL, outR, 480);
+        for (int i = 0; i < 480; i++)
+            samples[total++] = outL[i];
+    }
+    for (int i = 0; i < total; i++)
+        if (fabsf(samples[i]) > peak) peak = fabsf(samples[i]);
+    for (int i = 0; i < total; i++) {
+        if (fabsf(samples[i]) < peak * 0.7f) interior++;
+        if (samples[i] > 0) positive++;
+        if (samples[i] < 0) negative++;
+    }
+
+    ASSERT(peak > 0.001f, "noise blimit: note is audible");
+    ASSERT(positive > total / 10 && negative > total / 10,
+           "noise blimit: both polarities present");
+    /* Averaging ~11 random LFSR levels leaves nearly every sample far from
+     * the rails; the aliasing point-sampler leaves interior == 0. */
+    ASSERT(interior > total / 2,
+           "noise blimit: fast-clock noise is mostly intermediate values");
+
+    m4a_engine_destroy(&engine);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -1464,6 +1525,7 @@ int main(void)
     test_golden_sun_synth();
     test_golden_sun_synth_waveforms();
     test_cgb_hw_envelope();
+    test_cgb_noise_band_limiting();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

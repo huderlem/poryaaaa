@@ -859,10 +859,20 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
             ch->phase += ch->phaseInc;
         }
     } else if (cgbType == 4) {
-        /* Noise channel using LFSR */
-        sample = (ch->lfsr & 1) ? 64 : -64;
-
-        /* Advance LFSR at noise frequency rate */
+        /* Noise channel using LFSR.
+         *
+         * The LFSR clocks at up to 524288 Hz -- typically far above the
+         * output sample rate -- so a single output sample spans many LFSR
+         * steps.  Point-sampling the LFSR once per output sample aliases
+         * that fast clock into a full-scale two-level square ("rigid" noise);
+         * hardware recordings and mGBA (_coalesceNoiseChannel box-averages
+         * every LFSR step inside each output sample) show the band-limited
+         * mean instead.  Walk every LFSR step that falls inside this sample
+         * and output the time-weighted average of the two-level waveform.
+         *
+         * For noise, ch->phaseInc holds Q16.16 LFSR clocks per output sample
+         * and ch->phase holds the Q16 fraction (always < 0x10000) of the
+         * current LFSR period already elapsed. */
         uint8_t noiseParams = ch->frequency & 0xFF;
 
         /* Phase increment is constant between frequency changes; cache it. */
@@ -875,20 +885,36 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
             float divisor = (divRatio == 0) ? 0.5f : (float)divRatio;
             float noiseFreq = baseFreq / divisor / (float)(1 << (shiftFreq + 1));
 
-            ch->phaseInc = (uint32_t)(noiseFreq / sampleRate * 4294967296.0f);
+            ch->phaseInc = (uint32_t)(noiseFreq / sampleRate * 65536.0f);
             ch->phaseIncFreq = ch->frequency;
         }
-        uint32_t oldPhase = ch->phase;
-        ch->phase += ch->phaseInc;
 
-        /* Clock LFSR on phase wrap.
-         * Bit 3 of frequency = period mode: 0 = 15-bit LFSR, 1 = 7-bit LFSR. */
-        if (ch->phase < oldPhase) {
-            uint16_t bit = ((ch->lfsr >> 1) ^ ch->lfsr) & 1;
-            if (noiseParams & 0x08)
-                ch->lfsr = (ch->lfsr >> 1) | (bit << 6);   /* 7-bit */
-            else
-                ch->lfsr = (ch->lfsr >> 1) | (bit << 14);  /* 15-bit */
+        uint32_t remaining = ch->phaseInc;
+        uint32_t untilClock = 0x10000u - ch->phase;
+        if (remaining < untilClock) {
+            /* No LFSR clock lands inside this sample: constant level. */
+            sample = (ch->lfsr & 1) ? 64 : -64;
+            ch->phase += remaining;
+        } else {
+            /* One or more LFSR clocks inside this sample: accumulate each
+             * level weighted by the time it was held.
+             * Bit 3 of frequency = period mode: 0 = 15-bit, 1 = 7-bit LFSR. */
+            int32_t acc = (int32_t)untilClock * ((ch->lfsr & 1) ? 64 : -64);
+            remaining -= untilClock;
+            for (;;) {
+                uint16_t bit = ((ch->lfsr >> 1) ^ ch->lfsr) & 1;
+                if (noiseParams & 0x08)
+                    ch->lfsr = (ch->lfsr >> 1) | (bit << 6);   /* 7-bit */
+                else
+                    ch->lfsr = (ch->lfsr >> 1) | (bit << 14);  /* 15-bit */
+                if (remaining < 0x10000u)
+                    break;
+                acc += (int32_t)(0x10000u * ((ch->lfsr & 1) ? 64 : -64));
+                remaining -= 0x10000u;
+            }
+            acc += (int32_t)remaining * ((ch->lfsr & 1) ? 64 : -64);
+            ch->phase = remaining;
+            sample = acc / (int32_t)ch->phaseInc;
         }
     }
 

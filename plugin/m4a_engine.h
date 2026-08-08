@@ -248,7 +248,9 @@ typedef struct {
     float sweepClockAccum;   /* fractional 128 Hz clock, advanced per sample */
 
     uint32_t frequency;
-    uint32_t phase;         /* phase accumulator for synthesis */
+    uint32_t phase;         /* phase accumulator for synthesis; for the noise
+                             * channel, the Q16 fraction (< 0x10000) of the
+                             * current LFSR period already elapsed */
     uint32_t *wavePointer;  /* programmable wave data */
 
     /* Cached per-sample phase increment.  The increment derived from
@@ -256,7 +258,10 @@ typedef struct {
      * recomputed (a couple of float divides) only when `frequency` changes
      * rather than every rendered sample.  phaseIncFreq holds the `frequency`
      * value phaseInc was computed for; a sentinel of 0xFFFFFFFF (set at note
-     * start) forces a recompute on the first sample of a note. */
+     * start) forces a recompute on the first sample of a note.  For the noise
+     * channel, phaseInc is Q16.16 LFSR clocks per output sample (the LFSR can
+     * clock up to ~11x faster than the output rate, so it needs an integer
+     * part). */
     uint32_t phaseInc;
     uint32_t phaseIncFreq;
 
