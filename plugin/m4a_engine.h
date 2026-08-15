@@ -21,6 +21,10 @@ extern "C" {
 #define VBLANK_RATE 59.7275f
 #define MAX_SONG_VOLUME 127 // called "mxv" in pokeemerald
 
+/* engine->auditionVolume / channel auditionVolume: no override, use the
+ * track's own VOL. */
+#define M4A_AUDITION_VOL_NONE 0xFF
+
 /* Voice types (matching GBA ToneData.type) */
 #define VOICE_DIRECTSOUND           0x00
 #define VOICE_SQUARE_1              0x01
@@ -189,6 +193,13 @@ typedef struct {
     /* Started by a host audition (engine->auditionNote at note-on): stays
      * audible in the polyphony-overflow invert mode. */
     bool audition;
+    /* The track VOL this note was keyed at (already scaled by
+     * songMasterVolume), or M4A_AUDITION_VOL_NONE to follow the track's own.
+     * An audition belongs to the point in the song it was taken from, so it
+     * keeps this volume for its whole life -- through the track volume
+     * changes and LFO recalculations that would otherwise pull it onto
+     * whatever VOL the track currently holds. */
+    uint8_t auditionVolume;
     bool isLoop;
     int32_t loopLen;        /* loop length in samples */
     int8_t *loopStart;      /* pointer to loop start in sample data */
@@ -294,6 +305,8 @@ typedef struct {
     /* Started by a host audition (engine->auditionNote at note-on): stays
      * audible in the polyphony-overflow invert mode. */
     bool audition;
+    /* The track VOL this note was keyed at; see the PCM channel's field. */
+    uint8_t auditionVolume;
 
     /* Wave channel (type 3) declick: avoids a pop when the note ends by
      * smoothly fading the last sample to zero over DECLICK_SAMPLES frames. */
@@ -396,6 +409,13 @@ struct M4AEngine {
      * polyEventClock; hosts that never set it (default false) get the
      * plain invert behavior. */
     bool auditionNote;
+    /* Host-set track VOL (0-127, before songMasterVolume) for the next
+     * audition note-on, or M4A_AUDITION_VOL_NONE (the default) to use the
+     * track's own.  Latched into the channel the note-on starts, so it
+     * survives the track volume changes and LFO recalculations that follow.
+     * Independent of auditionNote (which is about polyphony debugging), and
+     * under the same single-writer contract as polyEventClock. */
+    uint8_t auditionVolume;
     uint32_t polyDropCount[MAX_TRACKS];    /* notes that never sounded */
     uint32_t polyStealCount[MAX_TRACKS];   /* active notes cut off */
     uint32_t polyTailCutCount[MAX_TRACKS]; /* releasing tails cut off */

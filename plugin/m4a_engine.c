@@ -94,12 +94,14 @@ uint32_t m4a_midi_key_to_cgb_freq(uint8_t chanNum, uint8_t key, uint8_t fineAdju
 }
 
 /*
- * Track volume and pitch calculation - matches TrkVolPitSet in m4a.c
+ * The volume half of TrkVolPitSet, for an arbitrary track volume: the track's
+ * pan, volX and (tremolo/autopan) LFO state applied to `volume`.  Auditions
+ * hold a volume of their own, so the same math has to run for a value that is
+ * not the one currently on the track.
  */
-void m4a_track_vol_pit_set(M4ATrack *track)
+static void track_vol_pair(const M4ATrack *track, uint32_t volume, uint8_t *volMR, uint8_t *volML)
 {
-    /* Volume calculation */
-    int32_t x = ((uint32_t)track->volume * track->volX) >> 5;
+    int32_t x = (volume * track->volX) >> 5;
 
     if (track->modT == 1)
         x = ((uint32_t)x * (track->modM + 128)) >> 7;
@@ -112,8 +114,30 @@ void m4a_track_vol_pit_set(M4ATrack *track)
     if (y < -128) y = -128;
     else if (y > 127) y = 127;
 
-    track->volMR = (uint32_t)((y + 128) * x) >> 8;
-    track->volML = (uint32_t)((127 - y) * x) >> 8;
+    *volMR = (uint8_t)((uint32_t)((y + 128) * x) >> 8);
+    *volML = (uint8_t)((uint32_t)((127 - y) * x) >> 8);
+}
+
+/* The volume basis a channel's own levels are computed from: an audition
+ * keeps the VOL it was keyed at, everything else follows the track. */
+static void chn_vol_pair(const M4ATrack *track, uint8_t auditionVolume, uint8_t *volMR,
+                         uint8_t *volML)
+{
+    if (auditionVolume != M4A_AUDITION_VOL_NONE) {
+        track_vol_pair(track, auditionVolume, volMR, volML);
+        return;
+    }
+    *volMR = track->volMR;
+    *volML = track->volML;
+}
+
+/*
+ * Track volume and pitch calculation - matches TrkVolPitSet in m4a.c
+ */
+void m4a_track_vol_pit_set(M4ATrack *track)
+{
+    /* Volume calculation */
+    track_vol_pair(track, track->volume, &track->volMR, &track->volML);
 
     /* Pitch calculation */
     int32_t bend = (int32_t)track->bend * track->bendRange;
@@ -134,36 +158,52 @@ void m4a_track_vol_pit_set(M4ATrack *track)
  */
 static void chn_vol_set(M4APCMChannel *ch, M4ATrack *track)
 {
+    uint8_t volMR, volML;
+    chn_vol_pair(track, ch->auditionVolume, &volMR, &volML);
+
     uint32_t velocity = ch->velocity;
     int32_t rhythmPan = ch->rhythmPan;
     uint32_t panR = (uint32_t)(0x80 + rhythmPan);
     uint32_t volR = panR * velocity;
-    uint32_t result = (volR * track->volMR) >> 14;
+    uint32_t result = (volR * volMR) >> 14;
     if (result > 0xFF) result = 0xFF;
     ch->rightVolume = (uint8_t)result;
 
     uint32_t panL = (uint32_t)(0x7F - rhythmPan);
     uint32_t volL = panL * velocity;
-    result = (volL * track->volML) >> 14;
+    result = (volL * volML) >> 14;
     if (result > 0xFF) result = 0xFF;
     ch->leftVolume = (uint8_t)result;
 }
 
 static void cgb_chn_vol_set(M4ACGBChannel *ch, M4ATrack *track)
 {
+    uint8_t volMR, volML;
+    chn_vol_pair(track, ch->auditionVolume, &volMR, &volML);
+
     uint32_t velocity = ch->velocity;
     int32_t rhythmPan = ch->rhythmPan;
     uint32_t panR = (uint32_t)(0x80 + rhythmPan);
     uint32_t volR = panR * velocity;
-    uint32_t result = (volR * track->volMR) >> 14;
+    uint32_t result = (volR * volMR) >> 14;
     if (result > 0xFF) result = 0xFF;
     ch->rightVolume = (uint8_t)result;
 
     uint32_t panL = (uint32_t)(0x7F - rhythmPan);
     uint32_t volL = panL * velocity;
-    result = (volL * track->volML) >> 14;
+    result = (volL * volML) >> 14;
     if (result > 0xFF) result = 0xFF;
     ch->leftVolume = (uint8_t)result;
+}
+
+/* The audition VOL a note-on latches into the channel it starts: the host's
+ * raw byte scaled by the song's master volume, matching track->volume. */
+static uint8_t m4a_audition_volume(const M4AEngine *engine)
+{
+    if (engine->auditionVolume == M4A_AUDITION_VOL_NONE)
+        return M4A_AUDITION_VOL_NONE;
+    return (uint8_t)((uint32_t)engine->auditionVolume * engine->songMasterVolume
+                     / MAX_SONG_VOLUME);
 }
 
 /*
@@ -220,6 +260,7 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
      * higher value makes DirectSound too loud relative to PSG. */
     engine->masterVolume = 12;
     engine->songMasterVolume = MAX_SONG_VOLUME;
+    engine->auditionVolume = M4A_AUDITION_VOL_NONE;
     engine->maxPcmChannels = 5;  /* default, matches Pokemon Emerald init */
     engine->polyEventClock = M4A_POLY_TICK_NONE;
     engine->c15 = 14;
@@ -238,6 +279,14 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
         track->lfoSpeed = 22;
         track->pan = 0;
     }
+
+    /* A zeroed auditionVolume would read as "audition at VOL 0" (silence), so
+     * every channel starts at the no-override sentinel; note-on overwrites it
+     * on the paths that do audition. */
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        engine->pcmChannels[i].auditionVolume = M4A_AUDITION_VOL_NONE;
+    for (int i = 0; i < TOTAL_CGB_CHANNELS; i++)
+        engine->cgbChannels[i].auditionVolume = M4A_AUDITION_VOL_NONE;
 
     /* Initialize CGB channels with proper types and pan masks.  The shadow
      * pool (second half) mirrors the real channels one-to-one so a lost CGB
@@ -614,6 +663,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         ch->priority = combinedPriority;
         ch->trackIndex = trackIndex;
         ch->audition = engine->auditionNote;
+        ch->auditionVolume = m4a_audition_volume(engine);
         ch->rhythmPan = rhythmPan;
         ch->attack = voice->attack;
         ch->decay = voice->decay;
@@ -709,6 +759,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         ch->priority = combinedPriority;
         ch->trackIndex = trackIndex;
         ch->audition = engine->auditionNote;
+        ch->auditionVolume = m4a_audition_volume(engine);
         ch->rhythmPan = rhythmPan;
         ch->attack = voice->attack;
         ch->decay = voice->decay;
