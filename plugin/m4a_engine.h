@@ -24,6 +24,10 @@ extern "C" {
 /* engine->auditionVolume / channel auditionVolume: no override, use the
  * track's own VOL. */
 #define M4A_AUDITION_VOL_NONE 0xFF
+/* engine->auditionPan / channel auditionPan: no override, use the track's own
+ * PAN. Outside the -64..63 a PAN event can produce, so no real pan collides
+ * with it. */
+#define M4A_AUDITION_PAN_NONE 127
 
 /* Voice types (matching GBA ToneData.type) */
 #define VOICE_DIRECTSOUND           0x00
@@ -200,6 +204,11 @@ typedef struct {
      * changes and LFO recalculations that would otherwise pull it onto
      * whatever VOL the track currently holds. */
     uint8_t auditionVolume;
+    /* The track PAN this note was keyed at (-64..63), or M4A_AUDITION_PAN_NONE
+     * to follow the track's own. Kept for the note's whole life for the same
+     * reason as the volume: an audition belongs to the point in the song it
+     * was taken from. */
+    int8_t auditionPan;
     bool isLoop;
     int32_t loopLen;        /* loop length in samples */
     int8_t *loopStart;      /* pointer to loop start in sample data */
@@ -305,8 +314,10 @@ typedef struct {
     /* Started by a host audition (engine->auditionNote at note-on): stays
      * audible in the polyphony-overflow invert mode. */
     bool audition;
-    /* The track VOL this note was keyed at; see the PCM channel's field. */
+    /* The track VOL and PAN this note was keyed at; see the PCM channel's
+     * fields. */
     uint8_t auditionVolume;
+    int8_t auditionPan;
 
     /* Wave channel (type 3) declick: avoids a pop when the note ends by
      * smoothly fading the last sample to zero over DECLICK_SAMPLES frames. */
@@ -416,6 +427,12 @@ struct M4AEngine {
      * Independent of auditionNote (which is about polyphony debugging), and
      * under the same single-writer contract as polyEventClock. */
     uint8_t auditionVolume;
+    /* Host-set track PAN (-64..63) for the next audition note-on, or
+     * M4A_AUDITION_PAN_NONE (the default) to use the track's own. Latched
+     * into the channel the note-on starts, like auditionVolume, so a later
+     * PAN event does not drag a sounding audition off the pan it was taken
+     * at. The two are independent: either may be set on its own. */
+    int8_t auditionPan;
     uint32_t polyDropCount[MAX_TRACKS];    /* notes that never sounded */
     uint32_t polyStealCount[MAX_TRACKS];   /* active notes cut off */
     uint32_t polyTailCutCount[MAX_TRACKS]; /* releasing tails cut off */

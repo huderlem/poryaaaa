@@ -99,14 +99,15 @@ uint32_t m4a_midi_key_to_cgb_freq(uint8_t chanNum, uint8_t key, uint8_t fineAdju
  * hold a volume of their own, so the same math has to run for a value that is
  * not the one currently on the track.
  */
-static void track_vol_pair(const M4ATrack *track, uint32_t volume, uint8_t *volMR, uint8_t *volML)
+static void track_vol_pair(const M4ATrack *track, uint32_t volume, int32_t pan, uint8_t *volMR,
+                           uint8_t *volML)
 {
     int32_t x = (volume * track->volX) >> 5;
 
     if (track->modT == 1)
         x = ((uint32_t)x * (track->modM + 128)) >> 7;
 
-    int32_t y = 2 * track->pan + track->panX;
+    int32_t y = 2 * pan + track->panX;
 
     if (track->modT == 2)
         y += track->modM;
@@ -119,12 +120,16 @@ static void track_vol_pair(const M4ATrack *track, uint32_t volume, uint8_t *volM
 }
 
 /* The volume basis a channel's own levels are computed from: an audition
- * keeps the VOL it was keyed at, everything else follows the track. */
-static void chn_vol_pair(const M4ATrack *track, uint8_t auditionVolume, uint8_t *volMR,
-                         uint8_t *volML)
+ * keeps the VOL and PAN it was keyed at, everything else follows the track.
+ * Either override can stand alone -- a channel with only one of them takes
+ * the track's live value for the other. */
+static void chn_vol_pair(const M4ATrack *track, uint8_t auditionVolume, int8_t auditionPan,
+                         uint8_t *volMR, uint8_t *volML)
 {
-    if (auditionVolume != M4A_AUDITION_VOL_NONE) {
-        track_vol_pair(track, auditionVolume, volMR, volML);
+    if (auditionVolume != M4A_AUDITION_VOL_NONE || auditionPan != M4A_AUDITION_PAN_NONE) {
+        uint32_t volume = auditionVolume != M4A_AUDITION_VOL_NONE ? auditionVolume : track->volume;
+        int32_t pan = auditionPan != M4A_AUDITION_PAN_NONE ? auditionPan : track->pan;
+        track_vol_pair(track, volume, pan, volMR, volML);
         return;
     }
     *volMR = track->volMR;
@@ -137,7 +142,7 @@ static void chn_vol_pair(const M4ATrack *track, uint8_t auditionVolume, uint8_t 
 void m4a_track_vol_pit_set(M4ATrack *track)
 {
     /* Volume calculation */
-    track_vol_pair(track, track->volume, &track->volMR, &track->volML);
+    track_vol_pair(track, track->volume, track->pan, &track->volMR, &track->volML);
 
     /* Pitch calculation */
     int32_t bend = (int32_t)track->bend * track->bendRange;
@@ -159,7 +164,7 @@ void m4a_track_vol_pit_set(M4ATrack *track)
 static void chn_vol_set(M4APCMChannel *ch, M4ATrack *track)
 {
     uint8_t volMR, volML;
-    chn_vol_pair(track, ch->auditionVolume, &volMR, &volML);
+    chn_vol_pair(track, ch->auditionVolume, ch->auditionPan, &volMR, &volML);
 
     uint32_t velocity = ch->velocity;
     int32_t rhythmPan = ch->rhythmPan;
@@ -179,7 +184,7 @@ static void chn_vol_set(M4APCMChannel *ch, M4ATrack *track)
 static void cgb_chn_vol_set(M4ACGBChannel *ch, M4ATrack *track)
 {
     uint8_t volMR, volML;
-    chn_vol_pair(track, ch->auditionVolume, &volMR, &volML);
+    chn_vol_pair(track, ch->auditionVolume, ch->auditionPan, &volMR, &volML);
 
     uint32_t velocity = ch->velocity;
     int32_t rhythmPan = ch->rhythmPan;
@@ -204,6 +209,13 @@ static uint8_t m4a_audition_volume(const M4AEngine *engine)
         return M4A_AUDITION_VOL_NONE;
     return (uint8_t)((uint32_t)engine->auditionVolume * engine->songMasterVolume
                      / MAX_SONG_VOLUME);
+}
+
+/* The audition PAN a note-on latches into the channel it starts. Unlike the
+ * volume it needs no scaling: PAN is the track's own value either way. */
+static int8_t m4a_audition_pan(const M4AEngine *engine)
+{
+    return engine->auditionPan;
 }
 
 /*
@@ -261,6 +273,7 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     engine->masterVolume = 12;
     engine->songMasterVolume = MAX_SONG_VOLUME;
     engine->auditionVolume = M4A_AUDITION_VOL_NONE;
+    engine->auditionPan = M4A_AUDITION_PAN_NONE;
     engine->maxPcmChannels = 5;  /* default, matches Pokemon Emerald init */
     engine->polyEventClock = M4A_POLY_TICK_NONE;
     engine->c15 = 14;
@@ -280,13 +293,18 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
         track->pan = 0;
     }
 
-    /* A zeroed auditionVolume would read as "audition at VOL 0" (silence), so
-     * every channel starts at the no-override sentinel; note-on overwrites it
-     * on the paths that do audition. */
-    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+    /* A zeroed auditionVolume would read as "audition at VOL 0" (silence),
+     * and a zeroed auditionPan as "audition dead center", so every channel
+     * starts at the no-override sentinels; note-on overwrites them on the
+     * paths that do audition. */
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
         engine->pcmChannels[i].auditionVolume = M4A_AUDITION_VOL_NONE;
-    for (int i = 0; i < TOTAL_CGB_CHANNELS; i++)
+        engine->pcmChannels[i].auditionPan = M4A_AUDITION_PAN_NONE;
+    }
+    for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
         engine->cgbChannels[i].auditionVolume = M4A_AUDITION_VOL_NONE;
+        engine->cgbChannels[i].auditionPan = M4A_AUDITION_PAN_NONE;
+    }
 
     /* Initialize CGB channels with proper types and pan masks.  The shadow
      * pool (second half) mirrors the real channels one-to-one so a lost CGB
@@ -664,6 +682,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         ch->trackIndex = trackIndex;
         ch->audition = engine->auditionNote;
         ch->auditionVolume = m4a_audition_volume(engine);
+        ch->auditionPan = m4a_audition_pan(engine);
         ch->rhythmPan = rhythmPan;
         ch->attack = voice->attack;
         ch->decay = voice->decay;
@@ -760,6 +779,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         ch->trackIndex = trackIndex;
         ch->audition = engine->auditionNote;
         ch->auditionVolume = m4a_audition_volume(engine);
+        ch->auditionPan = m4a_audition_pan(engine);
         ch->rhythmPan = rhythmPan;
         ch->attack = voice->attack;
         ch->decay = voice->decay;
