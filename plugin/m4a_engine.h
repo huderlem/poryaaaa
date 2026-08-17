@@ -268,6 +268,12 @@ typedef struct {
     float sweepClockAccum;   /* fractional 128 Hz clock, advanced per sample */
 
     uint32_t frequency;
+    /* Set from the voice's TONEDATA_TYPE_FIX bit (the `_alt` PSG voice macros:
+     * voice_square_1_alt, voice_square_2_alt, voice_programmable_wave_alt).
+     * When set, every driver-side (MO_PIT) frequency write to this channel is
+     * quantized -- see m4a_cgb_fix_freq() in m4a_engine.c for the rounding,
+     * the sweep-unit exclusion and why it stays false for the noise channel. */
+    bool fixedFreq;
     uint32_t phase;         /* phase accumulator for synthesis; for the noise
                              * channel, the Q16 fraction (< 0x10000) of the
                              * current LFSR period already elapsed */

@@ -1068,6 +1068,114 @@ static void test_pwm(void)
     m4a_engine_destroy(&engine);
 }
 
+/* TONEDATA_TYPE_FIX ("_alt" PSG voices): voice_square_1_alt and friends set
+ * bit 3 of the voice type, which makes CgbSound round the 11-bit frequency
+ * register to an even value -- (freq + 1) & 0x7fe under Emerald's 65536 Hz DAC
+ * PWM rate -- so the oscillator period divides the PWM period evenly.  The
+ * audible result is a slight detune that grows with pitch.  CgbSound guards
+ * the rounding with `ch < 4`, so voice_noise_alt must behave like voice_noise. */
+static void test_cgb_fixed_freq(void)
+{
+    printf("Testing CGB fixed-frequency (_alt) voices...\n");
+
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    /* 0/1: square-1 plain and _alt.  2/3: wave plain and _alt.
+     * 4/5: noise plain and _alt (the bit must be inert there). */
+    static const uint8_t types[6] = {
+        VOICE_SQUARE_1, VOICE_SQUARE_1_ALT,
+        VOICE_PROGRAMMABLE_WAVE, VOICE_PROGRAMMABLE_WAVE_ALT,
+        VOICE_NOISE, VOICE_NOISE_ALT,
+    };
+    static uint32_t waveTable[4] = { 0x89ABCDEF, 0x01234567, 0xFEDCBA98, 0x76543210 };
+    for (int i = 0; i < 6; i++) {
+        voices[i].type = types[i];
+        voices[i].key = 60;
+        voices[i].attack = 0;
+        voices[i].decay = 0;
+        voices[i].sustain = 15;
+        voices[i].release = 3;
+        if (types[i] == VOICE_PROGRAMMABLE_WAVE || types[i] == VOICE_PROGRAMMABLE_WAVE_ALT)
+            voices[i].wavePointer = waveTable;
+    }
+
+    M4AEngine engine;
+    float outL[1024], outR[1024];
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+
+    /* Square-1 (cgb channel 0) and wave (cgb channel 2). */
+    const int progs[2] = { 0, 2 };
+    const int chans[2] = { 0, 2 };
+    const char *names[2] = { "square-1", "wave" };
+
+    for (int v = 0; v < 2; v++) {
+        M4ACGBChannel *ch = &engine.cgbChannels[chans[v]];
+        int oddSeen = 0, differed = 0;
+
+        for (int key = 36; key <= 120; key++) {
+            m4a_engine_program_change(&engine, 0, progs[v]);
+            m4a_engine_note_on(&engine, 0, (uint8_t)key, 100);
+            uint32_t plain = ch->frequency;
+            ASSERT(!ch->fixedFreq, "fixfreq: plain voice does not set fixedFreq");
+
+            m4a_engine_program_change(&engine, 0, progs[v] + 1);
+            m4a_engine_note_on(&engine, 0, (uint8_t)key, 100);
+            uint32_t alt = ch->frequency;
+            ASSERT(ch->fixedFreq, "fixfreq: _alt voice sets fixedFreq");
+
+            if (alt != ((plain + 1) & 0x7FE)) {
+                fprintf(stderr, "  %s key %d: plain %u, alt %u\n",
+                        names[v], key, plain, alt);
+                differed = -1;  /* poisoned: reported once below */
+            }
+            if (plain & 1) oddSeen = 1;
+            if (alt != plain && differed == 0) differed = 1;
+
+            m4a_engine_note_off(&engine, 0, (uint8_t)key);
+        }
+
+        ASSERT(differed >= 0, "fixfreq: _alt frequency is (plain + 1) & 0x7fe");
+        /* Guards against a vacuous pass: if no key in the sweep produced an odd
+         * register value, the rounding would be a no-op everywhere. */
+        ASSERT(oddSeen, "fixfreq: sweep covers keys with an odd frequency register");
+        ASSERT(differed == 1, "fixfreq: rounding actually shifts some frequencies");
+    }
+
+    /* Noise: the FIX bit is inert (CgbSound's `ch < 4` guard), so the _alt and
+     * plain voices must produce identical frequency registers. */
+    M4ACGBChannel *noise = &engine.cgbChannels[3];
+    int noiseDiffered = 0;
+    for (int key = 36; key <= 120; key++) {
+        m4a_engine_program_change(&engine, 0, 4);
+        m4a_engine_note_on(&engine, 0, (uint8_t)key, 100);
+        uint32_t plain = noise->frequency;
+
+        m4a_engine_program_change(&engine, 0, 5);
+        m4a_engine_note_on(&engine, 0, (uint8_t)key, 100);
+        ASSERT(!noise->fixedFreq, "fixfreq: voice_noise_alt leaves fixedFreq clear");
+        if (noise->frequency != plain) noiseDiffered = 1;
+
+        m4a_engine_note_off(&engine, 0, (uint8_t)key);
+    }
+    ASSERT(!noiseDiffered, "fixfreq: voice_noise_alt matches voice_noise");
+
+    /* The rounding also applies on the tick path (MO_PIT: pitch bend, vibrato),
+     * not just at note-on. */
+    M4ACGBChannel *sq = &engine.cgbChannels[0];
+    m4a_engine_program_change(&engine, 0, 1);   /* square-1 _alt */
+    m4a_engine_note_on(&engine, 0, 90, 100);
+    int benta = 0;
+    for (int bend = -8000; bend <= 8000; bend += 250) {
+        m4a_engine_pitch_bend(&engine, 0, (int16_t)bend);
+        m4a_engine_process(&engine, outL, outR, 739);  /* one VBlank tick */
+        if (sq->frequency & 1) benta = 1;
+    }
+    ASSERT(!benta, "fixfreq: bent _alt frequency stays quantized on the tick path");
+
+    m4a_engine_destroy(&engine);
+}
+
 /* Square-1 hardware frequency sweep (NR10): a square-1 voice whose pan_sweep
  * byte holds a sweep value glides its frequency in "hardware" at 128 Hz,
  * f' = f +/- (f >> shift) every `time` clocks; an upward sweep that overflows
@@ -1520,6 +1628,7 @@ int main(void)
     test_portamento();
     test_portamento_prev_key_tracking();
     test_pwm();
+    test_cgb_fixed_freq();
     test_sweep();
     test_lfo_tempo_scaling();
     test_golden_sun_synth();

@@ -94,6 +94,60 @@ uint32_t m4a_midi_key_to_cgb_freq(uint8_t chanNum, uint8_t key, uint8_t fineAdju
 }
 
 /*
+ * TONEDATA_TYPE_FIX quantization for the `_alt` PSG voices - matches the
+ * `ch < 4 && (type & TONEDATA_TYPE_FIX)` block in CgbSound (m4a.c).  Rounding
+ * the 11-bit frequency register makes the oscillator period an integer
+ * multiple of the DAC's PWM period, which suppresses PWM beating at the cost
+ * of a slight detune (the error is +-1 in (2048 - reg), so roughly f/131072
+ * for the square channels and f/65536 for the wave channel -- a few cents low
+ * in the register, tens of cents up high).
+ *
+ * The GBA picks the rounding step from REG_SOUNDBIAS_H, i.e. the DAC's PWM
+ * rate.  Emerald calls m4aSoundMode(SOUND_MODE_DA_BIT_8 | ...) at startup
+ * (m4a.c:78), which leaves REG_SOUNDBIAS_H at 0x40 = 65536 Hz, so only the
+ * `(freq + 1) & 0x7fe` branch is ever taken; the 32768 Hz branch would round
+ * to a multiple of 4 instead.  Nothing in this engine can change the PWM
+ * rate, so only the live branch is implemented.
+ *
+ * Applied only where the GBA sets CGB_CHANNEL_MO_PIT (note-on, track pitch
+ * updates, portamento) -- not to the frequency sweep unit in m4a_channel.c,
+ * which drives NR13/NR14 directly and bypasses this path.  CgbSound also
+ * guards the block with `ch < 4`, so the FIX bit is inert on the noise
+ * channel: voice_noise_alt behaves exactly like voice_noise, and note-on
+ * leaves fixedFreq false for type 4.
+ */
+static inline uint32_t m4a_cgb_fix_freq(const M4ACGBChannel *ch, uint32_t freq)
+{
+    return ch->fixedFreq ? ((freq + 1) & 0x7FE) : freq;
+}
+
+/*
+ * The frequency half of a CGB_CHANNEL_MO_PIT update: the channel's register
+ * value for `key` (clamped at 0) + `fine`, with the FIX rounding applied.
+ * Every driver-side pitch write goes through here (or cgb_set_pitch below) so
+ * the quantization can't be missed on one path and present on another.
+ */
+static inline uint32_t cgb_pitch_freq(const M4ACGBChannel *ch, int32_t key, uint8_t fine)
+{
+    if (key < 0) key = 0;
+    return m4a_cgb_fix_freq(ch, m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)key, fine));
+}
+
+/*
+ * cgb_pitch_freq + register write for a channel that is already sounding.
+ * Preserves NR43 bit 3 (7-bit LFSR mode) on the noise channel: gNoiseTable
+ * entries always have bit 3 = 0, the period bit is ORed in at note-on time
+ * and must survive frequency updates.
+ */
+static inline void cgb_set_pitch(M4ACGBChannel *ch, int32_t key, uint8_t fine)
+{
+    uint32_t newFreq = cgb_pitch_freq(ch, key, fine);
+    if (ch->type == 4)
+        newFreq |= ch->frequency & 0x08;
+    ch->frequency = newFreq;
+}
+
+/*
  * The volume half of TrkVolPitSet, for an arbitrary track volume: the track's
  * pan, volX and (tremolo/autopan) LFO state applied to `volume`.  Auditions
  * hold a volume of their own, so the same math has to run for a value that is
@@ -533,11 +587,7 @@ static void apply_portamento_pitch(M4AEngine *engine, M4ATrack *track,
         if (!(ch->status & CHN_ON) || (ch->status & CHN_STOP)
             || ch->trackIndex != trackIndex)
             continue;
-        uint32_t newFreq = m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)key, fine);
-        /* Preserve NR43 bit 3 (7-bit LFSR mode) for the noise channel */
-        if (ch->type == 4)
-            newFreq |= ch->frequency & 0x08;
-        ch->frequency = newFreq;
+        cgb_set_pitch(ch, key, fine);
     }
 }
 
@@ -692,6 +742,8 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
         ch->pseudoEchoLength = track->pseudoEchoLength;
         ch->length = voice->length;
         ch->gateTime = 0;
+        /* `_alt` PSG voices; inert on noise -- see m4a_cgb_fix_freq(). */
+        ch->fixedFreq = (voice->type & VOICE_TYPE_FIX) && voiceType != 4;
 
         cgb_chn_vol_set(ch, track);
         m4a_cgb_mod_vol(ch);
@@ -728,8 +780,9 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
             ch->wavePointer = voice->wavePointer;
         }
 
-        /* Calculate frequency */
-        ch->frequency = m4a_midi_key_to_cgb_freq(voiceType, (uint8_t)finalKey, track->pitM);
+        /* Calculate frequency (before m4a_cgb_channel_start latches it into
+         * sweepShadowFreq, so the sweep starts from the FIX-rounded value). */
+        ch->frequency = cgb_pitch_freq(ch, finalKey, track->pitM);
         /* Noise channel: apply period bit (NR43 bit 3) from wavePointer.
          * period=0 → 15-bit LFSR, period=1 → 7-bit short-period LFSR. */
         if (voiceType == 4)
@@ -909,17 +962,8 @@ static void refresh_channel_pitches(M4AEngine *engine, M4ATrack *track, int trac
     }
     for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
         M4ACGBChannel *ch = &engine->cgbChannels[i];
-        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
-            int32_t finalKey = (int32_t)ch->key + track->keyM;
-            if (finalKey < 0) finalKey = 0;
-            uint32_t newFreq = m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)finalKey, track->pitM);
-            /* Preserve NR43 bit 3 (7-bit LFSR mode) for noise channel.
-             * gNoiseTable entries always have bit 3 = 0; the period bit is
-             * ORed in at note-on time and must survive frequency updates. */
-            if (ch->type == 4)
-                newFreq |= ch->frequency & 0x08;
-            ch->frequency = newFreq;
-        }
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex)
+            cgb_set_pitch(ch, (int32_t)ch->key + track->keyM, track->pitM);
     }
 }
 
@@ -1304,14 +1348,8 @@ static void m4a_lfo_tick(M4AEngine *engine)
                      * sweep; vibrato steps are MO_PIT and do not. */
                     if (track->modT != 0)
                         ch->modify |= 0x01;
-                    if (track->modT == 0) {
-                        int32_t finalKey = (int32_t)ch->key + track->keyM;
-                        if (finalKey < 0) finalKey = 0;
-                        uint32_t newFreq = m4a_midi_key_to_cgb_freq(ch->type, (uint8_t)finalKey, track->pitM);
-                        if (ch->type == 4)
-                            newFreq |= ch->frequency & 0x08;
-                        ch->frequency = newFreq;
-                    }
+                    if (track->modT == 0)
+                        cgb_set_pitch(ch, (int32_t)ch->key + track->keyM, track->pitM);
                 }
             }
         }

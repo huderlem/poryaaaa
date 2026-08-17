@@ -329,6 +329,8 @@ void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
  * unit is retriggered at every envelope phase transition and track volume
  * change; MO_PIT frequency writes do NOT touch the shadow, so vibrato/bend on
  * a sweeping note is overridden at the unit's next calculation.
+ * Likewise the sweep's own frequency writes are deliberately NOT quantized
+ * for fixedFreq voices -- see m4a_cgb_fix_freq() in m4a_engine.c.
  */
 
 static inline int cgb_sweep_time(const M4ACGBChannel *ch)
