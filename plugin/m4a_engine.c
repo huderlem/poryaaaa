@@ -873,14 +873,20 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
          * inherits its sample position, envelope, and loop state instead of
          * triggering a fresh attack/sample start, making the glide perfectly
          * smooth.  The previous channel is silenced so the two don't
-         * double-voice.  Disallowed if the voice changed (different wav).
-         * A shadow (dropped) note must not inherit -- or silence -- a real
-         * channel's state. */
+         * double-voice.  Disallowed if the voice changed (different wav),
+         * or if only one of the two plays its (shared) wav in reverse: the
+         * reverse mixer keeps currentPointer one past the current sample
+         * (data + count) while the forward mixer keeps it AT the sample, so
+         * handing a reverse channel's position to a forward one would start
+         * it at data + count and read `count` samples past the end of the
+         * data.  A shadow (dropped) note must not inherit -- or silence --
+         * a real channel's state. */
         if (!shadow && engine->portamentoEnabled && track->portamentoDuration != 0) {
             for (int i = 0; i < engine->maxPcmChannels; i++) {
                 M4APCMChannel *prev = &engine->pcmChannels[i];
                 if (prev == ch || !(prev->status & CHN_ON)
-                    || prev->trackIndex != trackIndex || prev->wav != voice->wav)
+                    || prev->trackIndex != trackIndex || prev->wav != voice->wav
+                    || ((prev->type ^ voice->type) & VOICE_TYPE_REV))
                     continue;
                 ch->currentPointer = prev->currentPointer;
                 ch->count = prev->count;

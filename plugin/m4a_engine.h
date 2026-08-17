@@ -48,6 +48,21 @@ extern "C" {
 
 #define VOICE_TYPE_CGB_MASK         0x07
 #define VOICE_TYPE_FIX              0x08
+/* TONEDATA_TYPE_REV: the sample plays backwards, from its last sample to its
+ * first (voice_directsound_alt, cry_reverse).  Loops are ignored: the
+ * channel ends when it runs off the front of the data. */
+#define VOICE_TYPE_REV              0x10
+/* TONEDATA_TYPE_CMP: the voice's WaveData is DPCM-compressed (the `cry`
+ * macros).  Informational only -- the mixer keys the decode off the
+ * WaveData.type header field, exactly like SoundMainRAM does. */
+#define VOICE_TYPE_CMP              0x20
+
+/* DPCM (aif2pcm/wav2agb `--compress`) sample layout: 64 samples per block,
+ * 33 bytes each -- one raw sample, then 4-bit deltas (the second byte's low
+ * nibble first, then high nibble before low nibble for the rest) indexed into
+ * gDeltaEncodingTable.  Matches SoundMainRAM_Unk2 in m4a_1.s. */
+#define M4A_DPCM_BLOCK_SAMPLES      64
+#define M4A_DPCM_BLOCK_BYTES        33
 
 /* Golden Sun synth instruments (ipatix improved-mixer feature).
  * A DirectSound sample whose WaveData.size is 0 is not PCM data but a
@@ -212,6 +227,13 @@ typedef struct {
     bool isLoop;
     int32_t loopLen;        /* loop length in samples */
     int8_t *loopStart;      /* pointer to loop start in sample data */
+
+    /* DPCM decode cache for compressed samples (WaveData.type != 0): the
+     * block currently held in dpcmBuf, or -1 when nothing is decoded yet.
+     * Plays the role of SoundChannel.xpi + sDecodingBuffer in m4a_1.s
+     * (per channel here rather than one shared buffer). */
+    int32_t dpcmBlock;
+    int8_t dpcmBuf[M4A_DPCM_BLOCK_SAMPLES];
 
     /* Golden Sun synth voice (M4A_SYNTH_*; M4A_SYNTH_NONE = normal sample).
      * When active, the channel reuses fw as the 32-bit oscillator phase (one

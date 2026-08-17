@@ -1802,6 +1802,412 @@ static void test_cgb_noise_band_limiting(void)
     m4a_engine_destroy(&engine);
 }
 
+
+/* Reverse (TONEDATA_TYPE_REV / voice_directsound_alt) samples play from the
+ * last sample to the first, interpolating toward the earlier sample, ignore
+ * loops, and end when they run off the front -- the SoundMainRAM_Unk1
+ * reverse path.  Driven directly with a hand-built channel at unity volume
+ * (256 -> value >> 8 is the sample itself). */
+/* What a hand-driven PCM channel at envelope volume 128 outputs for sample v. */
+#define PCM_OUT(v) (((int32_t)(v) * 128) >> 8)
+
+static void test_pcm_reverse(void)
+{
+    printf("Testing reverse-played samples...\n");
+
+    enum { N = 8 };
+    WaveData *wd = calloc(1, sizeof(WaveData) + N + 1);
+    wd->type = 0;
+    wd->status = 0x4000;  /* looped -- must be ignored in reverse */
+    wd->loopStart = 2;
+    wd->size = N;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    for (int i = 0; i < N; i++)
+        wd->data[i] = (int8_t)(10 * (i + 1));  /* 10, 20, ..., 80 */
+    wd->data[N] = wd->data[N - 1];
+
+    /* One source sample per output sample. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND_ALT);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = 128;
+        ch.envelopeVolumeRight = 128;
+        ASSERT(ch.currentPointer == wd->data + N, "reverse: starts at the end of the data");
+
+        int ok = 1;
+        for (int i = 0; i < N; i++) {
+            int32_t l = 0, r = 0;
+            m4a_pcm_channel_render(&ch, &l, &r);
+            if (l != PCM_OUT(10 * (N - i)) || r != l) ok = 0;
+        }
+        ASSERT(ok, "reverse: plays the samples last-to-first");
+        ASSERT_EQ(ch.status, 0, "reverse: stops at the front (loop ignored)");
+        int32_t l = 0, r = 0;
+        m4a_pcm_channel_render(&ch, &l, &r);
+        ASSERT_EQ(l, 0, "reverse: silent once stopped");
+    }
+
+    /* Half speed: interpolates toward the previous sample. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND_ALT);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = 128;
+        ch.envelopeVolumeRight = 128;
+        static const int32_t expect[6] = { 80, 75, 70, 65, 60, 55 };
+        int ok = 1;
+        for (int i = 0; i < 6; i++) {
+            int32_t l = 0, r = 0;
+            m4a_pcm_channel_render(&ch, &l, &r);
+            if (l != PCM_OUT(expect[i])) ok = 0;
+        }
+        ASSERT(ok, "reverse: half speed interpolates toward the earlier sample");
+        ASSERT_EQ(ch.count, 5, "reverse: count tracks the samples left");
+        ASSERT(ch.currentPointer == wd->data + 5, "reverse: pointer stays one past the current sample");
+    }
+
+    /* Half speed with the FIX bit (0x18): sample-and-hold like the main
+     * mixer, no interpolation.  (A FIX voice only steps exactly one source
+     * sample per output at the GBA's mix rate; at other rates, or after a
+     * pitch refresh, the special path must honour the flag itself.) */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND_ALT | VOICE_TYPE_FIX);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = 128;
+        ch.envelopeVolumeRight = 128;
+        static const int32_t expect[6] = { 80, 80, 70, 70, 60, 60 };
+        int ok = 1;
+        for (int i = 0; i < 6; i++) {
+            int32_t l = 0, r = 0;
+            m4a_pcm_channel_render(&ch, &l, &r);
+            if (l != PCM_OUT(expect[i])) ok = 0;
+        }
+        ASSERT(ok, "reverse fix: half speed holds each sample (no interpolation)");
+    }
+
+    /* Through the engine: a voice_directsound_alt voice on a rising ramp
+     * comes out falling, and the FIX+REV combination (0x18) still runs
+     * backwards. */
+    {
+        enum { RN = 4096 };
+        WaveData *ramp = calloc(1, sizeof(WaveData) + RN + 1);
+        ramp->freq = 13379 << 10;
+        ramp->size = RN;
+        ramp->data = (int8_t *)((uint8_t *)ramp + sizeof(WaveData));
+        for (int i = 0; i < RN; i++)
+            ramp->data[i] = (int8_t)(-100 + (200 * i) / RN);
+        ramp->data[RN] = ramp->data[RN - 1];
+
+        ToneData voices[128];
+        memset(voices, 0, sizeof(voices));
+        for (int v = 0; v < 3; v++) {
+            voices[v].key = 60;
+            voices[v].wav = ramp;
+            voices[v].attack = 0xFF;
+            voices[v].sustain = 0xFF;
+        }
+        voices[0].type = VOICE_DIRECTSOUND;
+        voices[1].type = VOICE_DIRECTSOUND_ALT;
+        voices[2].type = VOICE_DIRECTSOUND_ALT | VOICE_TYPE_FIX;
+
+        for (int v = 0; v < 3; v++) {
+            M4AEngine engine;
+            m4a_engine_init(&engine, 44100.0f);
+            m4a_engine_set_voicegroup(&engine, voices);
+            m4a_engine_program_change(&engine, 0, (uint8_t)v);
+            m4a_engine_cc(&engine, 0, 7, 127);
+            m4a_engine_note_on(&engine, 0, 60, 127);
+            float outL[512], outR[512];
+            m4a_engine_process(&engine, outL, outR, 512);
+            /* Compare an early and a late output of the block (the very
+             * first output precedes the channel's first mix and is 0):
+             * the ramp covers ~4096 source samples, so 512 outputs never
+             * reach the other end at any of these rates. */
+            ASSERT(fabsf(outL[8]) > 0.01f, "reverse engine: audible");
+            if (v == 0)
+                ASSERT(outL[504] > outL[8], "engine: plain sample rises with the ramp");
+            else
+                ASSERT(outL[504] < outL[8], "reverse engine: alt voice falls (plays backwards)");
+            m4a_engine_destroy(&engine);
+        }
+        free(ramp);
+    }
+
+    free(wd);
+}
+
+/* Portamento legato inheritance across a reverse voice and a forward voice
+ * that share the same WaveData.  The two mixers keep different pointer
+ * conventions (reverse: one past the current sample; forward: at it), so a
+ * legato note must only inherit from a channel playing in the same
+ * direction -- otherwise a forward channel would start at data + count and
+ * read `count` samples past the end of the data (heap over-read). */
+static void test_pcm_reverse_legato_inherit(void)
+{
+    printf("Testing reverse/forward legato inheritance...\n");
+
+    enum { N = 1000 };
+    WaveData *wd = calloc(1, sizeof(WaveData) + N + 1);
+    wd->freq = 13379 << 10;
+    wd->size = N;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    for (int i = 0; i < N; i++)
+        wd->data[i] = (int8_t)(127.0 * sin(2.0 * 3.14159265 * i / 50.0));
+    wd->data[N] = wd->data[N - 1];
+
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    for (int v = 0; v < 2; v++) {
+        voices[v].key = 60;
+        voices[v].wav = wd;
+        voices[v].attack = 0xFF;
+        voices[v].sustain = 0xFF;
+        voices[v].release = 220;
+    }
+    voices[0].type = VOICE_DIRECTSOUND_ALT;  /* reverse */
+    voices[1].type = VOICE_DIRECTSOUND;      /* forward, same wav */
+
+    static const struct { uint8_t from, to; const char *what; } cases[] = {
+        { 0, 1, "reverse -> forward" },
+        { 1, 0, "forward -> reverse" },
+    };
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+        M4AEngine engine;
+        float outL[256], outR[256];
+        m4a_engine_init(&engine, 44100.0f);
+        engine.portamentoEnabled = true;
+        m4a_engine_set_voicegroup(&engine, voices);
+        m4a_engine_cc(&engine, 0, 0x5, 2);  /* portamento on: 2-tick glide */
+
+        m4a_engine_program_change(&engine, 0, cases[c].from);
+        m4a_engine_note_on(&engine, 0, 60, 100);
+        m4a_engine_process(&engine, outL, outR, 32);
+        M4APCMChannel *first = find_pcm_channel(&engine, 0);
+        ASSERT(first != NULL, "rev legato: first note has a channel");
+        ASSERT(first->count < N && first->count > 0, "rev legato: first note is mid-sample");
+
+        /* Zero-gap note on the other voice: must NOT inherit the position. */
+        m4a_engine_program_change(&engine, 0, cases[c].to);
+        m4a_engine_note_off(&engine, 0, 60);
+        m4a_engine_note_on(&engine, 0, 67, 100);
+        M4APCMChannel *second = find_pcm_channel(&engine, 0);
+        ASSERT(second != NULL, "rev legato: second note has a channel");
+        ASSERT(second != first, "rev legato: opposite direction gets a fresh channel");
+        ASSERT_EQ(second->count, N, "rev legato: opposite direction starts the sample over");
+        int8_t *expectPtr = (voices[cases[c].to].type & VOICE_TYPE_REV) ? wd->data + N : wd->data;
+        ASSERT(second->currentPointer == expectPtr, "rev legato: pointer uses the new direction's convention");
+        ASSERT((first->status & CHN_ON) != 0, "rev legato: previous channel keeps releasing (not silenced)");
+
+        /* Render well past the point where a wrongly-inherited forward
+         * channel would have run off the end of the data. */
+        for (int i = 0; i < 40; i++)
+            m4a_engine_process(&engine, outL, outR, 256);
+        ASSERT(second->currentPointer >= wd->data && second->currentPointer <= wd->data + N,
+               "rev legato: position stays inside the data");
+        m4a_engine_destroy(&engine);
+    }
+
+    /* Same direction (reverse -> reverse) still inherits as usual. */
+    {
+        M4AEngine engine;
+        float outL[256], outR[256];
+        m4a_engine_init(&engine, 44100.0f);
+        engine.portamentoEnabled = true;
+        m4a_engine_set_voicegroup(&engine, voices);
+        m4a_engine_cc(&engine, 0, 0x5, 2);
+        m4a_engine_program_change(&engine, 0, 0);
+        m4a_engine_note_on(&engine, 0, 60, 100);
+        m4a_engine_process(&engine, outL, outR, 32);
+        M4APCMChannel *first = find_pcm_channel(&engine, 0);
+        int8_t *posBefore = first->currentPointer;
+        int32_t countBefore = first->count;
+        m4a_engine_note_off(&engine, 0, 60);
+        m4a_engine_note_on(&engine, 0, 67, 100);
+        M4APCMChannel *second = find_pcm_channel(&engine, 0);
+        ASSERT(second != NULL, "rev legato: same-direction note has a channel");
+        ASSERT(second->currentPointer == posBefore, "rev legato: same direction inherits the position");
+        ASSERT_EQ(second->count, countBefore, "rev legato: same direction inherits the count");
+        ASSERT_EQ(second->status & ~CHN_LOOP, CHN_ENV_SUSTAIN, "rev legato: same direction sustains");
+        m4a_engine_destroy(&engine);
+    }
+
+    free(wd);
+}
+
+/* Build a DPCM-compressed WaveData whose samples follow the given nibble
+ * stream: block k starts with rawStart[k], every later sample adds
+ * gDeltaEncodingTable[nibble].  Returns the WaveData and fills `decoded`
+ * with the samples the GBA decoder must produce. */
+static WaveData *make_dpcm_wave(uint32_t size, uint32_t loopStart, int looped,
+                                int8_t *decoded)
+{
+    uint32_t blocks = size / M4A_DPCM_BLOCK_SAMPLES + 1;
+    uint32_t bytes = blocks * M4A_DPCM_BLOCK_BYTES;
+    WaveData *wd = calloc(1, sizeof(WaveData) + bytes + 1);
+    wd->type = 1;
+    wd->status = looped ? 0x4000 : 0;
+    wd->loopStart = loopStart;
+    wd->size = size;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    uint8_t *out = (uint8_t *)wd->data;
+    uint32_t seed = 12345;
+    for (uint32_t b = 0; b < blocks; b++) {
+        uint8_t *blk = out + b * M4A_DPCM_BLOCK_BYTES;
+        uint8_t level = (uint8_t)(int8_t)(-40 + (int)(b * 25));
+        blk[0] = level;
+        uint32_t idx = b * M4A_DPCM_BLOCK_SAMPLES;
+        if (idx < size + 1) decoded[idx] = (int8_t)level;
+        for (int i = 1; i < M4A_DPCM_BLOCK_SAMPLES; i++) {
+            seed = seed * 1103515245u + 12345u;
+            /* Small steps (nibbles 0-2 up, 13-15 down) keep the level in range. */
+            uint8_t nib = (uint8_t)((seed >> 16) % 6);
+            if (nib >= 3) nib = (uint8_t)(nib + 10);
+            level = (uint8_t)(level + gDeltaEncodingTable[nib]);
+            if (i == 1)
+                blk[1] = nib;                     /* low nibble only */
+            else if (i % 2 == 0)
+                blk[i / 2 + 1] = (uint8_t)(nib << 4);   /* high nibble first */
+            else
+                blk[i / 2 + 1] |= nib;            /* then low nibble */
+            if (idx + i < size + 1) decoded[idx + i] = (int8_t)level;
+        }
+    }
+    return wd;
+}
+
+/* DPCM-compressed samples (WaveData.type != 0, the `cry` voices) decode
+ * block by block through the delta table -- SoundMainRAM_Unk2 -- and play
+ * forward with loops or in reverse without. */
+static void test_pcm_dpcm(void)
+{
+    printf("Testing DPCM-compressed samples...\n");
+
+    enum { SIZE = 100, LOOP = 40 };
+    int8_t decoded[SIZE + 1];
+    WaveData *wd = make_dpcm_wave(SIZE, LOOP, 1, decoded);
+
+    /* Forward at one sample per output: exact decode, then the loop wraps
+     * back to loopStart. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_CRY);
+        ch.status = CHN_ENV_SUSTAIN | CHN_LOOP;
+        ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = 128;
+        ch.envelopeVolumeRight = 128;
+        int ok = 1, wrapOk = 1;
+        for (int i = 0; i < SIZE; i++) {
+            int32_t l = 0, r = 0;
+            m4a_pcm_channel_render(&ch, &l, &r);
+            if (l != PCM_OUT(decoded[i])) ok = 0;
+        }
+        ASSERT(ok, "dpcm: forward decode matches the delta table");
+        for (int i = 0; i < 2 * (SIZE - LOOP); i++) {
+            int32_t l = 0, r = 0;
+            m4a_pcm_channel_render(&ch, &l, &r);
+            if (l != PCM_OUT(decoded[LOOP + i % (SIZE - LOOP)])) wrapOk = 0;
+        }
+        ASSERT(wrapOk, "dpcm: forward loop wraps to loopStart");
+        ASSERT((ch.status & CHN_ON) != 0, "dpcm: looped channel keeps playing");
+    }
+
+    /* Forward at half speed: interpolates between decoded neighbours, and
+     * the look-ahead at index `size` reads the extra block the encoders
+     * emit. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_CRY);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = 128;
+        ch.envelopeVolumeRight = 128;
+        int ok = 1;
+        for (int i = 0; i < 2 * SIZE - 2; i++) {
+            int32_t l = 0, r = 0;
+            m4a_pcm_channel_render(&ch, &l, &r);
+            int32_t s0 = decoded[i / 2], s1 = decoded[i / 2 + 1];
+            int32_t expect = (i % 2 == 0) ? s0 : s0 + (((s1 - s0) * 0x400000) >> 23);
+            if (l != PCM_OUT(expect)) ok = 0;
+        }
+        ASSERT(ok, "dpcm: half speed interpolates between decoded samples");
+    }
+
+    /* Forward at half speed with the FIX bit (0x28): sample-and-hold, as
+     * the main mixer does for FIX voices. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_CRY | VOICE_TYPE_FIX);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = 128;
+        ch.envelopeVolumeRight = 128;
+        int ok = 1;
+        for (int i = 0; i < 2 * SIZE - 2; i++) {
+            int32_t l = 0, r = 0;
+            m4a_pcm_channel_render(&ch, &l, &r);
+            if (l != PCM_OUT(decoded[i / 2])) ok = 0;
+        }
+        ASSERT(ok, "dpcm fix: half speed holds each decoded sample");
+    }
+
+    /* Reverse (cry_reverse): last sample first, loop ignored. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_CRY_REVERSE);
+        ch.status = CHN_ENV_SUSTAIN | CHN_LOOP;
+        ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = 128;
+        ch.envelopeVolumeRight = 128;
+        int ok = 1;
+        for (int i = 0; i < SIZE; i++) {
+            int32_t l = 0, r = 0;
+            m4a_pcm_channel_render(&ch, &l, &r);
+            if (l != PCM_OUT(decoded[SIZE - 1 - i])) ok = 0;
+        }
+        ASSERT(ok, "dpcm reverse: plays the decoded samples last-to-first");
+        ASSERT_EQ(ch.status, 0, "dpcm reverse: stops at the front (loop ignored)");
+    }
+
+    /* Through the engine, a cry voice is audible (uncompressed treatment
+     * of DPCM bytes would still be "audible", so also check the first
+     * output against the first decoded sample scaled by the volume). */
+    {
+        ToneData voices[128];
+        memset(voices, 0, sizeof(voices));
+        voices[0].type = VOICE_CRY;
+        voices[0].key = 60;
+        voices[0].wav = wd;
+        voices[0].attack = 0xFF;
+        voices[0].sustain = 0xFF;
+        M4AEngine engine;
+        m4a_engine_init(&engine, 44100.0f);
+        m4a_engine_set_voicegroup(&engine, voices);
+        m4a_engine_program_change(&engine, 0, 0);
+        m4a_engine_cc(&engine, 0, 7, 127);
+        m4a_engine_note_on(&engine, 0, 60, 127);
+        int32_t l = 0, r = 0;
+        M4APCMChannel *ch = &engine.pcmChannels[0];
+        m4a_pcm_channel_render(ch, &l, &r);
+        ASSERT_EQ(l, (decoded[0] * ch->envelopeVolumeLeft) >> 8,
+                  "dpcm engine: first output is the first decoded sample");
+        m4a_engine_destroy(&engine);
+    }
+
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -1827,6 +2233,9 @@ int main(void)
     test_cgb_square_phase_continuity();
     test_cgb_wave_phase_continuity();
     test_cgb_noise_band_limiting();
+    test_pcm_reverse();
+    test_pcm_reverse_legato_inherit();
+    test_pcm_dpcm();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

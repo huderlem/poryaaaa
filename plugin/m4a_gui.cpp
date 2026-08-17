@@ -127,6 +127,8 @@ static void sync_buffers(M4AGuiState *gui)
 
 static const char *voice_type_name(uint8_t type)
 {
+    if (type == VOICE_DIRECTSOUND_ALT || type == (VOICE_DIRECTSOUND_ALT | VOICE_TYPE_FIX))
+        return "DirectSound (Reverse)";
     uint8_t base = type & ~VOICE_TYPE_FIX;
     switch (base) {
     case 0x00: return "DirectSound";
@@ -294,7 +296,7 @@ static void render_voices_tab(M4AGuiState *gui)
 
     /* Type label */
     ImGui::Text("Type: %s (0x%02X)", voice_type_name(type), type);
-    if (type == VOICE_DIRECTSOUND_NO_RESAMPLE) {
+    if ((type & ~VOICE_TYPE_REV) == VOICE_DIRECTSOUND_NO_RESAMPLE) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "[Fixed]");
     }
@@ -308,7 +310,8 @@ static void render_voices_tab(M4AGuiState *gui)
     ImGui::Separator();
 
     bool changed = false;
-    uint8_t baseType = type & ~VOICE_TYPE_FIX;
+    /* The FIX and REV bits only change how a DirectSound sample is mixed. */
+    uint8_t baseType = type & ~(VOICE_TYPE_FIX | VOICE_TYPE_REV);
 
     /* Dispatch to per-type editor */
     if (baseType == 0x00) {

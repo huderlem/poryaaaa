@@ -39,6 +39,16 @@ void m4a_pcm_channel_start(M4APCMChannel *ch, WaveData *wav, uint8_t type)
     ch->count = wav->size;
     ch->fw = 0;
     ch->envelopeVolume = 0;
+    ch->dpcmBlock = -1;
+
+    /* Reverse voices start at the end of the data and walk toward the
+     * front.  SoundMainRAM_Unk1 does this lazily on the channel's first
+     * mix (`data + size - offset`, flagged with SF_SPECIAL); here the start
+     * offset is always 0 so the pointer is simply the end of the sample.
+     * In this mode currentPointer stays one past the sample being played
+     * (== data + count), the convention the GBA loop keeps as well. */
+    if (type & VOICE_TYPE_REV)
+        ch->currentPointer = wav->data + wav->size;
 
     /* Golden Sun synth voice: a zero-length sample is a synthesized-tone
      * descriptor, not PCM data.  Matches C_channel_init_synth in the improved
@@ -191,6 +201,143 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
 }
 
 /*
+ * Fetch sample `pos` of a DPCM-compressed WaveData through the channel's
+ * one-block decode cache.  Matches SoundMainRAM_Unk2 in m4a_1.s: block
+ * pos>>6 is decoded into the buffer only when it differs from the cached
+ * block index (xpi), then the sample at pos&63 is read back.
+ *
+ * Positions before the data (pos < 0) only occur on the reverse path's
+ * look-behind read at the very first sample; the GBA reads whatever memory
+ * sits there (a header byte for uncompressed data, an unrelated block for
+ * compressed) -- returned as silence here.  Positions past the last block
+ * of a truncated file decode the loader's zero fill.
+ */
+static int32_t m4a_dpcm_sample(M4APCMChannel *ch, int32_t pos)
+{
+    if (pos < 0)
+        return 0;
+    int32_t block = pos / M4A_DPCM_BLOCK_SAMPLES;
+    if (block != ch->dpcmBlock) {
+        ch->dpcmBlock = block;
+        const uint8_t *src = (const uint8_t *)ch->wav->data
+                             + (size_t)block * M4A_DPCM_BLOCK_BYTES;
+        uint8_t level = src[0];
+        ch->dpcmBuf[0] = (int8_t)level;
+        /* Second byte: only its low nibble carries a delta (sample 1). */
+        level = (uint8_t)(level + gDeltaEncodingTable[src[1] & 0x0F]);
+        ch->dpcmBuf[1] = (int8_t)level;
+        int out = 2;
+        for (int i = 2; i < M4A_DPCM_BLOCK_BYTES; i++) {
+            level = (uint8_t)(level + gDeltaEncodingTable[src[i] >> 4]);
+            ch->dpcmBuf[out++] = (int8_t)level;
+            level = (uint8_t)(level + gDeltaEncodingTable[src[i] & 0x0F]);
+            ch->dpcmBuf[out++] = (int8_t)level;
+        }
+    }
+    return ch->dpcmBuf[pos % M4A_DPCM_BLOCK_SAMPLES];
+}
+
+/* Sample `pos` of the channel's WaveData, decoding DPCM data as needed.
+ * pos may be -1 (see m4a_dpcm_sample) or wav->size (the forward path's
+ * look-ahead; the loader appends a safety sample for that). */
+static int32_t m4a_pcm_sample_at(M4APCMChannel *ch, int32_t pos)
+{
+    if (ch->wav->type != 0)
+        return m4a_dpcm_sample(ch, pos);
+    if (pos < 0)
+        return 0;
+    return ch->wav->data[pos];
+}
+
+/* Accumulate one mixed sample into the stereo bus at the channel's envelope
+ * volumes (the `mul` / `add` tail of every SoundMainRAM mix loop). */
+static inline void m4a_pcm_mix_sample(const M4APCMChannel *ch, int32_t sample,
+                                      int32_t *mixL, int32_t *mixR)
+{
+    *mixR += (sample * ch->envelopeVolumeRight) >> 8;
+    *mixL += (sample * ch->envelopeVolumeLeft) >> 8;
+}
+
+/*
+ * Advance a PCM channel's playback position by one output sample, shared by
+ * both mixer paths.  fw accumulates the frequency step; whole-sample carries
+ * move `pos` (the index of the sample being played, forward or backward) and
+ * drain `count`.  When count runs out, a forward looping voice wraps back
+ * into the loop region so that `count` samples remain before the loop end
+ * (loops are never consulted in reverse); otherwise the channel switches
+ * off and pos is left untouched.
+ */
+static inline void m4a_pcm_channel_advance(M4APCMChannel *ch, uint32_t *fw,
+                                           int32_t *count, int32_t *pos,
+                                           bool reverse)
+{
+    *fw += ch->frequency;
+    uint32_t advance = *fw >> 23;
+    if (!advance)
+        return;
+    *fw &= 0x7FFFFF;  /* keep fractional part */
+    *count -= (int32_t)advance;
+    if (*count <= 0) {
+        if (!reverse && ch->isLoop && ch->loopLen > 0) {
+            /* Wrap around loop */
+            while (*count <= 0)
+                *count += ch->loopLen;
+            *pos = (int32_t)(ch->loopStart - ch->wav->data) + (ch->loopLen - *count);
+        } else {
+            ch->status = 0;
+        }
+    } else {
+        *pos = reverse ? *pos - (int32_t)advance : *pos + (int32_t)advance;
+    }
+}
+
+/*
+ * PCM channel render for the reverse (TONEDATA_TYPE_REV) and DPCM-compressed
+ * (WaveData.type != 0) voices -- the SoundMainRAM_Unk1 paths of m4a_1.s,
+ * which SoundMainRAM branches into whenever the tone type has the REV or CMP
+ * bit set.  (A CMP-flagged voice with uncompressed data takes the plain
+ * forward paths of Unk1, which mix identically to the main routine, so this
+ * function only claims REV voices and compressed data.)
+ *
+ * The position is tracked as a sample index rather than a pointer, as Unk1
+ * itself does for compressed data.  Forward: `pos` is the sample being
+ * played and count the samples left including it.  Reverse: the sample
+ * being played is count-1 (currentPointer = data + count, one past it) and
+ * the interpolation runs toward the previous sample; the sample ends when
+ * count runs out -- loops are never consulted in reverse.
+ *
+ * Both directions interpolate exactly like the main mixer (fw's top bits are
+ * the fraction toward the next sample in playback order), and like the main
+ * mixer a fixed-frequency (FIX) voice is sample-and-held instead: its step
+ * is only exactly one source sample when the PCM mix rate is the GBA's and
+ * no pitch refresh has touched the channel, so the flag must be honoured
+ * here too for the two paths to agree.
+ */
+static void m4a_pcm_channel_render_special(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
+{
+    const bool reverse = (ch->type & VOICE_TYPE_REV) != 0;
+    int8_t *data = ch->wav->data;
+    uint32_t fw = ch->fw;
+    int32_t count = ch->count;
+
+    /* Sample being played and, when interpolating, its neighbour in
+     * playback order. */
+    int32_t pos = reverse ? count - 1 : (int32_t)(ch->currentPointer - data);
+    int32_t sample = m4a_pcm_sample_at(ch, pos);
+    if (!(ch->type & VOICE_TYPE_FIX)) {
+        int32_t s1 = m4a_pcm_sample_at(ch, reverse ? pos - 1 : pos + 1);
+        sample += (int32_t)(((int64_t)(s1 - sample) * (int32_t)fw) >> 23);
+    }
+
+    m4a_pcm_mix_sample(ch, sample, mixL, mixR);
+    m4a_pcm_channel_advance(ch, &fw, &count, &pos, reverse);
+
+    ch->currentPointer = data + (reverse ? count : pos);
+    ch->fw = fw;
+    ch->count = count;
+}
+
+/*
  * PCM channel render - generates one output sample
  * Matches the interpolating mixer in SoundMainRAM (m4a_1.s)
  *
@@ -253,50 +400,29 @@ void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
         return;
     }
 
-    int8_t *ptr = ch->currentPointer;
+    if ((ch->type & VOICE_TYPE_REV) || ch->wav->type != 0) {
+        m4a_pcm_channel_render_special(ch, mixL, mixR);
+        return;
+    }
+
+    int8_t *data = ch->wav->data;
+    int32_t pos = (int32_t)(ch->currentPointer - data);
     uint32_t fw = ch->fw;
     int32_t count = ch->count;
-    int32_t sample;
+    int32_t sample = data[pos];
 
-    if (ch->type & VOICE_TYPE_FIX) {
-        // Fixed-frequency (no resample): no interpolation.
-        sample = ptr[0];
-    } else {
-        // Interpolating mixer
-        int8_t s0 = ptr[0];
-        int8_t s1 = ptr[1];
-        int32_t diff = s1 - s0;
-
-        /* Linear interpolation using top bits of fw as fraction */
-        sample = s0 + (int32_t)(((int64_t)diff * (int32_t)fw) >> 23);
+    if (!(ch->type & VOICE_TYPE_FIX)) {
+        /* Interpolating mixer: linear interpolation toward the next sample
+         * using the top bits of fw as the fraction.  (Fixed-frequency
+         * voices are sample-and-held: no interpolation.) */
+        int32_t diff = data[pos + 1] - sample;
+        sample += (int32_t)(((int64_t)diff * (int32_t)fw) >> 23);
     }
 
-    int32_t ampR = sample * ch->envelopeVolumeRight;
-    int32_t ampL = sample * ch->envelopeVolumeLeft;
-    *mixR += ampR >> 8;
-    *mixL += ampL >> 8;
+    m4a_pcm_mix_sample(ch, sample, mixL, mixR);
+    m4a_pcm_channel_advance(ch, &fw, &count, &pos, false);
 
-    /* Advance position */
-    fw += ch->frequency;
-    uint32_t advance = fw >> 23;
-    if (advance) {
-        fw &= 0x7FFFFF;  /* keep fractional part */
-        count -= advance;
-        if (count <= 0) {
-            if (ch->isLoop && ch->loopLen > 0) {
-                /* Wrap around loop */
-                while (count <= 0)
-                    count += ch->loopLen;
-                ptr = ch->loopStart + (ch->loopLen - count);
-            } else {
-                ch->status = 0;
-            }
-        } else {
-            ptr += advance;
-        }
-    }
-
-    ch->currentPointer = ptr;
+    ch->currentPointer = data + pos;
     ch->fw = fw;
     ch->count = count;
 }

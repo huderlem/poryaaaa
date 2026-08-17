@@ -109,3 +109,10 @@ const uint8_t gCgb3Vol[] =
     0x80, 0x80, 0x80, 0x80,
     0x20, 0x20,
 };
+
+/* Nibble-indexed sample deltas for DPCM-compressed samples (the `cry`
+ * voices): 0..7 step up by squares, 8..15 step down. */
+const int8_t gDeltaEncodingTable[16] =
+{
+    0, 1, 4, 9, 16, 25, 36, 49, -64, -49, -36, -25, -16, -9, -4, -1,
+};

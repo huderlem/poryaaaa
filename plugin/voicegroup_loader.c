@@ -1659,6 +1659,12 @@ static WaveData *load_wave_data(const char *projectRoot, const char *relativePat
      * 16 descriptor bytes so the engine can read them. */
     uint32_t dataSize = (size > 0) ? size : 16;
 
+    /* DPCM-compressed data (type != 0, the `cry` samples) is stored as
+     * 33-byte blocks of 64 samples; the encoders always emit the block that
+     * holds sample index `size` too (the mixer's look-ahead lands there). */
+    if (type != 0 && size > 0)
+        dataSize = (size / M4A_DPCM_BLOCK_SAMPLES + 1) * M4A_DPCM_BLOCK_BYTES;
+
     WaveData *wd = malloc(sizeof(WaveData) + dataSize + 1);
     if (!wd) {
         fclose(f);
