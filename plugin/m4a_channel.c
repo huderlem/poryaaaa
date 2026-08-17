@@ -428,7 +428,24 @@ void m4a_cgb_channel_start(M4ACGBChannel *ch)
 {
     ch->status = CHN_ENV_ATTACK;
     ch->modify = 0x03; /* pitch + vol */
-    ch->phase = 0;
+
+    /* Wave position at note start.  The NRx4 trigger bit that CgbSound sets
+     * here restarts the wave channel's sample window (mGBA GBAudioWriteNR34:
+     * ch3.window = 0) and the noise LFSR (below), but the square channels'
+     * duty position is NOT touched by a trigger: the 8-step duty counter only
+     * ever advances with time (GBAudioWriteNR14/NR24 leave ch->index and the
+     * timer alone; the duty step is likewise not reset by a trigger on the
+     * DMG/CGB/AGB APU).  So a square retrigger -- a new note on the same
+     * channel, or the trigger CgbSound writes on every volume change --
+     * continues the running waveform instead of restarting it.  Restarting
+     * from phase 0 here put a hard edge at every note boundary (an audible
+     * click on back-to-back notes that the console plays seamlessly) and
+     * re-aligned the two squares' relative phase at every note, which is
+     * why chords/unisons across square 1 and 2 sounded different from the
+     * console.  Squares keep free-running even while off, see
+     * cgb_square_advance(). */
+    if (ch->type != 1 && ch->type != 2)
+        ch->phase = 0;
 
     /* Invalidate the cached phase increment / wave DC sum so the first
      * rendered sample of this note recomputes them from the current
@@ -705,12 +722,45 @@ envelope_complete:
     ch->modify = 0;
 }
 
+/* Advance a square channel's free-running duty phase by one output sample.
+ *
+ * The square oscillators run continuously on hardware -- an NRx4 trigger does
+ * not reset the duty position, so a channel that has been silent resumes at
+ * whatever phase the elapsed time puts it (mGBA GBAudioRun catches ch->index
+ * up by wall-clock time on the next register write, even when the channel
+ * is not playing).  So this runs every sample, on or off, muted or not, and
+ * uses the frequency register's current value (0 = 64 Hz, the reset state)
+ * for the catch-up.  Called before the sample level is read: `bit` is
+ * therefore the phase this sample sits at, mirroring GBAudioRun's
+ * advance-then-sample order (a one-sample shift either way is inaudible).
+ *
+ * The CGB frequency register value is 2048 - (131072 / freq_hz), so
+ * freq_hz = 131072 / (2048 - reg_value); one full period is 2^32 in the
+ * 32-bit accumulator whose top three bits index the 8-step duty pattern.
+ * The increment is constant between (tick-rate) frequency changes, so it is
+ * cached and only recomputed when ch->frequency changes. */
+static void cgb_square_advance(M4ACGBChannel *ch, float sampleRate)
+{
+    if (ch->frequency != ch->phaseIncFreq) {
+        int32_t freqReg = ch->frequency;
+        if (freqReg >= 2048) freqReg = 2047;
+        float freqHz = 131072.0f / (float)(2048 - freqReg);
+        ch->phaseInc = (uint32_t)(freqHz / sampleRate * 4294967296.0f);
+        ch->phaseIncFreq = ch->frequency;
+    }
+    ch->phase += ch->phaseInc;
+}
+
 /*
  * CGB channel render - generates one output sample by software synthesis
  */
 void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
                             float sampleRate)
 {
+    /* Squares free-run whether or not the channel is sounding. */
+    if (ch->type == 1 || ch->type == 2)
+        cgb_square_advance(ch, sampleRate);
+
     if (!(ch->status & CHN_ON)) {
         /* Wave channel declick: linearly fade the last sample to zero over
          * DECLICK_SAMPLES frames to prevent a pop caused by the DC offset. */
@@ -774,27 +824,12 @@ void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
     }
 
     if (cgbType == 1 || cgbType == 2) {
-        /* Square wave synthesis */
+        /* Square wave synthesis: read the duty level at the phase
+         * cgb_square_advance() already moved us to for this sample. */
         static const uint8_t dutyPatterns[4] = { 0x01, 0x81, 0xE1, 0x7E };
         uint8_t pattern = dutyPatterns[ch->dutyCycle & 3];
         int bit = (ch->phase >> 29) & 7;
         sample = (pattern & (1 << bit)) ? 64 : -64;
-
-        /* Advance phase.
-         * CGB frequency register value is used to compute the actual frequency.
-         * The CGB freq register value = 2048 - (131072 / freq_hz).
-         * So freq_hz = 131072 / (2048 - reg_value).
-         * We convert to a phase increment for our 32-bit accumulator.  The
-         * increment is constant between (tick-rate) frequency changes, so it is
-         * cached and only recomputed when ch->frequency changes. */
-        if (ch->frequency != ch->phaseIncFreq) {
-            int32_t freqReg = ch->frequency;
-            if (freqReg >= 2048) freqReg = 2047;
-            float freqHz = 131072.0f / (float)(2048 - freqReg);
-            ch->phaseInc = (uint32_t)(freqHz / sampleRate * 4294967296.0f);
-            ch->phaseIncFreq = ch->frequency;
-        }
-        ch->phase += ch->phaseInc;
     } else if (cgbType == 3) {
         /* Programmable wave channel */
         if (ch->wavePointer) {

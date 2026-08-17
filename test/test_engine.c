@@ -1551,6 +1551,119 @@ static void test_cgb_hw_envelope(void)
     m4a_engine_destroy(&engine);
 }
 
+/* The square channels' duty position is never reset by an NRx4 trigger (mGBA
+ * GBAudioWriteNR14/NR24 leave the duty index and its timer alone; the counter
+ * only advances with time, and keeps advancing while the channel is silent).
+ * So retriggering a square -- back-to-back notes, or a note after a rest --
+ * must continue the free-running waveform exactly where a single long note
+ * would be, with no phase restart, and two squares that share a frequency
+ * must keep their relative phase across one of them being retriggered. */
+static void test_cgb_square_phase_continuity(void)
+{
+    printf("Testing CGB square phase continuity across retriggers...\n");
+
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    for (int i = 0; i < 2; i++) {
+        voices[i].type = i == 0 ? VOICE_SQUARE_1 : VOICE_SQUARE_2;
+        voices[i].key = 60;
+        voices[i].attack = 0;
+        voices[i].decay = 0;
+        voices[i].sustain = 15;
+        voices[i].release = 0;   /* note-off silences the channel at once */
+        voices[i].wavePointer = (uint32_t *)(uintptr_t)2;  /* 50% duty */
+    }
+
+    enum { BLOCK = 512, BLOCKS = 6, REST = 300 };
+    static float refL[BLOCK * BLOCKS], refR[BLOCK * BLOCKS];
+    static float outL[BLOCK], outR[BLOCK];
+
+    /* Reference: one long square-1 note. */
+    M4AEngine ref;
+    m4a_engine_init(&ref, 44100.0f);
+    m4a_engine_set_voicegroup(&ref, voices);
+    m4a_engine_program_change(&ref, 0, 0);
+    m4a_engine_note_on(&ref, 0, 69, 100);
+    for (int b = 0; b < BLOCKS; b++)
+        m4a_engine_process(&ref, refL + b * BLOCK, refR + b * BLOCK, BLOCK);
+
+    /* Same key retriggered back-to-back after one block, then again after a
+     * 300-sample rest.  Every rendered sample of a sounding stretch must equal
+     * the long note's sample at the same absolute position. */
+    M4AEngine eng;
+    m4a_engine_init(&eng, 44100.0f);
+    m4a_engine_set_voicegroup(&eng, voices);
+    m4a_engine_program_change(&eng, 0, 0);
+    m4a_engine_note_on(&eng, 0, 69, 100);
+    m4a_engine_process(&eng, outL, outR, BLOCK);
+    ASSERT(memcmp(outL, refL, sizeof(outL)) == 0, "sq phase: first note matches reference");
+
+    /* Back-to-back retrigger. */
+    m4a_engine_note_off(&eng, 0, 69);
+    m4a_engine_note_on(&eng, 0, 69, 100);
+    m4a_engine_process(&eng, outL, outR, BLOCK);
+    int mism = 0;
+    for (int i = 0; i < BLOCK; i++)
+        if (outL[i] != refL[BLOCK + i] || outR[i] != refR[BLOCK + i]) mism++;
+    ASSERT_EQ(mism, 0, "sq phase: back-to-back retrigger continues the waveform sample-exactly");
+    /* Guard against a vacuous pass: the reference stretch is not silence. */
+    float energy = 0;
+    for (int i = 0; i < BLOCK; i++) energy += fabsf(refL[BLOCK + i]);
+    ASSERT(energy > 1.0f, "sq phase: reference note is audible");
+
+    /* Rest, then retrigger: the phase kept running through the silence.
+     * Note-off takes effect at the next engine tick (CgbSound runs once per
+     * VBlank), so render one block for it to land, then a REST of silence. */
+    int pos = 2 * BLOCK;
+    m4a_engine_note_off(&eng, 0, 69);
+    m4a_engine_process(&eng, outL, outR, BLOCK);
+    pos += BLOCK;
+    ASSERT(!(eng.cgbChannels[0].status & CHN_ON), "sq phase: note-off landed within a block");
+    m4a_engine_process(&eng, outL, outR, REST);
+    energy = 0;
+    for (int i = 0; i < REST; i++) energy += fabsf(outL[i]) + fabsf(outR[i]);
+    ASSERT(energy == 0.0f, "sq phase: silent during the rest");
+    pos += REST;
+    m4a_engine_note_on(&eng, 0, 69, 100);
+    m4a_engine_process(&eng, outL, outR, BLOCK);
+    mism = 0;
+    for (int i = 0; i < BLOCK; i++)
+        if (outL[i] != refL[pos + i] || outR[i] != refR[pos + i]) mism++;
+    ASSERT_EQ(mism, 0, "sq phase: retrigger after a rest resumes at the free-running phase");
+
+    /* And a retrigger must not simply happen to land on phase 0: the
+     * reference itself is not periodic in BLOCK samples at this key. */
+    mism = 0;
+    for (int i = 0; i < BLOCK; i++)
+        if (refL[i] != refL[BLOCK + i]) mism++;
+    ASSERT(mism > 0, "sq phase: reference waveform is not BLOCK-periodic (test is not vacuous)");
+
+    /* Two squares in unison: identical from engine reset, and still identical
+     * after square 2 alone is released, rests, and retriggers. */
+    M4AEngine duo;
+    m4a_engine_init(&duo, 44100.0f);
+    m4a_engine_set_voicegroup(&duo, voices);
+    m4a_engine_program_change(&duo, 0, 0);
+    m4a_engine_program_change(&duo, 1, 1);
+    m4a_engine_note_on(&duo, 0, 69, 100);
+    m4a_engine_note_on(&duo, 1, 69, 100);
+    m4a_engine_process(&duo, outL, outR, BLOCK);
+    ASSERT_EQ(duo.cgbChannels[0].frequency, duo.cgbChannels[1].frequency, "sq phase: unison squares share a frequency");
+    ASSERT_EQ(duo.cgbChannels[0].phase, duo.cgbChannels[1].phase, "sq phase: unison squares are phase-locked");
+    m4a_engine_note_off(&duo, 1, 69);
+    m4a_engine_process(&duo, outL, outR, BLOCK);
+    m4a_engine_process(&duo, outL, outR, REST);
+    ASSERT(!(duo.cgbChannels[1].status & CHN_ON), "sq phase: square 2 went silent");
+    m4a_engine_note_on(&duo, 1, 69, 100);
+    m4a_engine_process(&duo, outL, outR, BLOCK);
+    ASSERT_EQ(duo.cgbChannels[0].phase, duo.cgbChannels[1].phase, "sq phase: unison holds across a rest and retrigger of one square");
+    ASSERT(duo.cgbChannels[1].status & CHN_ON, "sq phase: retriggered square 2 is sounding");
+
+    m4a_engine_destroy(&ref);
+    m4a_engine_destroy(&eng);
+    m4a_engine_destroy(&duo);
+}
+
 /* The noise LFSR clocks at up to 524288 Hz -- ~11 steps per 48 kHz output
  * sample at the highest keys -- so each output sample must be the
  * time-weighted average of every LFSR level inside its window (mGBA's
@@ -1634,6 +1747,7 @@ int main(void)
     test_golden_sun_synth();
     test_golden_sun_synth_waveforms();
     test_cgb_hw_envelope();
+    test_cgb_square_phase_continuity();
     test_cgb_noise_band_limiting();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
