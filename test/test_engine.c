@@ -1664,6 +1664,83 @@ static void test_cgb_square_phase_continuity(void)
     m4a_engine_destroy(&duo);
 }
 
+/* The wave channel's position also survives a retrigger: on the GBA the wave
+ * RAM is a rotating shift register (mGBA rotates it a nibble per step and the
+ * trigger's window reset is DMG-only), and CgbSound rewrites the RAM at note
+ * start only when the voice's table differs from the loaded one.  So a
+ * repeated note on the same wave voice keeps its position (the trigger only
+ * re-arms the step timer, restarting the current step), while a note on a
+ * voice with a different table starts from position 0 -- as recorded
+ * in-game. */
+static void test_cgb_wave_phase_continuity(void)
+{
+    printf("Testing CGB wave position continuity across retriggers...\n");
+
+    static uint32_t tableA[4] = { 0x89ABCDEF, 0x01234567, 0xFEDCBA98, 0x76543210 };
+    static uint32_t tableB[4] = { 0x00112233, 0x44556677, 0x8899AABB, 0xCCDDEEFF };
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    for (int i = 0; i < 2; i++) {
+        voices[i].type = VOICE_PROGRAMMABLE_WAVE;
+        voices[i].key = 60;
+        voices[i].attack = 0;
+        voices[i].decay = 0;
+        voices[i].sustain = 15;
+        voices[i].release = 0;
+        voices[i].wavePointer = i == 0 ? tableA : tableB;
+    }
+
+    M4AEngine eng;
+    float outL[64], outR[64];
+    m4a_engine_init(&eng, 44100.0f);
+    m4a_engine_set_voicegroup(&eng, voices);
+    M4ACGBChannel *ch = &eng.cgbChannels[2];
+
+    m4a_engine_program_change(&eng, 0, 0);
+    m4a_engine_note_on(&eng, 0, 60, 100);
+    ASSERT_EQ(ch->phase, 0u, "wave phase: first note on a fresh table starts at position 0");
+    ASSERT(ch->currentWavePointer == tableA, "wave phase: table A loaded");
+
+    /* Run into the note, stopping at a sample where the position is mid-step
+     * and not 0, so a reset to 0 and a kept position are distinguishable. */
+    for (int i = 0; i < 700; i++)
+        m4a_engine_process(&eng, outL, outR, 1);
+    while (((ch->phase >> 27) & 0x1F) == 0 || (ch->phase & 0x07FFFFFFu) == 0)
+        m4a_engine_process(&eng, outL, outR, 1);
+    uint32_t posBefore = (ch->phase >> 27) & 0x1F;
+
+    /* Same voice, back-to-back: position kept, current step restarted. */
+    m4a_engine_note_off(&eng, 0, 60);
+    m4a_engine_note_on(&eng, 0, 60, 100);
+    ASSERT_EQ((ch->phase >> 27) & 0x1F, posBefore, "wave phase: same-table retrigger keeps the wave position");
+    ASSERT_EQ(ch->phase & 0x07FFFFFFu, 0u, "wave phase: retrigger re-arms the step timer (step restarts)");
+    ASSERT(ch->currentWavePointer == tableA, "wave phase: same table not re-uploaded");
+
+    /* Position keeps advancing through the retriggered note. */
+    for (int i = 0; i < 300; i++)
+        m4a_engine_process(&eng, outL, outR, 1);
+    ASSERT(((ch->phase >> 27) & 0x1F) != posBefore, "wave phase: wave keeps running after the retrigger");
+
+    /* A different table is uploaded fresh: playback restarts at position 0. */
+    m4a_engine_program_change(&eng, 0, 1);
+    m4a_engine_note_off(&eng, 0, 60);
+    m4a_engine_note_on(&eng, 0, 60, 100);
+    ASSERT_EQ(ch->phase, 0u, "wave phase: new table starts at position 0");
+    ASSERT(ch->currentWavePointer == tableB, "wave phase: table B loaded");
+
+    /* And that table's position now persists across its own retriggers. */
+    for (int i = 0; i < 500; i++)
+        m4a_engine_process(&eng, outL, outR, 1);
+    while (((ch->phase >> 27) & 0x1F) == 0)
+        m4a_engine_process(&eng, outL, outR, 1);
+    posBefore = (ch->phase >> 27) & 0x1F;
+    m4a_engine_note_off(&eng, 0, 60);
+    m4a_engine_note_on(&eng, 0, 60, 100);
+    ASSERT_EQ((ch->phase >> 27) & 0x1F, posBefore, "wave phase: table B retrigger keeps position");
+
+    m4a_engine_destroy(&eng);
+}
+
 /* The noise LFSR clocks at up to 524288 Hz -- ~11 steps per 48 kHz output
  * sample at the highest keys -- so each output sample must be the
  * time-weighted average of every LFSR level inside its window (mGBA's
@@ -1748,6 +1825,7 @@ int main(void)
     test_golden_sun_synth_waveforms();
     test_cgb_hw_envelope();
     test_cgb_square_phase_continuity();
+    test_cgb_wave_phase_continuity();
     test_cgb_noise_band_limiting();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);

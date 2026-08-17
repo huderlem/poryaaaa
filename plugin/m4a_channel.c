@@ -429,23 +429,41 @@ void m4a_cgb_channel_start(M4ACGBChannel *ch)
     ch->status = CHN_ENV_ATTACK;
     ch->modify = 0x03; /* pitch + vol */
 
-    /* Wave position at note start.  The NRx4 trigger bit that CgbSound sets
-     * here restarts the wave channel's sample window (mGBA GBAudioWriteNR34:
-     * ch3.window = 0) and the noise LFSR (below), but the square channels'
-     * duty position is NOT touched by a trigger: the 8-step duty counter only
-     * ever advances with time (GBAudioWriteNR14/NR24 leave ch->index and the
-     * timer alone; the duty step is likewise not reset by a trigger on the
-     * DMG/CGB/AGB APU).  So a square retrigger -- a new note on the same
-     * channel, or the trigger CgbSound writes on every volume change --
-     * continues the running waveform instead of restarting it.  Restarting
-     * from phase 0 here put a hard edge at every note boundary (an audible
-     * click on back-to-back notes that the console plays seamlessly) and
-     * re-aligned the two squares' relative phase at every note, which is
-     * why chords/unisons across square 1 and 2 sounded different from the
-     * console.  Squares keep free-running even while off, see
-     * cgb_square_advance(). */
-    if (ch->type != 1 && ch->type != 2)
+    /* Waveform position at note start, per channel type, modeled on what the
+     * NRx4 trigger CgbSound writes here actually does in mGBA's gb/audio.c
+     * (GB_AUDIO_GBA style) -- verified against in-game recordings:
+     *
+     * - Squares: NOT touched.  The 8-step duty counter only ever advances
+     *   with time (GBAudioWriteNR14/NR24 leave ch->index and its timer
+     *   alone), so a retrigger -- a new note, or the trigger CgbSound writes
+     *   on every volume change -- continues the running waveform.  Restarting
+     *   from phase 0 here put a hard edge at every note boundary (an audible
+     *   click on back-to-back notes the console plays seamlessly) and
+     *   re-aligned the two squares' relative phase at every note.  Squares
+     *   keep free-running even while off, see cgb_square_advance().
+     *
+     * - Wave: on the GBA the wave RAM is a rotating shift register (mGBA
+     *   rotates wavedata32 a nibble per step; the trigger's window reset is
+     *   DMG-only), so the position persists across triggers too.  It restarts
+     *   only when CgbSound rewrites the wave RAM, which it does at note start
+     *   only if the voice's table differs from the one already loaded
+     *   (wavePointer != currentPointer): fresh RAM plays from position 0.
+     *   Otherwise the trigger merely re-arms the step timer
+     *   (nextUpdate = now + one full step), so the current step restarts from
+     *   its beginning: a slip of up to one step, the faint tick audible at
+     *   each repeated wave note in-game.
+     *
+     * - Noise: the LFSR and its timer are reset (below). */
+    if (ch->type == 3) {
+        if (ch->wavePointer != ch->currentWavePointer) {
+            ch->phase = 0;
+            ch->currentWavePointer = ch->wavePointer;
+        } else {
+            ch->phase &= 0xF8000000u; /* keep the step (top 5 bits), restart it */
+        }
+    } else if (ch->type == 4) {
         ch->phase = 0;
+    }
 
     /* Invalidate the cached phase increment / wave DC sum so the first
      * rendered sample of this note recomputes them from the current

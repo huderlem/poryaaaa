@@ -278,6 +278,14 @@ typedef struct {
                              * channel, the Q16 fraction (< 0x10000) of the
                              * current LFSR period already elapsed */
     uint32_t *wavePointer;  /* programmable wave data */
+    /* The wave table last uploaded to the (emulated) wave RAM: CgbSound's
+     * currentPointer.  m4a rewrites wave RAM at note start only when the
+     * voice's table differs from what is already loaded, and on the GBA the
+     * wave RAM is a rotating shift register whose position an NRx4 trigger
+     * does not reset (mGBA gb/audio.c, GB_AUDIO_GBA style) -- so the wave
+     * position restarts only when the table is rewritten, and otherwise
+     * continues across retriggers.  See m4a_cgb_channel_start(). */
+    uint32_t *currentWavePointer;
 
     /* Cached per-sample phase increment.  The increment derived from
      * `frequency` is constant between tick-rate frequency updates, so it is
