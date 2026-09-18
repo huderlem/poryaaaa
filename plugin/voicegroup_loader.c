@@ -147,7 +147,19 @@ typedef struct {
     char projectRoot[MAX_PATH_LEN];
     const VoicegroupLoaderConfig *cfg;   /* borrowed; valid for the load call */
     int deepScanned;
+    /* Lazy index of voicegroup labels declared inside the files of every
+     * voicegroupDirs entry, keyed by the declared name rather than the file
+     * name (see discovery_ensure_label_index). */
+    struct VgLabelEntry *labelIndex;
+    int labelCount, labelCapacity;
+    int labelIndexBuilt;
 } ProjectDiscovery;
+
+typedef struct VgLabelEntry {
+    char label[MAX_SYMBOL_LEN];
+    char filePath[MAX_PATH_LEN];
+    int isColonLabel;   /* "name::" label: the parser must seek to it */
+} VgLabelEntry;
 
 typedef struct {
     char filePath[MAX_PATH_LEN];
@@ -1827,6 +1839,118 @@ static int dir_last_component_is(const char *dirPath, const char *name)
     return c == '/' || c == '\\';
 }
 
+static void discovery_free_label_index(ProjectDiscovery *disc)
+{
+    free(disc->labelIndex);
+    disc->labelIndex = NULL;
+    disc->labelCount = disc->labelCapacity = 0;
+    disc->labelIndexBuilt = 0;
+}
+
+static void label_index_add(ProjectDiscovery *disc, const char *label,
+                            const char *filePath, int isColonLabel)
+{
+    if (disc->labelCount >= disc->labelCapacity) {
+        int cap = disc->labelCapacity ? disc->labelCapacity * 2 : 64;
+        VgLabelEntry *grown = realloc(disc->labelIndex, sizeof(VgLabelEntry) * cap);
+        if (!grown) return;
+        disc->labelIndex = grown;
+        disc->labelCapacity = cap;
+    }
+    VgLabelEntry *e = &disc->labelIndex[disc->labelCount++];
+    memset(e, 0, sizeof(*e));
+    snprintf(e->label, sizeof(e->label), "%s", label);
+    snprintf(e->filePath, sizeof(e->filePath), "%s", filePath);
+    e->isColonLabel = isColonLabel;
+}
+
+/* Record every "voice_group <name>[, n]" declaration and "<name>::" label
+ * found in one voicegroup file. */
+static void label_index_scan_file(ProjectDiscovery *disc, const char *filePath)
+{
+    FILE *f = fopen(filePath, "r");
+    if (!f) return;
+    char line[MAX_LINE];
+    while (fgets(line, sizeof(line), f)) {
+        strip_comment(line);
+        rtrim(line);
+        char *trimmed = ltrim(line);
+        if (strncmp(trimmed, "voice_group ", 12) == 0) {
+            char *name = ltrim(trimmed + 12);
+            char *end = name;
+            while (*end && *end != ',' && !isspace((unsigned char)*end)) end++;
+            *end = '\0';
+            if (*name)
+                label_index_add(disc, name, filePath, 0);
+        } else if (trimmed == line && !isspace((unsigned char)line[0])) {
+            char *cc = strstr(trimmed, "::");
+            if (!cc || cc == trimmed) continue;
+            int ok = 1;
+            for (char *q = trimmed; q < cc; q++)
+                if (!isalnum((unsigned char)*q) && *q != '_') { ok = 0; break; }
+            if (!ok) continue;
+            *cc = '\0';
+            label_index_add(disc, trimmed, filePath, 1);
+        }
+    }
+    fclose(f);
+}
+
+/*
+ * Build (once per discovery state) the index of voicegroup labels declared
+ * inside every .inc/.s file of the discovered voicegroup directories.
+ *
+ * find_voicegroup_probe locates per-file voicegroups by file name, which
+ * assumes the stock naming (voicegroup_piano_keysplit -> keysplits/piano.inc).
+ * Projects that name the file differently from the label it declares
+ * (e.g. keysplits/bw_keysplit_48.inc holding "voice_group bw_48_keysplit")
+ * assemble fine but never resolve by file name, so the sub-voicegroup came
+ * back NULL and every note on that keysplit was silent. This index is the
+ * fallback for those: it costs one read of each voicegroup file, and only
+ * runs after a file-name probe misses.
+ */
+static void discovery_ensure_label_index(ProjectDiscovery *disc)
+{
+    if (disc->labelIndexBuilt) return;
+    disc->labelIndexBuilt = 1;
+    disc->labelCount = 0;
+    for (int i = 0; i < disc->voicegroupDirs.count; i++) {
+        DIR *d = opendir(disc->voicegroupDirs.paths[i]);
+        if (!d) continue;
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL) {
+            if (ent->d_name[0] == '.') continue;
+            if (!str_ends_with_ci(ent->d_name, ".inc") &&
+                !str_ends_with_ci(ent->d_name, ".s"))
+                continue;
+            char fp[MAX_PATH_LEN];
+            build_path(fp, sizeof(fp), disc->voicegroupDirs.paths[i], ent->d_name);
+            label_index_scan_file(disc, fp);
+        }
+        closedir(d);
+    }
+    vg_log("discovery: label index built, %d labels over %d dirs",
+           disc->labelCount, disc->voicegroupDirs.count);
+}
+
+static VoicegroupLocation find_voicegroup_by_label(const char *vgName,
+                                                   ProjectDiscovery *disc)
+{
+    VoicegroupLocation loc;
+    memset(&loc, 0, sizeof(loc));
+    discovery_ensure_label_index(disc);
+    for (int i = 0; i < disc->labelCount; i++) {
+        const VgLabelEntry *e = &disc->labelIndex[i];
+        if (strcmp(e->label, vgName) != 0) continue;
+        strncpy(loc.filePath, e->filePath, MAX_PATH_LEN - 1);
+        if (e->isColonLabel)
+            strncpy(loc.label, vgName, MAX_SYMBOL_LEN - 1);
+        loc.found = 1;
+        break;
+    }
+    return loc;
+}
+
 /*
  * Search for a voicegroup by name across all currently discovered locations.
  */
@@ -2014,9 +2138,15 @@ static VoicegroupLocation find_voicegroup(const char *projectRoot,
                                           ProjectDiscovery *disc)
 {
     VoicegroupLocation loc = find_voicegroup_probe(projectRoot, vgName, disc);
+    if (!loc.found)
+        loc = find_voicegroup_by_label(vgName, disc);
     if (!loc.found && !disc->deepScanned) {
         discovery_ensure_deep_scan(disc);
+        /* The deep scan can add voicegroup dirs; index them too. */
+        discovery_free_label_index(disc);
         loc = find_voicegroup_probe(projectRoot, vgName, disc);
+        if (!loc.found)
+            loc = find_voicegroup_by_label(vgName, disc);
     }
     return loc;
 }
@@ -2682,6 +2812,7 @@ LoadedVoiceGroup *voicegroup_load(const char *projectRoot, const char *voicegrou
     symbol_map_free(&dsMap);
     symbol_map_free(&pwMap);
     keysplit_map_free(&ksMap);
+    discovery_free_label_index(disc);
     free(disc);
     return vg;
 
@@ -2689,6 +2820,7 @@ fail:
     symbol_map_free(&dsMap);
     symbol_map_free(&pwMap);
     keysplit_map_free(&ksMap);
+    discovery_free_label_index(disc);
     free(disc);
     voicegroup_free(vg);
     return NULL;
@@ -2772,6 +2904,7 @@ LoadedSampleSet *voicegroup_load_samples(
     symbol_map_free(&dsMap);
     symbol_map_free(&pwMap);
     keysplit_map_free(&ksMap);
+    discovery_free_label_index(disc);
     free(disc);
     vg_log("voicegroup_load_samples: done");
     return set;
