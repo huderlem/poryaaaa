@@ -153,12 +153,20 @@ typedef struct {
     struct VgLabelEntry *labelIndex;
     int labelCount, labelCapacity;
     int labelIndexBuilt;
+    int labelIndexedDirs;   /* voicegroupDirs entries already indexed */
+    int subGroupDepth;      /* load_sub_voicegroup nesting (cycle guard) */
 } ProjectDiscovery;
 
 typedef struct VgLabelEntry {
     char label[MAX_SYMBOL_LEN];
     char filePath[MAX_PATH_LEN];
-    int isColonLabel;   /* "name::" label: the parser must seek to it */
+    /* The parser must seek to this declaration rather than parse the file
+     * from the top: set for "name::" labels and for any declaration that is
+     * not the first one in its file. */
+    int needsSeek;
+    /* The label exactly as the file spells it, for the parser to seek to
+     * (differs from `label` when a "voicegroup_" prefix was stripped). */
+    char seekLabel[MAX_SYMBOL_LEN];
 } VgLabelEntry;
 
 typedef struct {
@@ -1845,10 +1853,12 @@ static void discovery_free_label_index(ProjectDiscovery *disc)
     disc->labelIndex = NULL;
     disc->labelCount = disc->labelCapacity = 0;
     disc->labelIndexBuilt = 0;
+    disc->labelIndexedDirs = 0;
 }
 
 static void label_index_add(ProjectDiscovery *disc, const char *label,
-                            const char *filePath, int isColonLabel)
+                            const char *filePath, int needsSeek,
+                            const char *seekLabel)
 {
     if (disc->labelCount >= disc->labelCapacity) {
         int cap = disc->labelCapacity ? disc->labelCapacity * 2 : 64;
@@ -1861,7 +1871,8 @@ static void label_index_add(ProjectDiscovery *disc, const char *label,
     memset(e, 0, sizeof(*e));
     snprintf(e->label, sizeof(e->label), "%s", label);
     snprintf(e->filePath, sizeof(e->filePath), "%s", filePath);
-    e->isColonLabel = isColonLabel;
+    e->needsSeek = needsSeek;
+    snprintf(e->seekLabel, sizeof(e->seekLabel), "%s", seekLabel);
 }
 
 /* Record every "voice_group <name>[, n]" declaration and "<name>::" label
@@ -1871,6 +1882,7 @@ static void label_index_scan_file(ProjectDiscovery *disc, const char *filePath)
     FILE *f = fopen(filePath, "r");
     if (!f) return;
     char line[MAX_LINE];
+    int declsSeen = 0;
     while (fgets(line, sizeof(line), f)) {
         strip_comment(line);
         rtrim(line);
@@ -1880,9 +1892,12 @@ static void label_index_scan_file(ProjectDiscovery *disc, const char *filePath)
             char *end = name;
             while (*end && *end != ',' && !isspace((unsigned char)*end)) end++;
             *end = '\0';
+            /* Only the file's first declaration may be parsed from the top;
+             * a later one must be sought, or the parse would load the group
+             * above it (and recurse forever if that group is the parent). */
             if (*name)
-                label_index_add(disc, name, filePath, 0);
-        } else if (trimmed == line && !isspace((unsigned char)line[0])) {
+                label_index_add(disc, name, filePath, declsSeen++ > 0, name);
+        } else if (trimmed == line) {
             char *cc = strstr(trimmed, "::");
             if (!cc || cc == trimmed) continue;
             int ok = 1;
@@ -1890,7 +1905,11 @@ static void label_index_scan_file(ProjectDiscovery *disc, const char *filePath)
                 if (!isalnum((unsigned char)*q) && *q != '_') { ok = 0; break; }
             if (!ok) continue;
             *cc = '\0';
-            label_index_add(disc, trimmed, filePath, 1);
+            label_index_add(disc, trimmed, filePath, 1, trimmed);
+            /* load_sub_voicegroup strips "voicegroup_" before looking up. */
+            if (strncmp(trimmed, "voicegroup_", 11) == 0 && trimmed[11])
+                label_index_add(disc, trimmed + 11, filePath, 1, trimmed);
+            declsSeen++;
         }
     }
     fclose(f);
@@ -1911,10 +1930,14 @@ static void label_index_scan_file(ProjectDiscovery *disc, const char *filePath)
  */
 static void discovery_ensure_label_index(ProjectDiscovery *disc)
 {
-    if (disc->labelIndexBuilt) return;
+    /* voicegroupDirs is append-only, so after the deep scan only the newly
+     * appended dirs need indexing. */
+    if (disc->labelIndexBuilt && disc->labelIndexedDirs >= disc->voicegroupDirs.count)
+        return;
     disc->labelIndexBuilt = 1;
-    disc->labelCount = 0;
-    for (int i = 0; i < disc->voicegroupDirs.count; i++) {
+    int firstDir = disc->labelIndexedDirs;
+    disc->labelIndexedDirs = disc->voicegroupDirs.count;
+    for (int i = firstDir; i < disc->voicegroupDirs.count; i++) {
         DIR *d = opendir(disc->voicegroupDirs.paths[i]);
         if (!d) continue;
         struct dirent *ent;
@@ -1943,9 +1966,11 @@ static VoicegroupLocation find_voicegroup_by_label(const char *vgName,
         const VgLabelEntry *e = &disc->labelIndex[i];
         if (strcmp(e->label, vgName) != 0) continue;
         strncpy(loc.filePath, e->filePath, MAX_PATH_LEN - 1);
-        if (e->isColonLabel)
-            strncpy(loc.label, vgName, MAX_SYMBOL_LEN - 1);
+        if (e->needsSeek)
+            strncpy(loc.label, e->seekLabel, MAX_SYMBOL_LEN - 1);
         loc.found = 1;
+        vg_log("discovery: '%s' resolved by label in '%s' (seek=%d)",
+               vgName, e->filePath, e->needsSeek);
         break;
     }
     return loc;
@@ -2142,8 +2167,8 @@ static VoicegroupLocation find_voicegroup(const char *projectRoot,
         loc = find_voicegroup_by_label(vgName, disc);
     if (!loc.found && !disc->deepScanned) {
         discovery_ensure_deep_scan(disc);
-        /* The deep scan can add voicegroup dirs; index them too. */
-        discovery_free_label_index(disc);
+        /* The deep scan can add voicegroup dirs; the label lookup below
+         * indexes just those. */
         loc = find_voicegroup_probe(projectRoot, vgName, disc);
         if (!loc.found)
             loc = find_voicegroup_by_label(vgName, disc);
@@ -2227,6 +2252,14 @@ static ToneData *load_sub_voicegroup(const char *projectRoot, const char *vgSymb
     if (strncmp(name, "voicegroup_", 11) == 0)
         name += 11;
 
+    /* Real data nests one level (the engine never substitutes twice); a
+     * deeper chain means the sources reference each other in a cycle. */
+    if (disc->subGroupDepth >= 4) {
+        fprintf(stderr, "voicegroup_loader: sub-voicegroup '%s' nests too deeply "
+                        "(cyclic reference?); skipping\n", vgSymbol);
+        return NULL;
+    }
+
     VoicegroupLocation loc = find_voicegroup(projectRoot, name, disc);
     if (!loc.found) {
         fprintf(stderr, "voicegroup_loader: cannot find sub-voicegroup '%s'\n", vgSymbol);
@@ -2259,9 +2292,11 @@ static ToneData *load_sub_voicegroup(const char *projectRoot, const char *vgSymb
      * the parse itself continues across labels; for per-file layouts, keep
      * filling from the following files in voice_groups.inc include order. */
     const char *startLabel = loc.label[0] ? loc.label : NULL;
+    disc->subGroupDepth++;
     int endIndex = parse_voicegroup_file(projectRoot, loc.filePath, startLabel,
                                          vg, dsMap, pwMap, ksMap, disc, waveCache,
                                          0, 1, 0);
+    disc->subGroupDepth--;
     if (endIndex > 0 && !startLabel) {
         char curPath[MAX_PATH_LEN];
         strncpy(curPath, loc.filePath, sizeof(curPath) - 1);
@@ -2381,6 +2416,16 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         if (startLabel && !inSection) {
             if (strstr(trimmed, searchLabel) == trimmed) {
                 inSection = 1;
+            } else if (strncmp(trimmed, "voice_group ", 12) == 0) {
+                /* Macro-form declaration: voice_group <startLabel>[, note] */
+                char declName[MAX_SYMBOL_LEN];
+                int startingNote = 0;
+                int got = sscanf(trimmed + 12, " %255[^, \t\r\n] , %d", declName, &startingNote);
+                if (got >= 1 && strcmp(declName, startLabel) == 0) {
+                    inSection = 1;
+                    if (got >= 2 && startingNote > 0 && startingNote < VOICEGROUP_SIZE)
+                        voiceIndex = startingNote;
+                }
             }
             continue;
         }
@@ -2391,6 +2436,10 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
             char *cc = strstr(trimmed, "::");
             int boundary = (cc && cc > trimmed && !isspace((unsigned char)trimmed[0]))
                            || strncmp(trimmed, ".align", 6) == 0;
+            /* The next macro-form group ends the section outright: its label
+             * may be virtual (comma form), so contiguity can't run through it. */
+            if (strncmp(trimmed, "voice_group ", 12) == 0)
+                break;
             if (boundary) {
                 if (!contiguousFill)
                     break;
