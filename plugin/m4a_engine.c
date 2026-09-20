@@ -1143,11 +1143,43 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
     case 0x1A: /* LFO delay (LFODL) */
         // TODO: none of the pokemon emerald songs use LFODL
         break;
+    case 0x1E: /* XCMD select: stashed until CC 0x1D/0x1F fires it (mid2agb's
+                * s_extendedCommand). */
+        track->xcmdSelect = value;
+        break;
+    case 0x1D: /* XCMD fire */
+    case 0x1F:
+        m4a_engine_xcmd(engine, trackIndex, track->xcmdSelect, value);
+        break;
     case 0x7B: /* All Notes Off */
         m4a_engine_all_notes_off(engine, trackIndex);
         break;
     case 0x78: /* All Sound Off */
         m4a_engine_all_sound_off(engine);
+        break;
+    default:
+        break;
+    }
+}
+
+/*
+ * Extended command (XCMD).  Only the two mid2agb can emit are handled; like
+ * ply_xiecv / ply_xiecl they only write the track, so notes already sounding
+ * keep the values they latched at note-on.
+ */
+void m4a_engine_xcmd(M4AEngine *engine, int trackIndex, uint8_t command, uint8_t value)
+{
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
+        return;
+
+    M4ATrack *track = &engine->tracks[trackIndex];
+
+    switch (command) {
+    case M4A_XCMD_IECV:
+        track->pseudoEchoVolume = value;
+        break;
+    case M4A_XCMD_IECL:
+        track->pseudoEchoLength = value;
         break;
     default:
         break;

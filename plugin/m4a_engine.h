@@ -161,6 +161,7 @@ typedef struct {
     uint8_t volML;          /* computed left volume */
     uint8_t pseudoEchoVolume;
     uint8_t pseudoEchoLength;
+    uint8_t xcmdSelect;          /* extended command chosen by CC 0x1E, fired by CC 0x1D/0x1F */
     uint8_t portamentoDuration;  /* PORTAMENTO (CC 5) glide duration in song ticks; 0 = off */
     uint8_t portamentoPrevKey;   /* channel key of the last note played (glide start key);
                                   * 0 = no note played yet.  Updated on every note trigger
@@ -517,6 +518,14 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
 void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key);
 void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program);
 void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value);
+/* Extended command (XCMD), already resolved to its gXcmdTable index the way
+ * mid2agb resolves a CC 0x1E + CC 0x1D/0x1F pair when it compiles a song.
+ * Hosts that know the whole song should resolve the pairs themselves and call
+ * this: the selector is compile-time state in mid2agb, so it doesn't rewind at
+ * a loop or a seek the way the CC path's running selector does. */
+#define M4A_XCMD_IECV 8 /* pseudo-echo volume */
+#define M4A_XCMD_IECL 9 /* pseudo-echo length */
+void m4a_engine_xcmd(M4AEngine *engine, int trackIndex, uint8_t command, uint8_t value);
 void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend);
 void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex);
 void m4a_engine_all_sound_off(M4AEngine *engine);

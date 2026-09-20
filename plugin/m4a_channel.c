@@ -135,11 +135,12 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
     }
 
     if (ch->status & CHN_IEC) {
-        /* Pseudo-echo countdown.  Signed check matches the GBA's subs/bhi:
-         * a starting length of 0 underflows and must stop the channel
-         * immediately rather than wrapping to 255. */
-        ch->pseudoEchoLength--;
-        if ((int8_t)ch->pseudoEchoLength <= 0) {
+        /* Pseudo-echo countdown.  The GBA's subs/bhi is an unsigned check on
+         * the pre-decrement value: a starting length of 0 borrows and stops
+         * the channel immediately rather than wrapping to 255, while lengths
+         * above 128 keep counting (unlike CgbSound's signed compare). */
+        uint8_t echoLength = ch->pseudoEchoLength--;
+        if (echoLength <= 1) {
             ch->status = 0;
             return;
         }
