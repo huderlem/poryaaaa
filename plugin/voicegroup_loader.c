@@ -99,6 +99,10 @@ static int closedir(DIR *d)
 #define MAX_LINE 1024
 #define MAX_PATH_LEN 512
 #define MAX_SYMBOL_LEN 256
+/* sscanf field width for a char[MAX_SYMBOL_LEN] destination: every %s / %[
+ * that reads a symbol out of a (longer) source line is bounded by it. */
+#define SYM_W "255"
+typedef char sym_w_is_max_symbol_len_minus_1[(MAX_SYMBOL_LEN == 256) ? 1 : -1];
 #define INITIAL_CAPACITY 64
 
 #define MAX_DISCOVERED_PATHS 32
@@ -1034,7 +1038,7 @@ static int parse_keysplit_tables_file(const char *filePath, KeySplitMap *map)
             /* pokeemerald macro format: keysplit tableName, startNote */
             char name[MAX_SYMBOL_LEN];
             int startNote = 0;
-            if (sscanf(trimmed + 9, "%[^,], %d", name, &startNote) >= 1) {
+            if (sscanf(trimmed + 9, "%" SYM_W "[^,], %d", name, &startNote) >= 1) {
                 rtrim(name);
                 if (map->count >= map->capacity) {
                     map->capacity = map->capacity ? map->capacity * 2 : INITIAL_CAPACITY;
@@ -1062,7 +1066,7 @@ static int parse_keysplit_tables_file(const char *filePath, KeySplitMap *map)
             /* pokefirered raw format: .set TableName, . - startNote */
             char name[MAX_SYMBOL_LEN];
             int startNote = 0;
-            if (sscanf(trimmed + 5, "%[^,], . - %d", name, &startNote) == 2) {
+            if (sscanf(trimmed + 5, "%" SYM_W "[^,], . - %d", name, &startNote) == 2) {
                 rtrim(name);
                 if (map->count >= map->capacity) {
                     map->capacity = map->capacity ? map->capacity * 2 : INITIAL_CAPACITY;
@@ -1832,6 +1836,109 @@ static WaveData *resolve_and_load_sample(const char *projectRoot, const char *sy
     return NULL;
 }
 
+static time_t file_mtime(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 ? st.st_mtime : 0;
+}
+
+/*
+ * Sample resolution for the CMP voice types (cry, voice_directsound_compressed
+ * and friends).  The DPCM encoding is lossy, so the build's .bin is what the
+ * hardware plays: prefer it while it is at least as new as its source file.
+ * In a project that hasn't been built (or whose source was edited since) fall
+ * back to the uncompressed source, which the mixer plays through its plain
+ * path -- the CMP bit alone never triggers a decode.
+ */
+static WaveData *resolve_and_load_compressed_sample(const char *projectRoot, const char *symbol,
+                                                     const SymbolMap *dsMap, ProjectDiscovery *disc,
+                                                     LoadedVoiceGroup *vg, WaveCache *waveCache)
+{
+    const char *samplePath = symbol_map_find(dsMap, symbol);
+    size_t pathLen = samplePath ? strlen(samplePath) : 0;
+    if (pathLen >= 4 && pathLen < MAX_PATH_LEN && strcmp(samplePath + pathLen - 4, ".bin") == 0) {
+        char absBinPath[MAX_PATH_LEN];
+        build_path(absBinPath, sizeof(absBinPath), projectRoot, samplePath);
+        if (file_exists(absBinPath)) {
+            time_t sourceTime = 0;
+            static const char *const exts[] = { "wav", "aif" };
+            for (int i = 0; i < 2 && sourceTime == 0; i++) {
+                char relSource[MAX_PATH_LEN];
+                memcpy(relSource, samplePath, pathLen + 1);
+                memcpy(relSource + pathLen - 3, exts[i], 3);
+                char absSource[MAX_PATH_LEN];
+                build_path(absSource, sizeof(absSource), projectRoot, relSource);
+                sourceTime = file_mtime(absSource);
+            }
+            if (file_mtime(absBinPath) >= sourceTime) {
+                WaveData *cached = wave_cache_find(waveCache, absBinPath);
+                if (cached) return cached;
+                WaveData *wd = load_wave_data(projectRoot, samplePath);
+                if (wd) {
+                    vg_register_wavedata(vg, wd);
+                    wave_cache_insert(waveCache, absBinPath, wd);
+                    return wd;
+                }
+            }
+        }
+    }
+    return resolve_and_load_sample(projectRoot, symbol, dsMap, disc, vg, waveCache);
+}
+
+/* The macros that assemble to a type byte followed by _voice_directsound's
+ * seven arguments.  Every prefix carries its trailing space, so no entry
+ * shadows another.  voice_directsound_alt is the vanilla spelling of
+ * voice_directsound_reverse. */
+typedef struct {
+    const char *prefix;
+    size_t len;
+    uint8_t type;
+} DirectSoundMacro;
+
+#define DS_MACRO(word, type) { word " ", sizeof(word), type }
+static const DirectSoundMacro kDirectSoundMacros[] = {
+    DS_MACRO("voice_directsound", VOICE_DIRECTSOUND),
+    DS_MACRO("voice_directsound_no_resample", VOICE_DIRECTSOUND_NO_RESAMPLE),
+    DS_MACRO("voice_directsound_alt", VOICE_DIRECTSOUND_ALT),
+    DS_MACRO("voice_directsound_reverse", VOICE_DIRECTSOUND_ALT),
+    DS_MACRO("voice_directsound_compressed", VOICE_CRY),
+    DS_MACRO("voice_directsound_compressed_reverse", VOICE_CRY_REVERSE),
+    DS_MACRO("cry_custom", VOICE_CRY),
+    DS_MACRO("cry_reverse_custom", VOICE_CRY_REVERSE),
+    DS_MACRO("cry_uncomp_custom", VOICE_DIRECTSOUND),
+    DS_MACRO("cry_reverse_uncomp_custom", VOICE_DIRECTSOUND_ALT),
+};
+
+/* The one-argument cry macros: key 60, envelope 255/0/255/0. */
+static const DirectSoundMacro kCryMacros[] = {
+    DS_MACRO("cry", VOICE_CRY),
+    DS_MACRO("cry_reverse", VOICE_CRY_REVERSE),
+    DS_MACRO("cry_uncomp", VOICE_DIRECTSOUND),
+    DS_MACRO("cry_reverse_uncomp", VOICE_DIRECTSOUND_ALT),
+};
+#undef DS_MACRO
+
+static const DirectSoundMacro *match_macro(const DirectSoundMacro *macros, size_t count,
+                                           const char *trimmed)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (strncmp(trimmed, macros[i].prefix, macros[i].len) == 0)
+            return &macros[i];
+    }
+    return NULL;
+}
+
+static const DirectSoundMacro *match_directsound_macro(const char *trimmed)
+{
+    return match_macro(kDirectSoundMacros, sizeof(kDirectSoundMacros) / sizeof(kDirectSoundMacros[0]),
+                       trimmed);
+}
+
+static const DirectSoundMacro *match_cry_macro(const char *trimmed)
+{
+    return match_macro(kCryMacros, sizeof(kCryMacros) / sizeof(kCryMacros[0]), trimmed);
+}
+
 /* ---- Flexible voicegroup finding ---- */
 
 /* Returns 1 if the last path component of dirPath equals name. */
@@ -2408,6 +2515,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         strip_comment(line);
         rtrim(line);
         char *trimmed = ltrim(line);
+        const DirectSoundMacro *cryMacro;
 
         if (trimmed[0] == '\0')
             continue;
@@ -2458,23 +2566,25 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 break;
             char vgDeclName[MAX_SYMBOL_LEN];
             int startingNote = 0;
-            if (sscanf(trimmed + 12, "%[^,\n], %d", vgDeclName, &startingNote) >= 2) {
+            if (sscanf(trimmed + 12, "%" SYM_W "[^,\n], %d", vgDeclName, &startingNote) >= 2) {
                 if (startingNote > 0 && startingNote < VOICEGROUP_SIZE)
                     voiceIndex = startingNote;
             }
             continue;
         }
 
-        /* voice_directsound variants */
-        if (strncmp(trimmed, "voice_directsound_no_resample ", 30) == 0) {
+        /* voice_directsound variants and the custom-envelope cry macros:
+         * every one is a type byte ahead of the same seven arguments. */
+        const DirectSoundMacro *dsMacro = match_directsound_macro(trimmed);
+        if (dsMacro) {
             int key, pan, attack, decay, sustain, release;
             char sampleSymbol[MAX_SYMBOL_LEN];
-            if (sscanf(trimmed + 30, "%d, %d, %[^,], %d, %d, %d, %d",
+            if (sscanf(trimmed + dsMacro->len, "%d, %d, %" SYM_W "[^,], %d, %d, %d, %d",
                        &key, &pan, sampleSymbol, &attack, &decay, &sustain, &release) == 7) {
                 rtrim(sampleSymbol);
                 vg_set_voice_name(vg, voiceIndex, sampleSymbol);
                 ToneData *td = &vg->voices[voiceIndex];
-                td->type = VOICE_DIRECTSOUND_NO_RESAMPLE;
+                td->type = dsMacro->type;
                 td->key = (uint8_t)key;
                 td->panSweep = pan ? (0x80 | pan) : 0;
                 td->attack = (uint8_t)attack;
@@ -2482,53 +2592,9 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                 td->sustain = (uint8_t)sustain;
                 td->release = (uint8_t)release;
 
-                WaveData *wd = resolve_and_load_sample(projectRoot, sampleSymbol, dsMap, disc, vg, waveCache);
-                if (wd) {
-                    td->wav = wd;
-                }
-            }
-            voiceIndex++;
-            voicesParsedInSection++;
-        } else if (strncmp(trimmed, "voice_directsound_alt ", 22) == 0) {
-            int key, pan, attack, decay, sustain, release;
-            char sampleSymbol[MAX_SYMBOL_LEN];
-            if (sscanf(trimmed + 22, "%d, %d, %[^,], %d, %d, %d, %d",
-                       &key, &pan, sampleSymbol, &attack, &decay, &sustain, &release) == 7) {
-                rtrim(sampleSymbol);
-                vg_set_voice_name(vg, voiceIndex, sampleSymbol);
-                ToneData *td = &vg->voices[voiceIndex];
-                td->type = VOICE_DIRECTSOUND_ALT;
-                td->key = (uint8_t)key;
-                td->panSweep = pan ? (0x80 | pan) : 0;
-                td->attack = (uint8_t)attack;
-                td->decay = (uint8_t)decay;
-                td->sustain = (uint8_t)sustain;
-                td->release = (uint8_t)release;
-
-                WaveData *wd = resolve_and_load_sample(projectRoot, sampleSymbol, dsMap, disc, vg, waveCache);
-                if (wd) {
-                    td->wav = wd;
-                }
-            }
-            voiceIndex++;
-            voicesParsedInSection++;
-        } else if (strncmp(trimmed, "voice_directsound ", 18) == 0) {
-            int key, pan, attack, decay, sustain, release;
-            char sampleSymbol[MAX_SYMBOL_LEN];
-            if (sscanf(trimmed + 18, "%d, %d, %[^,], %d, %d, %d, %d",
-                       &key, &pan, sampleSymbol, &attack, &decay, &sustain, &release) == 7) {
-                rtrim(sampleSymbol);
-                vg_set_voice_name(vg, voiceIndex, sampleSymbol);
-                ToneData *td = &vg->voices[voiceIndex];
-                td->type = VOICE_DIRECTSOUND;
-                td->key = (uint8_t)key;
-                td->panSweep = pan ? (0x80 | pan) : 0;
-                td->attack = (uint8_t)attack;
-                td->decay = (uint8_t)decay;
-                td->sustain = (uint8_t)sustain;
-                td->release = (uint8_t)release;
-
-                WaveData *wd = resolve_and_load_sample(projectRoot, sampleSymbol, dsMap, disc, vg, waveCache);
+                WaveData *wd = (dsMacro->type & VOICE_TYPE_CMP)
+                    ? resolve_and_load_compressed_sample(projectRoot, sampleSymbol, dsMap, disc, vg, waveCache)
+                    : resolve_and_load_sample(projectRoot, sampleSymbol, dsMap, disc, vg, waveCache);
                 if (wd) {
                     td->wav = wd;
                 }
@@ -2608,7 +2674,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         else if (strncmp(trimmed, "voice_programmable_wave_alt ", 27) == 0) {
             int key, pan, attack, decay, sustain, release;
             char waveSymbol[MAX_SYMBOL_LEN];
-            if (sscanf(trimmed + 27, "%d, %d, %[^,], %d, %d, %d, %d",
+            if (sscanf(trimmed + 27, "%d, %d, %" SYM_W "[^,], %d, %d, %d, %d",
                        &key, &pan, waveSymbol, &attack, &decay, &sustain, &release) == 7) {
                 rtrim(waveSymbol);
                 vg_set_voice_name(vg, voiceIndex, waveSymbol);
@@ -2634,7 +2700,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         } else if (strncmp(trimmed, "voice_programmable_wave ", 23) == 0) {
             int key, pan, attack, decay, sustain, release;
             char waveSymbol[MAX_SYMBOL_LEN];
-            if (sscanf(trimmed + 23, "%d, %d, %[^,], %d, %d, %d, %d",
+            if (sscanf(trimmed + 23, "%d, %d, %" SYM_W "[^,], %d, %d, %d, %d",
                        &key, &pan, waveSymbol, &attack, &decay, &sustain, &release) == 7) {
                 rtrim(waveSymbol);
                 vg_set_voice_name(vg, voiceIndex, waveSymbol);
@@ -2693,7 +2759,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         /* voice_keysplit */
         else if (strncmp(trimmed, "voice_keysplit_all ", 19) == 0) {
             char vgSymbol[MAX_SYMBOL_LEN];
-            if (sscanf(trimmed + 19, "%s", vgSymbol) == 1) {
+            if (sscanf(trimmed + 19, "%" SYM_W "s", vgSymbol) == 1) {
                 rtrim(vgSymbol);
                 vg_set_voice_name(vg, voiceIndex, vgSymbol);
                 ToneData *td = &vg->voices[voiceIndex];
@@ -2710,7 +2776,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         } else if (strncmp(trimmed, "voice_keysplit ", 15) == 0) {
             char vgSymbol[MAX_SYMBOL_LEN];
             char ksSymbol[MAX_SYMBOL_LEN];
-            if (sscanf(trimmed + 15, "%[^,], %s", vgSymbol, ksSymbol) == 2) {
+            if (sscanf(trimmed + 15, "%" SYM_W "[^,], %" SYM_W "s", vgSymbol, ksSymbol) == 2) {
                 rtrim(vgSymbol);
                 rtrim(ksSymbol);
                 vg_set_voice_name(vg, voiceIndex, vgSymbol);
@@ -2734,51 +2800,25 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
             voiceIndex++;
             voicesParsedInSection++;
         }
-        /* cry / cry_reverse */
-        else if (strncmp(trimmed, "cry_reverse ", 12) == 0) {
+        /* cry / cry_reverse / cry_uncomp / cry_reverse_uncomp */
+        else if ((cryMacro = match_cry_macro(trimmed)) != NULL) {
             char sampleSymbol[MAX_SYMBOL_LEN];
-            if (sscanf(trimmed + 12, "%s", sampleSymbol) == 1) {
+            if (sscanf(trimmed + cryMacro->len, "%" SYM_W "s", sampleSymbol) == 1) {
                 rtrim(sampleSymbol);
                 vg_set_voice_name(vg, voiceIndex, sampleSymbol);
                 ToneData *td = &vg->voices[voiceIndex];
-                td->type = VOICE_CRY_REVERSE;
+                td->type = cryMacro->type;
                 td->key = 60;
                 td->attack = 0xFF;
                 td->decay = 0;
                 td->sustain = 0xFF;
                 td->release = 0;
 
-                const char *samplePath = symbol_map_find(dsMap, sampleSymbol);
-                if (samplePath) {
-                    WaveData *wd = load_wave_data(projectRoot, samplePath);
-                    if (wd) {
-                        td->wav = wd;
-                        vg_register_wavedata(vg, wd);
-                    }
-                }
-            }
-            voiceIndex++;
-            voicesParsedInSection++;
-        } else if (strncmp(trimmed, "cry ", 4) == 0) {
-            char sampleSymbol[MAX_SYMBOL_LEN];
-            if (sscanf(trimmed + 4, "%s", sampleSymbol) == 1) {
-                rtrim(sampleSymbol);
-                vg_set_voice_name(vg, voiceIndex, sampleSymbol);
-                ToneData *td = &vg->voices[voiceIndex];
-                td->type = VOICE_CRY;
-                td->key = 60;
-                td->attack = 0xFF;
-                td->decay = 0;
-                td->sustain = 0xFF;
-                td->release = 0;
-
-                const char *samplePath = symbol_map_find(dsMap, sampleSymbol);
-                if (samplePath) {
-                    WaveData *wd = load_wave_data(projectRoot, samplePath);
-                    if (wd) {
-                        td->wav = wd;
-                        vg_register_wavedata(vg, wd);
-                    }
+                WaveData *wd = (cryMacro->type & VOICE_TYPE_CMP)
+                    ? resolve_and_load_compressed_sample(projectRoot, sampleSymbol, dsMap, disc, vg, waveCache)
+                    : resolve_and_load_sample(projectRoot, sampleSymbol, dsMap, disc, vg, waveCache);
+                if (wd) {
+                    td->wav = wd;
                 }
             }
             voiceIndex++;
