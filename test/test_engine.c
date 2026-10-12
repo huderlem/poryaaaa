@@ -1319,6 +1319,44 @@ static void test_lfo_tempo_scaling(void)
     m4a_engine_destroy(&off);
 }
 
+/*
+ * ply_lfos only stores the speed; clear_modM (phase and offset back to 0) runs
+ * only for a speed of 0.  So repeating LFOS, or turning a knob routed to it,
+ * keeps the vibrato going instead of restarting its phase each time.
+ */
+static void test_lfos_keeps_phase(void)
+{
+    printf("Testing LFOS keeps the LFO phase...\n");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_tempo_bpm(&engine, 150.0);
+    m4a_engine_cc(&engine, 0, 0x15, 1);  /* LFOS */
+    m4a_engine_cc(&engine, 0, 0x1, 64);  /* MOD */
+    for (int i = 0; i < 10; i++)
+        m4a_engine_tick(&engine);
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 10, "lfos: 10 steps at speed 1");
+    int8_t modM = engine.tracks[0].modM;
+    ASSERT(modM != 0, "lfos: the LFO has an offset");
+
+    /* The same speed again, then a faster one: the phase carries on. */
+    m4a_engine_cc(&engine, 0, 0x15, 1);
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 10, "lfos: a repeat keeps the phase");
+    ASSERT_EQ(engine.tracks[0].modM, modM, "lfos: a repeat keeps the offset");
+    m4a_engine_cc(&engine, 0, 0x15, 2);
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 10, "lfos: a new speed keeps the phase");
+    ASSERT_EQ(engine.tracks[0].modM, modM, "lfos: a new speed keeps the offset");
+    m4a_engine_tick(&engine);
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 12, "lfos: the phase advances at the new speed");
+
+    /* Speed 0 is clear_modM. */
+    m4a_engine_cc(&engine, 0, 0x15, 0);
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 0, "lfos: 0 resets the phase");
+    ASSERT_EQ(engine.tracks[0].modM, 0, "lfos: 0 clears the offset");
+
+    m4a_engine_destroy(&engine);
+}
+
 /* Build a Golden Sun synth WaveData: a header with size == 0 followed by the
  * waveform descriptor bytes (same layout as the duty/saw/triangle .bin
  * samples used by ipatix's improved mixer). */
@@ -2227,6 +2265,7 @@ int main(void)
     test_cgb_fixed_freq();
     test_sweep();
     test_lfo_tempo_scaling();
+    test_lfos_keeps_phase();
     test_golden_sun_synth();
     test_golden_sun_synth_waveforms();
     test_cgb_hw_envelope();

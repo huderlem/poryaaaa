@@ -1078,9 +1078,11 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         refresh_channel_pitches(engine, track, trackIndex);
         break;
     case 0x15: /* LFO speed (LFOS) */
+        /* Mirrors ply_lfos: only a speed of 0 resets the LFO (clear_modM).
+         * Any other value just changes the rate, keeping the phase and the
+         * current offset, so a stream of LFOS changes (a knob, or a song
+         * repeating the command) doesn't restart the vibrato each time. */
         track->lfoSpeed = value;
-        track->lfoSpeedC = 0;
-        track->modM = 0;
         if (value == 0)
             clear_mod_m(engine, track, trackIndex);
         break;
