@@ -1043,6 +1043,27 @@ bool m4a_gui_hide(M4AGuiState *gui)
     return true;
 }
 
+/* Conversion factor between the sizes the CLAP host uses and the sizes
+ * Pugl uses (cachedWidth/Height from PUGL_CONFIGURE, PUGL_CURRENT_SIZE).
+ *
+ * CLAP's Cocoa API uses logical pixels (points) while Pugl's mac backend
+ * reports backing pixels, so on macOS we divide/multiply by the backing
+ * scale factor.  CLAP's Win32 and X11 APIs use physical pixels, exactly
+ * like Pugl's win/x11 backends, so no conversion applies there.  Scaling
+ * on those platforms made the view scale-times larger than the host's
+ * frame on displays with >100% scaling (seen in FL Studio on Windows),
+ * clipping the right/bottom of the UI. */
+static double gui_size_scale(M4AGuiState *gui)
+{
+#ifdef __APPLE__
+    double scale = gui->view ? puglGetScaleFactor(gui->view) : 1.0;
+    return scale < 1.0 ? 1.0 : scale;
+#else
+    (void)gui;
+    return 1.0;
+#endif
+}
+
 void m4a_gui_get_size(M4AGuiState *gui, uint32_t *width, uint32_t *height)
 {
     if (!gui) {
@@ -1050,11 +1071,7 @@ void m4a_gui_get_size(M4AGuiState *gui, uint32_t *width, uint32_t *height)
         *height = (uint32_t)GUI_H;
         return;
     }
-    /* cachedWidth/Height are in backing pixels (from Pugl CONFIGURE).
-     * The CLAP host expects logical pixels (points on macOS), so divide
-     * by the backing scale factor. */
-    double scale = gui->view ? puglGetScaleFactor(gui->view) : 1.0;
-    if (scale < 1.0) scale = 1.0;
+    const double scale = gui_size_scale(gui);
     *width  = (uint32_t)(gui->cachedWidth  / scale);
     *height = (uint32_t)(gui->cachedHeight / scale);
 }
@@ -1062,10 +1079,7 @@ void m4a_gui_get_size(M4AGuiState *gui, uint32_t *width, uint32_t *height)
 bool m4a_gui_set_size(M4AGuiState *gui, uint32_t width, uint32_t height)
 {
     if (!gui || !gui->view) return false;
-    /* The host sends logical pixels; Pugl's PUGL_CURRENT_SIZE expects
-     * backing pixels, so scale up. */
-    double scale = puglGetScaleFactor(gui->view);
-    if (scale < 1.0) scale = 1.0;
+    const double scale = gui_size_scale(gui);
     PuglSpan pw = (PuglSpan)(width  * scale);
     PuglSpan ph = (PuglSpan)(height * scale);
     puglSetSizeHint(gui->view, PUGL_CURRENT_SIZE, pw, ph);
