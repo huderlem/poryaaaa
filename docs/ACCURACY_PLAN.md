@@ -699,7 +699,7 @@ wave 0; noise 0 (start +3 in psg_mix's noise-after-wave position); lfo_psg
 <= 4; psg_mix <= 29; songs unchanged from the figures above.  Harness:
 27/38, 0 regressions against the timing-model baseline.
 
-### Next: engine milestone 3, the mixer (handoff, 2026-10-24)
+### Engine milestone 3 handoff (2026-10-24, as given; done below)
 
 Start from the tip of branch `accuracy-harness` (the review-fixes commit and this baseline refresh).  Before any change
 the harness must reproduce `baselines/2026-10-24_timing-model.json`
@@ -744,6 +744,124 @@ model reads (`M4AFifoWord.s[4]` is int16 so the ring can carry unwrapped
 values; the hardware is 8-bit).  PCM is already bit-exact on single-note
 tests (pcm_adsr, pcm_drum, pcm_bass -inf), so the envelope arithmetic and
 the sample-and-hold are right; the port must not move them.
+
+### Done: engine milestone 3, the mixer (2026-10-24)
+
+**31/38 pass at -40 dB** (timing-model baseline: 27/38);
+`compare_reports.py baselines/2026-10-24_timing-model.json
+baselines/2026-10-24_mixer.json`: 0 regressions, 21 improvements, every
+test that was -inf is still -inf.  Three commits on `accuracy-harness`
+after cf9ac17, harness after each:
+
+1. **9d2ac2e, the SoundMainRAM port** (`plugin/m4a_mixer.c`, with
+   `m4a_mixer.h`): m4a_1.s lines 88-709 translated with the register names
+   kept as variable names.  The reverb pass over the ring (both taps, the
+   `asr 9` / `tst 0x80; addne 1` rounding, mono write to both sides, the
+   counter-2 wrap to the buffer start), the no-reverb zero fill, the
+   packed-word `mul / bic 0xFF0000 / add ror 8` accumulate
+   (`m4a_mixer_acc`) with the 8-bit lane wrap and the mid-word stop
+   rotation, the fixed-frequency block/single loops with their r8/r9
+   bookkeeping and loop restart, the interpolating loop with `bic r9,
+   0x3F800000`, the `lr - 1 == 0 -> r0 += r1` advance and the loop-end
+   overshoot, and Unk1/Unk2: the lazy SF_SPECIAL setup (REV pointer flip
+   `data + size - offset`, CMP index `ptr - data`), xpi = 0xFF000000, FIX
+   step 0x800000, the three Unk1 loops, the stop path that does store
+   fw/count/pointer (unlike the main path's), the nibble order of the
+   decoder and **one engine-wide decoding buffer** (sDecodingBuffer) with
+   the per-channel xpi tag, so two compressed channels clobber each other's
+   block exactly as on the GBA.  A CMP-typed voice on uncompressed data
+   returns without mixing, as `_081DD468` does (the old engine played it).
+   The DMA ring is `int8_t pcmBuffer[2 * 1584]` in the engine
+   (SoundInfo.pcmBuffer's layout; m4a_gba reads int8), so the FIFO sees the
+   wrapped bytes.  SoundChannel.frequency is MidiKeyToFreq's result again
+   and divFreq is applied in the mixer, as `mul r4, r12, r1` does.  The PCM
+   envelope step (`m4a_pcm_channel_tick`, unchanged arithmetic) now runs
+   inside SoundMainRAM per channel, before its mix, instead of in the tick.
+   `m4a_reverb.c` (a separate delay line) is gone; the ring is the reverb
+   memory, `M4AReverb` keeps only the amount.  The host-pointer WaveData
+   (header fields + `int8_t *data`) stands in for the inline GBA layout:
+   the only two address computations that depended on it are the REV flip
+   and the CMP index, both rewritten relative to `data`; the reverse path's
+   look-behind before the first sample reads 0 (the GBA reads the header's
+   last byte, `size >> 24`).  Harness: 27 -> 30/38; pcm_reverb -10.4 ->
+   -46.1, pcm_chord -28.6 -> -44.7, pcm_psg -29.8 -> -44.7, mus_littleroot
+   -9.1 -> -27.4, mus_vs_trainer -9.7 -> -26.9, mus_credits -7.2 -> -18.6,
+   mus_vs_wild -9.7 -> -19.7.  Unit tests (`test_mixer_arithmetic`, and the
+   reverse / DPCM / synth tests rewritten to drive frames through
+   `m4a_mixer_mix_channel`): the ror-8 packing against hand-computed words
+   (0xEC0FF605 for 10,-20,30,-40 at volume 128; lane add onto a loaded
+   word; 126 + 126 wrapping to -4; the bic dropping a sub-256 product), a
+   FIX frame on an 8-sample loop, the interpolating frame with its
+   look-ahead and mid-word stop, a loop-end overshoot, two channels wrapping
+   a lane, the reverb rounding cases (-40*64>>9 = -5 -> -4; -64>>9 = -1 ->
+   0), the counter-2 tap, the zero fill, the shared decoding buffer.
+2. **f0d1ebc, the look-ahead byte** (`voicegroup_loader.c`): the mixer
+   interpolates the last sample toward `data[size]`.  The loader had
+   duplicated the last sample there.  The claim "the converter pads with 0"
+   (from wav2agb's `convert_uncompressed_bin`) was tested alone and
+   **rejected by measurement**: pcm_adsr (-inf -> -58.4) and pcm_bass (-inf
+   -> -50.0) regressed while the unlooped and most looped tests improved.
+   Reading the test ROM settled it: the .bin files pokeemerald ships carry
+   one extra sample after the data, the loop-start sample for a looped
+   sound (sc88pro_flute 0xF8, pizzicato 0x24, fretless_bass 0x0E) and 0 for
+   an unlooped one (sd90_solo_snare), followed by alignment padding.  The
+   .bin path now reads that byte from the file; the .wav/.aif paths derive
+   it.  Harness: 30 -> 31/38; pcm, pcm_hi, pcm_adsr, pcm_reverb, pcm_bass,
+   pan, vol, vel, bend, lfo_vib/trem/pan/delay and tune are **bit-exact**;
+   pcm_chord -55.7, pcm_psg -55.0.
+3. **26f691b, the sound-mode frequency enum**: `engine->pcmFreqMode`
+   (SOUND_MODE_FREQ_xxxxx >> 16, 1..12 into gPcmSamplesPerVBlankTable,
+   default 4 = 13379 Hz), `m4a_engine_set_pcm_freq_mode` running
+   SampleFreqSet's arithmetic and reprogramming the timer.  "Mix at host
+   rate" is gone from the engine, `--pcm-mix-rate` (snaps to the nearest
+   table rate and says so), the GUI combo (the twelve rates), the config
+   key and the CLAP state; the state still stores the rate in Hz as a float
+   at the same offset, so older saves load (a stored 0 maps to 13379).
+   Harness unchanged (31/38, the default mode is the game's).
+
+Per-test null, before (timing model) / after (mixer):
+sq1..noise7, pcm_adsr, pcm_drum, pcm_bass, tune_psg, psg_mix -inf / -inf;
+pcm -46.3 / -inf; pcm_hi -47.2 / -inf; pcm_cmp -55.0 / -55.0; pcm_reverb
+-10.4 / -inf; pcm_chord -28.6 / -55.7; pan -48.6 / -inf; vol -56.7 / -inf;
+vel -56.7 (worst 1 s -38.7) / -inf; bend -43.1 / -inf; lfo_vib -42.6 /
+-inf; lfo_trem -42.0 / -inf; lfo_pan -42.1 / -inf; lfo_delay -42.3 /
+-inf; lfo_psg -59.9 / -59.9; tune -58.6 / -inf; pcm_psg -29.8 / -55.0;
+mus_littleroot -9.1 / -27.4; mus_weather_groudon -5.0 / -5.0; mus_vs_wild
+-9.7 / -19.7; mus_mt_chimney -5.5 / -7.4; mus_rg_vs_trainer -6.4 / -8.3;
+mus_vs_trainer -9.7 / -26.9; mus_credits -7.2 / -18.6.  `build/poryaaaa_unit_tests`
+1016/1016, `poryaaaa_blip_tests` 49112/0, `poryaaaa_song_tests` 561/561.
+
+What is left on the PCM side is **mgba's scheduler lateness (1c), not the
+mixer**.  pcm_cmp -55.0 is seven single-sample events (0.0706, 0.7403,
+1.7118, 1.7449, 1.8118, 1.9458, 2.0128 s), each one PCM sample held one
+65536 Hz DAC slot late; the Cry_Bulbasaur bytes the loader holds are
+identical to the ROM's (4220 data bytes checked), the DPCM decode is
+exact in the unit tests, and `mgba_probe` on pcm_cmp (type 2, id 14, 180
+frames) reports **9 timer-0 overflows crossing a DAC slot** (max late 9
+cycles, first at cycle 1180930 = 0.0704 s, the first error event) against
+0 on pcm (bit-exact) and 6 on pcm_chord: the compressed decoder and the
+multi-channel mix are the long ARM instruction streams a timer event
+lands behind.  pcm_chord -55.7 and pcm_psg -55.0 are the same floor.  This
+is the item deferred in 1c ("5-6 one-slot sample-and-hold errors per 1.17
+s ... around -50 dB"); modeling it means modeling instruction timing, not
+the driver.  The songs are bounded by the PSG write timing of the
+timing-model section (mus_weather_groudon, mt_chimney, rg_vs_trainer:
+wave/noise-heavy, unchanged by the mixer) plus this floor.
+
+Opt-in flags after the port: respectBaseMidiKey (key math in
+`m4a_engine_note_on`, untouched), portamento (CC 5; the legato inherit now
+also copies CHN_SPECIAL and xpi so an inherited reverse/compressed
+position is not set up twice) and pwm (CGB only) behave as documented.
+Golden Sun synths (zero-size samples) keep generating through the same
+packed accumulate (`mix_synth` in m4a_mixer.c, an extension marked as
+such); on stock hardware a zero-size sample is a one-sample click, so this
+remains the one deliberate deviation in the mixer.  **`pcmOverflowMode`
+does not exist in the tree**: `git log --all -S pcmOverflowMode` finds it
+only in this plan's handoff text (commit 9751614), never in code, on any
+branch; the memory note describing it records work that was never
+committed.  With the port the 8-bit wrap is simply stock behaviour; an
+"off"/"clip" deviation would need a wider lane accumulator and is not
+implemented.
 
 ### Reference: milestone 1 decisions as agreed
 
