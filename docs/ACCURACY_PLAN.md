@@ -292,13 +292,89 @@ gates each.
    -42..-58.  Still failing on the PCM side: pcm_reverb -10.4 and
    pcm_chord -28.6 (unchanged; mixer-port items), vel's worst second -38.6.
    PSG tests and songs unchanged (the PSG model has not landed yet).
-   **3b next**: the PSG model ported from mgba `src/gb/audio.c` (GBA
-   style) + CgbSound register driver replacing the host-rate oscillators
-   in `m4a_channel.c`; run the harness.
-4. **Then**: remove the analog low-pass (engine flag, `--analog-filter`,
-   GUI checkbox, `analog_filter` config key, CLAP state byte kept for
-   back-compat reading).  Save `baselines/<date>_output-stage.json`,
-   update this section, independent reviews, fixes, re-run.
+   **3b done (ee2ceec)**: `plugin/m4a_psg.{h,c}`, the PSG ported from mgba
+   `src/gb/audio.c` in GBA style with GBAIOWrite8/GBAIOWrite register
+   semantics and stored-bit images; `plugin/m4a_channel.c` is now the
+   CgbSound register driver (transliterated, labels kept) on top of it, two
+   PSG instances (real + poly-debug shadow), writes stamped at VBlank line
+   start + 1740 after the DAC catch-up, the frame sequencer hooked into
+   `m4a_gba_run` ahead of a same-cycle sample event, MPlayExtender's boot
+   writes replayed.  CGB notes start at the next SoundMain (CHN_START).
+   The old oscillator fields and tests are gone; `test_engine.c` has PSG
+   unit tests against hand-computed mgba behavior and driver
+   register-sequence tests.  The `sq1_sweep` silence was not the sweep
+   unit: `voicegroup_loader.c` parsed voice arguments with `%d`, so the
+   micro voice's `0x3A` sweep byte failed to parse and the voice fell to a
+   sample-less PCM voice (now `%i`).
+4. **Done (6c1ff6d)**: analog low-pass removed (flag, `--analog-filter`,
+   GUI checkbox, `analog_filter` config key now ignored, CLAP state byte
+   still written as 0 and read back so old saves load).
+
+### Milestone 2 results (`baselines/2026-10-24_output-stage.json`)
+
+**15/38 pass at -40 dB** (sequencer baseline: 0/38).  Before =
+`baselines/2026-10-24_sequencer.json`, after = output stage; raw null in
+dB, lag 0.0 ms and drift 0.0 everywhere.
+
+| test | before | after | | test | before | after |
+|------|-------:|------:|-|------|-------:|------:|
+| sq1 | -2.4 | -36.7 | | pcm_chord | -9.0 | -28.6 |
+| sq1_env | -2.2 | -3.5 | | pcm_bass | -9.0 | **-66.5** |
+| sq1_sweep | 0.0 (silent) | **-43.1** | | pan | -9.3 | **-48.6** |
+| sq1_alt | -1.6 | -35.1 | | vol | -9.4 | **-56.2** |
+| sq2 | -1.3 | **-73.4** | | vel | -9.4 | -56.2 (worst 1 s -38.6) |
+| sq2_alt | -0.7 | -34.1 | | bend | -9.4 | **-43.1** |
+| wave | -6.9 | -11.9 | | lfo_vib | -9.4 | **-42.6** |
+| wave_alt | -6.2 | -10.6 | | lfo_trem | -9.4 | **-42.0** |
+| noise | -1.0 | -5.3 | | lfo_pan | -9.4 | **-42.1** |
+| noise7 | -2.4 | -6.2 | | lfo_delay | -9.4 | **-42.3** |
+| pcm | -9.2 | **-46.3** | | lfo_psg | -1.1 | -20.7 |
+| pcm_hi | -6.3 | **-47.2** | | tune | -9.3 | **-58.2** |
+| pcm_adsr | -7.4 | **-64.0** | | tune_psg | -3.2 | -32.8 |
+| pcm_drum | -8.2 | **-69.1** | | psg_mix | -0.1 | -2.4 |
+| pcm_cmp | -8.2 | **-54.6** | | pcm_psg | -2.5 | -17.0 |
+| pcm_reverb | -7.2 | -10.4 | | | | |
+
+| song | before | after | | song | before | after |
+|------|-------:|------:|-|------|-------:|------:|
+| mus_littleroot | -4.8 | -7.4 | | mus_mt_chimney | -2.1 | -3.0 |
+| mus_weather_groudon | +1.2 | +1.3 | | mus_rg_vs_trainer | -1.9 | -3.3 |
+| mus_vs_wild | -5.3 | -6.9 | | mus_vs_trainer | -4.8 | -7.8 |
+| mus_credits | -4.0 | -6.5 | | | | |
+
+Findings:
+
+1. **PCM path is done to the resampler's precision.**  Level gap 0.0 dB,
+   lag 0.0 ms, 14 of the 17 PCM micro-tests pass; vel misses on its worst
+   second (-38.6) only.  `pcm_reverb` (-10.4) and `pcm_chord` (-28.6) are
+   the mixer port: the game's reverb and the 8-bit wrapping sum.
+2. **PSG: the model is right, the write timing is the residual.**  sq2
+   nulls to -73 dB (LSB-level), so the square model, its scale and the
+   DAC/resampler chain are exact.  What is left is *when* CgbSound's
+   register writes land.  Measured from the renders against the +1740
+   constant: on a frame that starts notes mgba's writes are later by
+   ~2700 cycles for one note (wave/noise micro-tests: our onset 8-11
+   samples early), ~7000 for mus_weather_groudon's first frame (20
+   samples), ~11000 for psg_mix's four simultaneous notes (32 samples);
+   on steady frames the jitter is a few hundred cycles (sq1's third note
+   trigger: ~1400).  MPlayMain's per-frame work (ply_note setup) runs
+   before CgbSound in SoundMain, so its cost sets the write time.
+   Consequences: a square's duty phase is free-running and unaffected, but
+   its volume-step instants are off by that jitter (the -35 dB floor on
+   50 %-duty sq1 / the `_alt` tests; 12.5 %-duty sq2 happens to step on
+   duty edges), while the wave RAM rotation and the LFSR start at the
+   trigger, so wave and noise are phase-shifted for the rest of the song
+   (wave -12, noise -5, psg_mix -2.4, mus_weather_groudon uncorrelated).
+   Next lever: model SoundMain's variable entry (base + per-note-on cost,
+   per-channel offsets inside CgbSound), which needs `mgba_probe`
+   measurements of CgbSound entry vs. notes started per frame.
+3. **gCgb3Vol over-range** (wave center-pan envelopeGoal 16..31): the GBA
+   reads into `gClockTable`, whose bytes are < 0x20, so NR32's volume
+   field is 0 = silence; modeled that way (was `& 0x0F`).
+4. Songs with PSG content gained 1-3 dB; their PCM components null at
+   -40..-70, so song nulls are now bounded by PSG write timing and the
+   mixer items above.  mus_weather_groudon's drift column is 0 now (it was
+   noise on an uncorrelated signal).
 
 Facts measured in mgba 0.10.5 with `test/accuracy/ref/mgba_probe.c` (a
 libmgba debugger probe; the plan's earlier assumptions were wrong on the
