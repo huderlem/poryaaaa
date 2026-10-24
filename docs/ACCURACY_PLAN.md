@@ -278,9 +278,10 @@ gates each.
    oscillators still attached, stepped on the DAC grid): noise7, psg_mix,
    mus_weather_groudon read 1.2-1.4 dB worse than the sequencer baseline,
    which step 3 is for.
-3. **Next**: PSG model ported from mgba `src/gb/audio.c` (GBA style) +
-   CgbSound register driver replacing the host-rate oscillators in
-   `m4a_channel.c`; run the harness.
+3. **Next**: first switch `mgba_render` to the engine's resampler (see the
+   blip note below) and regenerate the references; then the PSG model
+   ported from mgba `src/gb/audio.c` (GBA style) + CgbSound register driver
+   replacing the host-rate oscillators in `m4a_channel.c`; run the harness.
 4. **Then**: remove the analog low-pass (engine flag, `--analog-filter`,
    GUI checkbox, `analog_filter` config key, CLAP state byte kept for
    back-compat reading).  Save `baselines/<date>_output-stage.json`,
@@ -296,9 +297,19 @@ first two):
 - **Desktop mgba uses blip_buf's sinc kernel**, not the fast path: the
   `#define blip_add_delta blip_add_delta_fast` in audio.c is `#ifdef __3DS__`
   only.  The linear path was implemented as decided; the kernel difference
-  will bound PSG/PCM nulls somewhere around -20..-30 dB in the top octave.
-  Decide later whether an MIT sinc path is wanted (the bl_step table is
-  LGPL data; it would have to be regenerated from a windowed sinc).
+  would bound PSG/PCM nulls somewhere around -20..-30 dB in the top octave.
+  **Decision (2026-10-24): the reference adopts the engine's resampler.**
+  `mgba_render` captures mgba's raw DAC stream through
+  `mAVStream.postAudioFrame` (one int16 pair per 65536 Hz sample) and
+  resamples it with `plugin/m4a_blip.c` using the same clock (16777216),
+  frame (2048 cycles) and rate the engine uses, so both sides go through
+  one bit-exact resampler and the harness measures only the GBA-side
+  model.  A `--native-resampler` flag keeps mgba's own sinc output for
+  listening checks.  This changes what a reference is, so the committed
+  micro refs and the cached corpus refs are regenerated once with
+  `--update-refs` (the ROM is unchanged; record it as a reference-definition
+  change in the status section).  The bl_step table itself stays out of the
+  tree (LGPL data).
 - mgba's GBA-style noise is **point-sampled** (`ch4.sample << 3`), not
   coalesced; squares/wave/noise are unipolar 0..15 x 8 x (1 + NR50 volume),
   >> 2 (SOUNDCNT_H volume 2), PCM is int8 << 2, then bias 0x200, clamp
