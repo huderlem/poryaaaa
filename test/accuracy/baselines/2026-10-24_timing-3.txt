@@ -1,0 +1,46 @@
+ROM: /home/huderlem/m4a_plugin/build/accuracy/rom/accuracy_test.gba
+mgba: mGBA 0.10.5+m4a_blip
+references: /home/huderlem/m4a_plugin/build/accuracy/refs/7b2e822f7a23-mGBA_0.10.5+m4a_blip
+
+test                lag ms  gain dB |    null worst1s | gm null gm wrst |    ref   test |   drift | gate -40
+------------------------------------------------------------------------------------------------------------
+sq1                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -16.8  -16.8 |       - | PASS
+sq1_env                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.3  -18.3 |       - | PASS
+sq1_sweep              0.0      0.0 |    -inf    -inf |    -inf    -inf |  -17.0  -17.0 |       - | PASS
+sq1_alt                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -16.8  -16.8 |       - | PASS
+sq2                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.1  -18.1 |       - | PASS
+sq2_alt                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.1  -18.1 |       - | PASS
+wave                   0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.8  -19.8 |       - | PASS
+wave_alt               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.8  -19.8 |       - | PASS
+noise                  0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.0  -20.0 |       - | PASS
+noise7                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.5  -18.5 |       - | PASS
+pcm                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.4  -21.4 |       - | PASS
+pcm_hi                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.9  -20.9 |       - | PASS
+pcm_adsr               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -29.9  -29.9 |       - | PASS
+pcm_drum               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.9  -21.9 |       - | PASS
+pcm_cmp                0.0      0.0 |   -55.0   -50.2 |   -55.0   -50.2 |  -27.1  -27.1 |       - | PASS
+pcm_reverb             0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.0  -21.0 |       - | PASS
+pcm_chord              0.0     -0.0 |   -55.7   -51.9 |   -55.7   -51.9 |  -14.2  -14.2 |       - | PASS
+pcm_bass               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -25.2  -25.2 |       - | PASS
+pan                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.5  -19.5 |       - | PASS
+vol                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -25.3  -25.3 |       - | PASS
+vel                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -26.5  -26.5 |       - | PASS
+bend                   0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.2  -20.2 |       - | PASS
+lfo_vib                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.1  -20.1 |       - | PASS
+lfo_trem               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.1  -20.1 |       - | PASS
+lfo_pan                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.1  -20.1 |       - | PASS
+lfo_delay              0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.0  -21.0 |       - | PASS
+lfo_psg                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -17.1  -17.1 |       - | PASS
+tune                   0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.6  -21.6 |       - | PASS
+tune_psg               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.0  -18.0 |       - | PASS
+psg_mix                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -15.2  -15.2 |       - | PASS
+pcm_psg                0.0     -0.0 |   -55.0   -49.2 |   -55.0   -49.2 |  -13.3  -13.3 |       - | PASS
+mus_littleroot         0.0     -0.0 |   -49.6   -44.2 |   -49.6   -44.2 |  -23.7  -23.7 |     0.0 | PASS
+mus_weather_groudon     0.0      0.0 |    -inf    -inf |    -inf    -inf |  -31.1  -31.1 |     0.0 | PASS
+mus_vs_wild            0.0     -0.0 |   -49.4   -40.1 |   -49.4   -40.1 |  -20.9  -20.9 |     0.0 | PASS
+mus_mt_chimney         0.0     -0.0 |   -49.6   -44.3 |   -49.6   -44.3 |  -23.5  -23.5 |     0.0 | PASS
+mus_rg_vs_trainer      0.0     -0.0 |   -49.3   -42.9 |   -49.3   -42.9 |  -19.6  -19.6 |     0.0 | PASS
+mus_vs_trainer         0.0     -0.0 |   -52.7   -45.2 |   -52.7   -45.2 |  -20.4  -20.4 |     0.0 | PASS
+mus_credits            0.0     -0.0 |   -51.3   -40.7 |   -51.3   -40.7 |  -23.0  -23.0 |     0.0 | PASS
+
+38/38 pass at -40 dB (raw null depth, full file and worst 1 s window)

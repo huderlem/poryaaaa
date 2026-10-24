@@ -625,27 +625,28 @@ SoundMainBTM, 68 to `_081DD938` (121, replaces the 264 "track start" of
 step 2, which also held the start frame's command dispatches).  At
 `_081DD938` with wait != 0: 28 to `_081DD994` when lfoSpeed != 0 and mod
 == 0 (every track after start; lfoSpeed == 0 *est.* 23), 40 when the LFO
-is delayed (lfoDelayC != 0, decremented), LFO step: 34 to `_081DD95A`, 24
-to `_081DD972` on the falling half (lfoSpeedC - 0x40 negative) or 26 on
-the rising half, then 20 when modM is unchanged, 38 when it changes with
+is delayed (lfoDelayC != 0, decremented), LFO step: 34 to `_081DD95A`, 26
+to `_081DD972` when lfoSpeedC - 0x40 is negative (lsls/asrs/b) or 24
+when it is not (the taken bpl), then 20 when modM is unchanged, 38 when it changes with
 modT 0 (PITCHG), 36 with modT 1/2 (VOLCHG).  `_081DD994` -> `_081DD998` 4;
 `_081DD998` -> `_081DD87C` 18 (next track) or -> `_081DD9A4` 10 (last);
 `_081DD9A4` -> `_081DD9BC` 22; a second tick in the same frame repeats
 from the 14.
 
 **Command dispatch** (wait == 0): `_081DD938` -> `_081DD8E0` 12; an
-explicit command byte 21 to `_081DD8EC` then 10 to `_081DD8F6` (byte <
-0xBD) or 14 (>= 0xBD, running status stored); running status (data byte
-first) 25 straight to `_081DD8F6`.  Note (>= 0xCF): 34 to ply_note.
-Other commands: 10 to `_081DD90C`, then 40 to the handler (table call),
-or a W## wait: 10 to `_081DD92E` and 26 back to `_081DD938` (89 for an
-explicit wait byte; step 2 charged 0 and had absorbed it elsewhere).
+explicit command byte 21 to `_081DD8EC` then 14 to `_081DD8F6` (byte <
+0xBD: the `bcc` is taken) or 10 (>= 0xBD, running status stored);
+running status (data byte first) 25 straight to `_081DD8F6`.  Note (>=
+0xCF): 34 to ply_note.  Other commands: 10 to `_081DD90C`, then 40 to the
+handler (table call), or a W## wait: 10 to `_081DD92E` and 26 back to
+`_081DD938` (93 for an explicit wait byte; step 2 charged 0 and had
+absorbed it elsewhere).
 Handler entry to `_081DD938` (handler, return, the flags test): tempo 91,
 keysh 89, voice 184, vol 89, pan 91, bend 91, bendr 89, lfos 69, lfodl
 81, mod 69 (value != 0) or 51 + clear_modM 58 = 109 (value 0), modt 91
 (unchanged) / 95 (changed), xcmd 61 to the sub-handler + xiecv/xiecl 49,
-goto 110 (2 + 108), patt 30 + goto 140, pend 12 + 22 = 34 (18 + 22 at
-pattern level 0, *est.* from the taken branch).  Not executed by the
+goto 110 (2 + 108), patt 30 + goto 140, pend 18 + 22 = 40 (12 + 22 at
+pattern level 0, where the `beq` skips the pop).  Not executed by the
 corpus in 5 s (*est.* 90, the median of the measured one-byte handlers):
 tune, rept, memacc, prio, endtie, fine, port, the other xcmd
 sub-commands.  ply_note exit `_081DDCEA` -> `_081DD938` 30.
@@ -660,17 +661,17 @@ table and sub-voice are read from ROM); drum (rhythm) 111 (30 + 2 + 35 +
 25 to TrkVolPitSet below for the type/wav/attack reads).  CGB channel
 test `_081DDBC4` -> `_081DDC40`: 20 when the channel is free (status 0),
 26 when it has SF_STOP; a sounding channel taken by priority *est.* 32,
-by equal priority and track order *est.* 40; a rejected note *est.* 34
-(priority) / 42 (track order) to `_081DDCEA`.  DirectSound scan:
+by equal priority and track order 48 (mt_chimney, one instance); a
+rejected note *est.* 34 (priority) / 42 (track order) to `_081DDCEA`.  DirectSound scan:
 `_081DDBEC` -> `_081DDBFA` 14, then per channel: free -> `_081DDC40` 14
 (scan ends); ON+STOP as the first stopping candidate 32 + 2; ON+STOP with
 a stopping candidate already 24 to `_081DDC18`; ON without STOP 20 to
 `_081DDC14`, then 10 to `_081DDC34` when a stopping candidate exists or 4
 to `_081DDC18`; `_081DDC18` -> `_081DDC24` 12 (priority >= best; strictly
 lower priority *est.* 16 straight to `_081DDC32`, never taken); `_081DDC24`
--> `_081DDC32` 16 (equal priority, later track) / 18 (equal priority,
-same track), -> `_081DDC34` 22 (equal priority, earlier track), higher
-priority *est.* 8; `_081DDC32` -> `_081DDC34` 2; `_081DDC34` -> `_081DDBFA`
+-> `_081DDC32` 18 (equal priority, later track) / 16 (equal priority,
+same track: the taken bls and the bcc that falls through), -> `_081DDC34`
+22 (equal priority, earlier track), higher priority *est.* 8; `_081DDC32` -> `_081DDC34` 2; `_081DDC34` -> `_081DDBFA`
 12 (next), -> `_081DDC40` 12 (candidate chosen after the last channel),
 *est.* 14 to `_081DDCEA` with none.  Channel setup: `_081DDC40` ->
 ClearChain 12, 33 to RealClearChain, RealClearChain -> `_081DDC54` by the
@@ -682,12 +683,13 @@ with prev 0/next 0 68, prev 0/next set 64, prev set/next 0 70, both set
 `_081DDC66` -> TrkVolPitSet 14; TrkVolPitSet -> ChnVolSetAsm 100 + 82
 with VOLSET (+4 when modT == 1) + 50 with PITSET (-2 when modT != 0) + 25
 for a keysplit/drum voice; ChnVolSetAsm -> `_081DDCA0` 78; CGB: 28 to
-`_081DDCBC` (*est.* +16 for a drum/keysplit CGB voice, length and sweep
+`_081DDCBC` (32 with a real sweep value, pan bit clear and time bits set:
+sq1_sweep; *est.* +16 for a drum/keysplit CGB voice, length and sweep
 from ROM), 30 to MidiKeyToCgbFreq, 190 to `_081DDCDC` (noise 98);
 DirectSound: 12 to `_081DDCCE`, 20 to MidiKeyToFreq, 235 to `_081DDCDC`;
 `_081DDCDC` -> `_081DDCEA` 14.  A note on a free DirectSound channel 0
-with a plain voice and no flags therefore costs 81 + 114 + 26 + 40 + 14 +
-14 + 12 + 33 + 44 + 18 + 14 + 100 + 78 + 12 + 20 + 235 + 14 + 30 = 899
+with a plain voice and no flags therefore costs 77 + 114 + 26 + 40 + 14 +
+14 + 12 + 33 + 44 + 18 + 14 + 100 + 78 + 12 + 20 + 235 + 14 + 30 = 895
 from `_081DD938` back to `_081DD938`.
 
 **VOLCHG/PITCHG pass**, a flagged existing track: `_081DD9C8` ->
@@ -714,6 +716,82 @@ the SoundMain-stamped writes of step 2.
 **m4aSoundMain's other work**: the CgbSound entry also moves with
 `SoundMainBTM`'s 68 only on a track's start tick, nothing else in the
 frame varies with song state before CgbSound.
+
+**Inside CgbSound** (compiled C: breakpoints on addresses read from the
+disassembly, appended to the nm listing as `CgbSound_*`; per-pass table
+`tools/probe_cgb.py`, segment table `probe_cgb.py --segments`, over the
+corpus for 1200 frames and the PSG micro-tests).  The cursor model of
+`m4a_channel.c` is these segments (`CGB_CYC_*`), named after the labels;
+cycles between consecutive breakpoints / writes:
+- CgbSound -> channel-1 loop head 53 (51 when c15 was 0 and reloads 14);
+  an inactive channel: loop head -> next 28 -> next loop head 16 (44);
+  after channel 4: next -> SoundMainRAM 99 / 95.
+- Active pass: loop -> active 26; the register switch active -> step2 69
+  (square 1), 61 (square 2), 75 (wave), 69 (noise); step2 -> start 24 or
+  -> nostart 30.
+- Start block: start -> CgbModVol 44; CgbModVol -> first write: NR10 135,
+  NR21 131, NR30 147 (= 0x40, before a wave RAM upload) / 153 (= 0, no
+  upload), NR41 141, each + **CgbPan's path**: right >= left and not hard
+  right 0, hard right (right/2 >= left) +4, left > right and not hard left
+  +6, hard left +10 (the four branches of the comparison; CgbModVol's
+  other arithmetic is constant).  NR10 -> NR11 10; NR30 -> WAVE 26, WAVE
+  -> WAVE 15, WAVE -> NR30 6, NR30 -> NR31 4; NR41 -> NR43 8.  Last start
+  write -> envelope_step_complete: attack != 0: 70 (square) / 62 (wave,
+  noise); attack 0 -> envelope_decay_start +40; decay 0 too ->
+  envelope_sustain_start +76 (sq1: 146 + 18 + 10 + 28 = the 202 of step 2).
+- nostart -> envelope_step_repeat 38 (46 when SF_STOP is set with the
+  envelope already in release); SF_STOP with an envelope phase (release
+  start): -> envelope_step_complete 84 (wave 78) when release != 0, else
+  the pseudo-echo start: -> envelope_complete 114 with an echo, -> 
+  oscillator_off 94 without; SF_IEC: -> envelope_complete 42, -> 
+  oscillator_off 40 when the length expires.
+- The step (envelopeCounter 0): step -> modvol 18 (wave 20, it sets MO_VOL
+  first) -> CgbModVol 10; CgbModVol -> envelope_step_complete, + the pan
+  class: sustain 147, release 155, attack 173, decay 179, attack -> decay
+  211, decay -> sustain 219 (wave 213), decay reaching a sustain of 0 ->
+  oscillator_off 211 (echo *est.* 237), release ending -> pseudo-echo
+  start -> envelope_complete 191 / oscillator_off 165; counter != 0: 12.
+  envelope_step_complete -> envelope_complete 18, or -> the step again 24
+  (prevC15 == 0).
+- envelope_complete -> pitch block 10 (NRx3 28 later, +40 TONEDATA_TYPE_FIX,
+  noise NR43 32; NRx3 -> NRx4 32, noise 24; NRx4 -> volume block 12 or ->
+  channel_complete 18) / -> volume block 26 / -> channel_complete 32;
+  volume block: NR51 21, NR51 -> NRx2 28 (wave NR32 32), NRx2 -> NRx4 10,
+  wave NR32 -> NR30 = 0x80 16 -> NR34 6 -> channel_complete 18 (NR32 ->
+  channel_complete 20 without the retrigger); NRx4 -> channel_complete 24
+  (square 1: the sweep-direction test, bit set), 12 (square 2 / noise);
+  square 1 with NR10 bit 3 clear writes NR14 again (*est.* 10, then 18).
+- oscillator_off -> CgbOscOff 14; CgbOscOff -> NR12 37 (-> NR14 14), NR22
+  37 (-> NR24 6), NR30 51, NR42 45 (-> NR44 6); -> channel_complete 22;
+  channel_complete -> next 4 -> next loop head 16.
+- MidiKeyToCgbFreq: 190 (square / wave) in ply_note and 200 in the pitch
+  pass, **180 with a key at or below 35** (the `key = 0` branch; groudon's
+  low wave notes); noise 98, **94 when the key is clamped** (key > 80; key
+  <= 20 *est.* the same).  ply_note with a real sweep value (pan bit clear,
+  time bits set): `_081DDCA0` -> `_081DDCBC` 32 instead of 28.
+
+**The FIFO refill DMA.**  The two sound FIFOs are refilled by DMA 1 / DMA 2
+with four words each at the same timer-0 overflow, once every 16 samples
+= 20064 cycles; the eight FIFO writes sit at frame cycle 15092..15106
+(relative to VBlank line 160; the previous refill is at -4973, the next at
+35155) and stall the CPU for **18 cycles**: every segment of MPlayMain or
+CgbSound that spans 15091 measured 18 long (ply_vol 58, keysh 107, xiecv
+67, MidiKeyToCgbFreq 208, TrkVolPitSet 125/207/257 ...), nowhere else.
+`m4a_gba_fifo_dma_stall` charges it in both models from the engine's own
+refill schedule (`fifoDmaCycle` + k x 16 timer periods).
+
+**Corrections to the step-3 numbers above found by the comparison tools**
+(each verified by the write-cycle diff going to 0 on the test named):
+`_081DD8EC` -> `_081DD8F6` is 14 for a byte below 0xBD and 10 at or above
+(the taken `bcc`; sq1 start frame); an explicit W## costs 93 (sq1); the
+LFO half costs 26 for a negative lfoSpeedC - 0x40 and 24 otherwise
+(mt_chimney, lfo_*); the scan's equal-priority compare costs 16 for the
+same track and 18 for a later one (pcm_psg chord); pend is 40 with a
+pattern level and 34 at level 0 (vs_trainer / vs_wild); endtie 95 with a
+key byte, 89 without (rg_vs_trainer, one each); a CGB channel taken by
+track order at equal priority 48 (mt_chimney, one instance); the pitch
+pass's TrkVolPitSet keeps the full 50 for PITSET with modT != 0 (the -2 is
+ply_note's only); `_081DDA52` -> `_081DD9E6` 12.
 
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
@@ -1054,7 +1132,129 @@ loopStart >= size is disabled by the loader where the GBA would never end
 look-ahead past the last block decode zeros where the GBA reads unrelated
 memory.
 
-### Next: the songs -- timing model step 3 (handoff, 2026-10-24)
+### Done: timing model step 3, the songs (2026-10-24)
+
+**38/38 pass at -40 dB** (mixer baseline: 31/38); `compare_reports.py
+baselines/2026-10-24_mixer.json baselines/2026-10-24_timing-3.json`: 0
+regressions, 8 improvements, every -inf still -inf.  **mus_weather_groudon
+is bit-exact over its 20 s (-inf)** and lfo_psg too; the six other songs
+sit at -49 .. -53 dB, the mgba scheduler-lateness floor of the PCM mix
+(item 1c), with their PSG writes landing on mgba's cycle.
+
+Per-test null, before (mixer) / after (timing 3): every micro-test that
+was -inf is -inf; pcm_cmp -55.0 / -55.0; pcm_chord -55.7 / -55.7; lfo_psg
+-59.9 / **-inf**; pcm_psg -55.0 / -55.0; mus_littleroot -27.4 / -49.6
+(worst 1 s -22.4 / -44.2); mus_weather_groudon -5.0 / **-inf**; mus_vs_wild
+-19.7 / -49.4 (-12.0 / -40.1); mus_mt_chimney -7.4 / -49.6 (-2.8 / -44.3);
+mus_rg_vs_trainer -8.3 / -49.3 (-2.9 / -42.9); mus_vs_trainer -26.9 /
+-52.7 (-16.2 / -45.2); mus_credits -18.6 / -51.3 (-12.9 / -40.7).
+`poryaaaa_unit_tests` 1032/1032 (14 new: the sq1 probe's CgbSound entry on
+frames 3..52, the FIFO stall arithmetic, the inactive-channel skeleton),
+`poryaaaa_blip_tests` 49112/0, `poryaaaa_song_tests` 561/561; `--input midi`
+still renders.
+
+**Write-cycle residual** (engine minus mgba, every PSG write of the 1200
+frames the probe ran, `probe_diff.py` with threshold 0), before / after:
+littleroot start frame -1051, note frames -460..+320, envelope writes
+-188 and +101 / **0 on all 1178 writes**; groudon -12 start, -12..-88
+steady / **0 on 2815**; mt_chimney, vs_wild, vs_trainer, rg_vs_trainer
+(not measured before) / **0 on 4237, 1118, 927 and 4262**; psg_mix <= 29
+/ 0; lfo_psg <= 4 / 0; pcm_psg -18 / 0; tune_psg 1 (unchanged; one write,
+the DAC-slot rounding of a pitch update).  The modeled CgbSound entry
+matches the probe's on every frame of all six songs (`track_diff.py`:
+0 divergences) and every ply_* handler entry lands on its breakpoint
+(`cmd_diff.py`).
+
+The work, in order (one build and harness per step; commits on
+`accuracy-harness` after 4332497):
+
+1. **The probe inside MPlayMain** (75ce797): breakpoints on the local
+   labels from the ELF's nm listing, registers and the deciding memory
+   bytes at each, `probe_mplay.py`; the numbers of the probe section above.
+2. **The sequencer charged segment by segment** (`m4a_sequencer.c`,
+   `M4A_CYC_*`): the aggregates of step 2 (tick base, per-track, note 924 /
+   832 / 810 + 130 x scan, apply 376, start 264, LFO 120) are replaced by
+   MPlayMain's control flow with the measured cost of every segment:
+   the frame skeleton (BGM player last of six, 566 / 150 / 370), both loops
+   over the player's 10 tracks (not the song's), the chain walk with the
+   gate paths and RealClearChain's four link cases (`chainOwner` /
+   `chanSeq` reproduce the chain's membership and order, including the
+   neighbours changing as dead channels drop out), the START init, the
+   wait / LFO path, the dispatch (explicit byte vs running status, below /
+   above 0xBD), each handler, ply_note's byte parsing, voice resolution
+   (plain / keysplit / rhythm, ROM sub-voice reads), the CGB channel test,
+   the DirectSound scan replicated channel by channel, the unlink with the
+   chain-empty store, TrkVolPitSet by flags and modT, ChnVolSetAsm, the
+   frequency routines by channel and key, and the VOLCHG/PITCHG pass per
+   track and per chained channel.  Harness after this step alone: 32/38,
+   credits -51, vs_trainer -47, mt_chimney -21.5; littleroot regressed to
+   -25.6 (worst second -12.5) because the exact entry exposed the driver's
+   multi-channel write offsets, which the old overcharged entry had been
+   compensating -- the step below.
+3. **The CgbSound driver charged segment by segment** (`m4a_channel.c`,
+   `CGB_CYC_*`): the per-write offsets measured on single-channel
+   micro-tests (prologue 120, inactive 41, 207 / 380 / 416 ...) are
+   replaced by the pass structure in the probe section: loop head,
+   switch, start / nostart, the step with CgbModVol's pan class, the
+   transitions, the double step, the pitch and volume blocks, CgbOscOff,
+   and the channel's exit, so a channel's writes follow the channels
+   before it exactly.  The engine's channel loop starts at the loop head
+   (53 / 51) and an inactive channel costs 44.  Harness: 35/38, littleroot
+   -49.6, groudon -40.2.
+4. **The FIFO DMA stall** in both models (18 cycles when a charged span
+   crosses a refill), and the corrections the three comparison tools
+   found (the probe section's last paragraph: the dispatch byte costs,
+   the LFO halves, the scan compare, pend, endtie, the CGB takeover, the
+   low-key and clamped-key frequency paths, NR34 after a retrigger, the
+   apply pass's PITSET and next-channel step).  Each was a one-constant
+   change verified by the diff tools before the harness; none moved a
+   bit-exact test.  Harness: 36/38 after the frequency-key paths (groudon
+   -inf), 38/38 after the wave retrigger tail (rg_vs_trainer -49.3,
+   mt_chimney -49.6).
+
+Tools added (`test/accuracy/tools/`): `probe_mplay.py` (MPlayMain
+segments keyed on state), `probe_cgb.py` (CgbSound passes and segments),
+`entry_diff.py` / `cmd_diff.py` / `track_diff.py` (the engine's
+`--seq-log` -- per frame the CgbSound entry, per command the handler entry,
+per track the `_081DD998` position -- against the probe), and
+`poryaaaa_render --seq-log`.  The accuracy-harness skill documents them.
+
+What the model still estimates (paths the corpus never takes; each marked
+*est.* in the headers): a ply_note rejected by priority or taking a CGB
+channel from a lower priority, a note with no free DirectSound channel, a
+scan step meeting a strictly lower or higher priority, a gate-extension
+note byte, a keysplit sub-voice that is itself split, the CGB start of a
+keysplit/drum voice (+16 for its ROM reads), the decay -> pseudo-echo
+start with an echo (237), square 1's second NR14 write with an upward
+sweep, a dead channel met in the pitch pass, `lfoSpeed == 0` in the wait
+path, pattern level 0 on pend, the START | STOP oscillator-off, and the
+unmeasured one-byte handlers (tune, rept, memacc, prio, fine, port at
+90).  A future song that uses one of them will show up in cmd_diff /
+track_diff as a constant offset on that command.  Not modeled: the
+scheduler lateness of the PCM mix (1c, -50 dB floor), the DMA stall's
+instruction-boundary alignment (mgba's first FIFO write varies 15091..
+15096 with the instruction in flight; the model charges at 15091), and
+the one-cycle DAC rounding tune_psg shows on a pitch update.
+
+### Next: milestone 4, cries and SE (handoff, 2026-10-24)
+
+Timing model step 3 is done (section above): 38/38, the songs at the PCM
+scheduler-lateness floor and groudon bit-exact.  The song work did not
+stall, so milestone 4 follows: cries and sound effects in the test ROM and
+corpus.  The ROM and `mgba_render` already accept `--type cry --id N` and
+SE song ids (`test/accuracy/rom/main.c`, `ACC_TYPE_CRY`); `songs.json`
+entries are vanilla songs only; the runner (`tools/accuracy.py`) needs a
+test entry type for a cry (`StartCry` with pan / volume / pitch) and for
+an SE (an `m4aSongNumStart` of an SE id on the SE players, whose
+MPlayMain chain position and track counts differ from the BGM player's:
+the frame skeleton constants `M4A_CYC_MP_BGM_ENTRY` 566 and the 10-track
+loops are the BGM player's; the probe's MPlayMain entries at +291 / +346 /
+... give the others).  Before any change the harness must reproduce
+`baselines/2026-10-24_timing-3.json` (38/38; 0 regressions, 0
+improvements) and `poryaaaa_unit_tests` 1032/1032, `poryaaaa_blip_tests`,
+`poryaaaa_song_tests build/accuracy/rom` must pass.
+
+### The songs -- timing model step 3 (handoff as given, 2026-10-24; done above)
 
 Start from the tip of `accuracy-harness` (6757b80: the mixer review fixes,
 the refreshed mixer baseline and the two skills).  Before any change the

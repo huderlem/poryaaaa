@@ -142,8 +142,34 @@ gcc -O1 -o build/probe/mgba_probe test/accuracy/ref/mgba_probe.c \
     $HOME/mgba/build/libmgba-static.a -lz -lpng -lm -lpthread -lrt -ldl \
     /usr/lib/x86_64-linux-gnu/libEGL.so /usr/lib/x86_64-linux-gnu/libGL.so
 ```
+**Symbols**: pass the ELF's `nm` listing, not the map, so the probe also
+breaks on the local labels inside MPlayMain / ply_note (`_081DD*`) and on
+the `CgbSound_*` addresses appended for the compiled CgbSound:
+```sh
+arm-none-eabi-nm test/accuracy/rom/build/accuracy_test.elf > build/probe/syms.nm
+cat >> build/probe/syms.nm <<'EOF2'
+08001020 t CgbSound_loop
+08001036 t CgbSound_active
+080010b0 t CgbSound_step2
+080010c8 t CgbSound_start
+080011a6 t CgbSound_nostart
+080011ca t CgbSound_oscoff
+08001218 t CgbSound_step
+0800122c t CgbSound_modvol
+0800130c t CgbSound_stepdone
+0800131e t CgbSound_envdone
+08001328 t CgbSound_pit
+080013a0 t CgbSound_vol
+0800141c t CgbSound_done
+08001420 t CgbSound_next
+EOF2
+```
+(addresses of the 2026-10-24 ROM; re-derive from `arm-none-eabi-objdump -d`
+of CgbSound if m4a.c or the toolchain changes -- the header of mgba_probe.c
+names each one).  The map still works for the function entries alone.
+
 **Run it**: `build/probe/mgba_probe build/accuracy/rom/accuracy_test.gba
-build/probe/<name>.txt <frames> <type> <id> build/accuracy/rom/accuracy_test.map`.
+build/probe/<name>.txt <frames> <type> <id> build/probe/syms.nm`.
 Type 2 = micro-test, id = its line number (from 0) in
 `test/accuracy/rom/micro/micro.cfg`; type 0 = song, id from
 `~/pokeemerald/include/constants/songs.h` (mus_littleroot 405,
@@ -167,7 +193,8 @@ build/poryaaaa_render build/accuracy/project --song build/accuracy/rom/micro/<na
 test/accuracy/tools/probe_diff.py build/probe/<name>.txt build/probe/<name>.engine.log [max_lines] [threshold]
 ```
 (songs: `build/accuracy/rom/songs/<name>.s`, `--total-duration-seconds 1.2`
-for a 70-frame probe). `d` is engine minus mgba in cycles, per write; a
+for a 70-frame probe, 20 for a 1200-frame one; mus_weather_groudon is the
+song file for "groudon"). `d` is engine minus mgba in cycles, per write; a
 threshold of 0 lists every nonzero write. Lines marked `<<< differs` on
 registers 90/94/98/9C are only the 32-bit vs byte logging of wave RAM.
 Reading a uniform offset: the whole frame shifted = a sequencer cost
@@ -175,6 +202,33 @@ Reading a uniform offset: the whole frame shifted = a sequencer cost
 shift from one write onward within a channel = a driver offset in
 `m4a_cgb_channel_tick` (`plugin/m4a_channel.c`); later channels shifted =
 the earlier channel's duration (quiet cost, envelope pass, tail).
+
+**Where a residual comes from** (the step-3 tools; each prints the first
+divergence per frame):
+```sh
+# the sequencer: per-frame CgbSound entry, per-command and per-track positions
+build/poryaaaa_render build/accuracy/project --song build/accuracy/rom/songs/mus_<x>.s \
+    --output /tmp/x.wav --sample-rate 48000 --total-duration-seconds 20 --fadeout 0 --tail 0 \
+    --seq-log build/probe/<x>.seq.log --psg-log build/probe/<x>.engine.log
+test/accuracy/tools/entry_diff.py build/probe/<x>.txt.frames build/probe/<x>.seq.log
+test/accuracy/tools/cmd_diff.py   build/probe/<x>.txt build/probe/<x>.seq.log   # ply_* entries
+test/accuracy/tools/track_diff.py build/probe/<x>.txt build/probe/<x>.seq.log   # _081DD998 per track
+# the driver: CgbSound pass costs by path/state, and every segment inside a pass
+test/accuracy/tools/probe_cgb.py build/probe/<x>.txt [-v]
+test/accuracy/tools/probe_cgb.py --segments build/probe/*.txt
+# MPlayMain segments between the internal labels, keyed on the deciding state
+test/accuracy/tools/probe_mplay.py build/probe/*.txt [frame ...]
+```
+A frame whose entry matches but whose writes are off is the driver
+(`CGB_CYC_*` in `plugin/m4a_channel.c`); an entry that is off is the
+sequencer (`M4A_CYC_*` in `plugin/m4a_engine.h`, charged in
+`m4a_sequencer.c`), and cmd_diff / track_diff say at which command or
+track.  Compare a stale `.engine.log` against nothing: a failed render
+leaves the previous log in place (the 2026-10-24 "groudon stops at 1.2 s"
+was a wrong song name in a helper script).  The FIFO refill DMA stalls the
+CPU 18 cycles at frame cycle 15091 (and every 20064 after); both models
+charge it (`m4a_gba_fifo_dma_stall`), so a +-18 on a long frame is a
+missing or doubled stall, not a code-path cost.
 
 **Deriving a cost from the probe** (`tools/probe_costs.py build/probe/*.txt`
 tabulates it): the "CgbSound entry by frame work" table gives whole-frame
