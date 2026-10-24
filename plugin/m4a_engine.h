@@ -398,6 +398,7 @@ typedef struct M4AEngine M4AEngine;
 typedef void (*M4AFrameHook)(M4AEngine *engine, void *user);
 
 #include "m4a_reverb.h"
+#include "m4a_gba.h"
 
 /* Engine state */
 struct M4AEngine {
@@ -408,21 +409,35 @@ struct M4AEngine {
     M4ACGBChannel cgbChannels[TOTAL_CGB_CHANNELS];
     M4AReverb reverb;
 
-    float sampleRate;
-    float samplesPerTick;
-    float tickAccumulator;
+    float sampleRate;       /* host output rate */
 
-    /* DirectSound (PCM) mixing rate.  On real hardware the m4a engine mixes all
-     * PCM channels at a fixed low rate (SOUND_MODE_FREQ, 13379 Hz in pokeemerald),
-     * so high notes alias heavily -- part of the GBA's characteristic sound.
-     * PCM channels are mixed + reverbed at this rate into an intermediate signal,
-     * then linearly upsampled to sampleRate.  0 means "follow sampleRate" (clean,
-     * alias-free mixing).  Default 13379 Hz for hardware accuracy. */
+    /* DirectSound (PCM) mixing rate.  The m4a engine mixes all PCM channels at
+     * one of the sound-mode rates (SOUND_MODE_FREQ, 13379 Hz in pokeemerald:
+     * 224 samples per VBlank) into a ring buffer that timer-driven DMA feeds
+     * to the DirectSound FIFOs, so high notes alias heavily -- part of the
+     * GBA's characteristic sound.  pcmMixRate selects the rate; 0 means
+     * "follow the host rate" (the nearest whole number of samples per
+     * VBlank).  Default 13379 Hz for hardware accuracy. */
     float pcmMixRate;
-    /* Linear-interpolation state for upsampling the PCM mix to the host rate. */
-    float pcmResampleAccum;
-    int32_t pcmPrevL, pcmPrevR;
-    int32_t pcmCurL, pcmCurR;
+    int32_t pcmSamplesPerVBlank; /* samples mixed per VBlank frame */
+    int32_t pcmFreq;             /* SoundInfo.pcmFreq for that count */
+    int32_t pcmDivFreq;          /* SoundInfo.divFreq */
+    uint8_t pcmDmaPeriod;        /* VBlanks per DMA restart (PCM_DMA_BUF_SIZE / spv) */
+    int8_t pcmDmaCounter;        /* SoundInfo.pcmDmaCounter */
+
+    /* Output stage: the GBA hardware the mixed PCM and the PSG go through
+     * (timer-driven FIFOs, DAC sample grid, bias, host-rate resampler), the
+     * PCM ring buffer SoundMain writes (A = right, then B = left, each
+     * pcmRingSize samples), and the scheduler state for the driver's two
+     * per-frame interrupts.  See m4a_gba.h and the scheduler notes in
+     * m4a_engine.c. */
+    M4AGbaAudio gba;
+    int16_t *pcmRing;
+    int pcmRingSize;
+    int64_t nextVSync;           /* next m4aSoundVSync (VCOUNT 150 interrupt) */
+    int64_t nextSoundMain;       /* next m4aSoundMain (VBLANK interrupt) */
+    int bootStep;                /* progress through the boot-time register writes */
+    bool booted;                 /* m4a_engine_boot has run */
 
     uint8_t masterVolume;   /* 0-15 */
     uint8_t songMasterVolume; /* 0-127 */
@@ -511,6 +526,18 @@ struct M4AEngine {
 /* Engine lifecycle */
 void m4a_engine_init(M4AEngine *engine, float sampleRate);
 void m4a_engine_destroy(M4AEngine *engine);
+
+/* Replay the sound hardware's boot as Pokemon Emerald (and the accuracy test
+ * ROM) perform it, from reset to the first VBlank interrupt the game catches:
+ * the DMA/timer/FIFO register writes of m4aSoundInit at their measured cycle
+ * offsets, and the idle first SoundMain.  Afterwards the engine is in the
+ * steady state a game is in when it starts its first song, and the next
+ * frame's SoundMain is the first that plays.  With emitAudio the boot's
+ * output (silence, ~36 ms) is kept so a render lines up with an emulator
+ * recording from reset; without it the output is discarded.
+ * m4a_engine_process boots quietly on first use if this was not called;
+ * call it explicitly, before starting a song, to keep the boot audio. */
+void m4a_engine_boot(M4AEngine *engine, bool emitAudio);
 
 /* Set the DirectSound (PCM) mixing rate in Hz.  Pass 0 to follow the host
  * sample rate (clean, alias-free mixing); pass 13379 for GBA-accurate aliasing.

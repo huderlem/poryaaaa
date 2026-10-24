@@ -839,6 +839,10 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
 
     M4ASequencer seq;
     m4a_sequencer_init(&seq, &engine);
+    /* Replay the hardware boot with its output kept, so the render lines up
+     * with an emulator recording from reset: the song's first frame is the
+     * first SoundMain after the one the game catches on boot. */
+    m4a_engine_boot(&engine, true);
     m4a_sequencer_start(&seq, song);
 
     /* Render plan.  A fixed --total-duration-seconds renders exactly that
@@ -1461,6 +1465,9 @@ oom:
     m4a_engine_set_portamento_enabled(&engine, portamento);
     m4a_engine_set_pwm_enabled(&engine, pwm);
     m4a_engine_set_pcm_mix_rate(&engine, pcmMixRate);
+    /* Keep the boot's output so MIDI and compiled-song renders of the same
+     * material line up with each other and with an emulator recording. */
+    m4a_engine_boot(&engine, true);
 
     /* ---- Allocate output buffers ---- */
     float *outL = calloc(totalSamples, sizeof(float));

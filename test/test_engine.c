@@ -45,6 +45,23 @@ static int tests_passed = 0;
     } \
 } while(0)
 
+/* Most tests count output samples from a note-on; boot the engine first so
+ * the ~36 ms of hardware boot (m4a_engine_boot) is out of the way and the
+ * next SoundMain frame is exactly one VBlank away. */
+static void engine_init_booted(M4AEngine *e, float rate)
+{
+    m4a_engine_init(e, rate);
+    m4a_engine_boot(e, false);
+}
+
+/* Render until `frames` SoundMain frames (engine ticks) have run. */
+static void advance_frames(M4AEngine *e, int frames, float *outL, float *outR)
+{
+    int64_t target = e->nextSoundMain + (int64_t)(frames - 1) * GBA_CYCLES_PER_FRAME;
+    while (e->gba.now < target)
+        m4a_engine_process(e, outL, outR, 64);
+}
+
 /* Test umul3232H32 */
 static void test_umul3232H32(void)
 {
@@ -184,10 +201,10 @@ static void test_engine_init(void)
     printf("Testing engine init...\n");
 
     M4AEngine engine;
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
 
     ASSERT_NEAR(engine.sampleRate, 44100.0f, 0.1f, "sample rate");
-    ASSERT_NEAR(engine.samplesPerTick, 44100.0f / 59.7275f, 1.0f, "samples per tick");
+    ASSERT_EQ(engine.pcmSamplesPerVBlank, 224, "PCM samples per VBlank at 13379 Hz");
     ASSERT_EQ(engine.masterVolume, 12, "master volume");
     ASSERT_EQ(engine.songMasterVolume, MAX_SONG_VOLUME, "song master volume");
     ASSERT_EQ(engine.maxPcmChannels, 5, "max pcm channels");
@@ -207,7 +224,7 @@ static void test_basic_audio(void)
     printf("Testing basic audio generation...\n");
 
     M4AEngine engine;
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
 
     /* Create a simple WaveData (sine-ish) */
     int dataSize = 64;
@@ -240,15 +257,16 @@ static void test_basic_audio(void)
     /* Play a note */
     m4a_engine_note_on(&engine, 0, 60, 100);
 
-    /* Generate some audio */
+    /* Generate some audio: the note starts at the next frame and reaches the
+     * output through the DMA buffer, so look across a few frames. */
     float outL[1024], outR[1024];
-    m4a_engine_process(&engine, outL, outR, 1024);
-
-    /* Verify we got non-zero audio */
     float maxVal = 0;
-    for (int i = 0; i < 1024; i++) {
-        if (fabs(outL[i]) > maxVal) maxVal = fabs(outL[i]);
-        if (fabs(outR[i]) > maxVal) maxVal = fabs(outR[i]);
+    for (int k = 0; k < 4; k++) {
+        m4a_engine_process(&engine, outL, outR, 1024);
+        for (int i = 0; i < 1024; i++) {
+            if (fabs(outL[i]) > maxVal) maxVal = fabs(outL[i]);
+            if (fabs(outR[i]) > maxVal) maxVal = fabs(outR[i]);
+        }
     }
     ASSERT(maxVal > 0.001f, "audio output should be non-zero");
 
@@ -292,7 +310,7 @@ static void test_polyphony_stealing(void)
     M4AEngine engine;
 
     /* ---- Test 1: Free channel used immediately (baseline) ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
     engine.tracks[0].priority = 5;
@@ -303,7 +321,7 @@ static void test_polyphony_stealing(void)
     m4a_engine_destroy(&engine);
 
     /* ---- Test 2: Higher-priority note steals lower-priority active channel ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 1, 0);
     engine.tracks[1].priority = 7;
@@ -322,7 +340,7 @@ static void test_polyphony_stealing(void)
     m4a_engine_destroy(&engine);
 
     /* ---- Test 3: Lower-priority note cannot steal higher-priority channel ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 2, 0);
     engine.tracks[2].priority = 3;
@@ -337,7 +355,7 @@ static void test_polyphony_stealing(void)
     m4a_engine_destroy(&engine);
 
     /* ---- Test 4: Equal-priority note steals channel with higher trackIndex ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 3, 0);
     engine.tracks[3].priority = 5;
@@ -357,7 +375,7 @@ static void test_polyphony_stealing(void)
     m4a_engine_destroy(&engine);
 
     /* ---- Test 5: Equal-priority note cannot steal channel with lower trackIndex ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 5, 0);
     engine.tracks[5].priority = 5;
@@ -373,7 +391,7 @@ static void test_polyphony_stealing(void)
     m4a_engine_destroy(&engine);
 
     /* ---- Test 6: Stopping channel is always stolen regardless of priority ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
     engine.tracks[0].priority = 1;  /* very low priority */
@@ -399,7 +417,7 @@ static void test_polyphony_stealing(void)
     /* All 5 channels at priority 5, owned by tracks 1–5.
      * New note from track 7 at priority 5.
      * ch.trackIndex (1..5) < new.trackIndex (7) for all → no victim → dropped. */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 7, 0);
     engine.tracks[7].priority = 5;
@@ -458,7 +476,7 @@ static void test_poly_overflow_debug(void)
     float outL[1024], outR[1024];
 
     /* ---- PCM drop is counted and logged; no shadow start when invert off ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     engine.maxPcmChannels = 1;
     m4a_engine_program_change(&engine, 0, 0);
@@ -484,7 +502,7 @@ static void test_poly_overflow_debug(void)
     m4a_engine_destroy(&engine);
 
     /* ---- PCM steal is counted and attributed to the victim's track ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     engine.maxPcmChannels = 1;
     m4a_engine_program_change(&engine, 0, 0);
@@ -502,7 +520,7 @@ static void test_poly_overflow_debug(void)
     m4a_engine_destroy(&engine);
 
     /* ---- Tail cut: reusing a releasing channel is logged separately ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     engine.maxPcmChannels = 1;
     voices[0].release = 220;  /* slow release so the tail is still alive */
@@ -517,7 +535,7 @@ static void test_poly_overflow_debug(void)
     m4a_engine_destroy(&engine);
 
     /* ---- Invert mode: normal audio is muted, dropped note is audible ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     engine.maxPcmChannels = 1;
     m4a_engine_set_poly_debug_invert(&engine, true);
@@ -550,12 +568,16 @@ static void test_poly_overflow_debug(void)
         ASSERT_EQ(shadow->trackIndex, 1, "poly invert: shadow channel track");
         ASSERT_EQ(shadow->midiKey, 67, "poly invert: shadow channel key");
     }
-    m4a_engine_process(&engine, outL, outR, 1024);
     {
         float maxVal = 0;
-        for (int i = 0; i < 1024; i++) {
-            if (fabs(outL[i]) > maxVal) maxVal = fabs(outL[i]);
-            if (fabs(outR[i]) > maxVal) maxVal = fabs(outR[i]);
+        /* The note starts at the next frame and reaches the output after
+         * the DMA buffer latency: look across a few frames. */
+        for (int k = 0; k < 4; k++) {
+            m4a_engine_process(&engine, outL, outR, 1024);
+            for (int i = 0; i < 1024; i++) {
+                if (fabs(outL[i]) > maxVal) maxVal = fabs(outL[i]);
+                if (fabs(outR[i]) > maxVal) maxVal = fabs(outR[i]);
+            }
         }
         ASSERT(maxVal > 0.001f, "poly invert: dropped note is audible");
     }
@@ -578,7 +600,7 @@ static void test_poly_overflow_debug(void)
     m4a_engine_destroy(&engine);
 
     /* ---- Invert mode: host audition notes stay audible ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     engine.maxPcmChannels = 1;
     m4a_engine_set_poly_debug_invert(&engine, true);
@@ -587,12 +609,14 @@ static void test_poly_overflow_debug(void)
     engine.auditionNote = true;
     m4a_engine_note_on(&engine, 0, 60, 100);
     ASSERT(engine.pcmChannels[0].audition, "poly invert: audition flag copied to channel");
-    m4a_engine_process(&engine, outL, outR, 1024);
     {
         float maxVal = 0;
-        for (int i = 0; i < 1024; i++) {
-            if (fabs(outL[i]) > maxVal) maxVal = fabs(outL[i]);
-            if (fabs(outR[i]) > maxVal) maxVal = fabs(outR[i]);
+        for (int k = 0; k < 4; k++) {
+            m4a_engine_process(&engine, outL, outR, 1024);
+            for (int i = 0; i < 1024; i++) {
+                if (fabs(outL[i]) > maxVal) maxVal = fabs(outL[i]);
+                if (fabs(outR[i]) > maxVal) maxVal = fabs(outR[i]);
+            }
         }
         ASSERT(maxVal > 0.001f, "poly invert: audition note is audible");
     }
@@ -603,7 +627,7 @@ static void test_poly_overflow_debug(void)
     m4a_engine_destroy(&engine);
 
     /* ---- Invert mode: a stolen note's remainder survives on a shadow channel ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     engine.maxPcmChannels = 1;
     m4a_engine_set_poly_debug_invert(&engine, true);
@@ -622,7 +646,7 @@ static void test_poly_overflow_debug(void)
     m4a_engine_destroy(&engine);
 
     /* ---- CGB: drop counted; invert plays it on the shadow CGB channel ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_set_poly_debug_invert(&engine, true);
     m4a_engine_program_change(&engine, 0, 1);  /* square 1 */
@@ -708,7 +732,7 @@ static void test_portamento(void)
     float outL[1024], outR[1024];
 
     /* ---- PCM: legato glide ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     engine.portamentoEnabled = true;
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
@@ -762,7 +786,7 @@ static void test_portamento(void)
     /* Final pitch matches a plain note at the target key */
     {
         M4AEngine ref;
-        m4a_engine_init(&ref, 44100.0f);
+        engine_init_booted(&ref, 44100.0f);
         m4a_engine_set_voicegroup(&ref, voices);
         m4a_engine_program_change(&ref, 0, 0);
         m4a_engine_note_on(&ref, 0, 67, 100);
@@ -773,7 +797,7 @@ static void test_portamento(void)
     m4a_engine_destroy(&engine);
 
     /* ---- PCM: notes with a gap do not inherit channel state ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     engine.portamentoEnabled = true;
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
@@ -787,13 +811,13 @@ static void test_portamento(void)
     m4a_engine_note_on(&engine, 0, 67, 100);
     M4APCMChannel *gapCh = find_pcm_channel(&engine, 0);
     ASSERT(gapCh != NULL, "portamento gap: new note allocated");
-    ASSERT(gapCh->status & CHN_ENV_MASK, "portamento gap: new note triggers its own envelope");
+    ASSERT(gapCh->status & CHN_START, "portamento gap: new note triggers its own envelope");
     /* But the pitch still glides from the previous note's key */
     ASSERT(engine.tracks[0].portamentoGliding, "portamento gap: pitch still glides");
     m4a_engine_destroy(&engine);
 
     /* ---- CC 5 value 0 disables portamento ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     engine.portamentoEnabled = true;
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
@@ -806,7 +830,7 @@ static void test_portamento(void)
     M4APCMChannel *offCh = find_pcm_channel(&engine, 0);
     {
         M4AEngine ref;
-        m4a_engine_init(&ref, 44100.0f);
+        engine_init_booted(&ref, 44100.0f);
         m4a_engine_set_voicegroup(&ref, voices);
         m4a_engine_program_change(&ref, 0, 0);
         m4a_engine_note_on(&ref, 0, 67, 100);
@@ -817,7 +841,7 @@ static void test_portamento(void)
     m4a_engine_destroy(&engine);
 
     /* ---- CGB: legato note inherits the shared channel slot ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     engine.portamentoEnabled = true;
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 1);  /* square 1 */
@@ -839,7 +863,7 @@ static void test_portamento(void)
     ASSERT(!engine.tracks[0].portamentoGliding, "cgb portamento: glide completes");
     {
         M4AEngine ref;
-        m4a_engine_init(&ref, 44100.0f);
+        engine_init_booted(&ref, 44100.0f);
         m4a_engine_set_voicegroup(&ref, voices);
         m4a_engine_program_change(&ref, 0, 1);
         m4a_engine_note_on(&ref, 0, 67, 100);
@@ -886,7 +910,7 @@ static void test_portamento_prev_key_tracking(void)
     float outL[1024], outR[1024];
 
     /* ---- Symptom "no glide": envelope fully decayed before CC 5 arrives ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     engine.portamentoEnabled = true;
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
@@ -911,7 +935,7 @@ static void test_portamento_prev_key_tracking(void)
 
     /* ---- Symptom "wrong frequency": notes played while portamento is off
      * must still update the glide start key ---- */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     engine.portamentoEnabled = true;
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
@@ -932,7 +956,7 @@ static void test_portamento_prev_key_tracking(void)
      * note after resume must not glide, but CC 5 (a parameter) survives ---- */
     voices[0].decay = 0;
     voices[0].sustain = 0xFF;
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     engine.portamentoEnabled = true;
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
@@ -959,7 +983,7 @@ static void test_portamento_prev_key_tracking(void)
      * only advances portamentoPrevKey when a glide actually completes. ---- */
     voices[0].decay = 0;
     voices[0].sustain = 0xFF;  /* sustained so legato inheritance works */
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     engine.portamentoEnabled = true;
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
@@ -1005,9 +1029,8 @@ static void test_pwm(void)
     float outL[1024], outR[1024];
 
     /* At 44100 Hz one VBlank tick is ~738.4 samples; 739 fires exactly one. */
-    const int SAMPLES_PER_TICK = 739;
 
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     engine.pwmEnabled = true;
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
@@ -1028,15 +1051,15 @@ static void test_pwm(void)
     ASSERT_EQ(engine.tracks[0].pwmStep, 0, "pwm: note resets pattern step");
 
     /* speed=2: duty holds for one tick, then advances each second tick. */
-    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 1 */
+    advance_frames(&engine, 1, outL, outR);  /* tick 1 */
     ASSERT_EQ(sq->dutyCycle, 0, "pwm: duty holds during speed countdown");
-    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 2 */
+    advance_frames(&engine, 1, outL, outR);  /* tick 2 */
     ASSERT_EQ(sq->dutyCycle, 1, "pwm: duty advances to step 1");
-    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 3 */
-    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 4 */
+    advance_frames(&engine, 1, outL, outR);  /* tick 3 */
+    advance_frames(&engine, 1, outL, outR);  /* tick 4 */
     ASSERT_EQ(sq->dutyCycle, 2, "pwm: duty advances to step 2");
-    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 5 */
-    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);  /* tick 6 */
+    advance_frames(&engine, 1, outL, outR);  /* tick 5 */
+    advance_frames(&engine, 1, outL, outR);  /* tick 6 */
     ASSERT_EQ(sq->dutyCycle, 0, "pwm: pattern wraps back to step 0");
 
     /* Disabling the effect (PWMS 0) restores the voice's default duty cycle. */
@@ -1046,7 +1069,7 @@ static void test_pwm(void)
 
     /* The disabled effect no longer modulates the duty. */
     for (int i = 0; i < 4; i++)
-        m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);
+        advance_frames(&engine, 1, outL, outR);
     ASSERT_EQ(sq->dutyCycle, 2, "pwm: duty stays fixed once disabled");
 
     /* An out-of-range pattern index falls back to 0 (no effect). */
@@ -1059,12 +1082,12 @@ static void test_pwm(void)
      * decays while all patterns are 0 and only the PWMS handler set it. */
     m4a_engine_cc(&engine, 0, 0x19, 2);  /* PWMS 2: speed set, effect armed */
     m4a_engine_cc(&engine, 0, 0x17, 0);  /* PWMC 0: pattern off */
-    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);
+    advance_frames(&engine, 1, outL, outR);
     ASSERT(!engine.pwmActiveFlag, "pwm: active flag decays while all patterns are 0");
     m4a_engine_cc(&engine, 0, 0x17, 2);  /* PWMC alone re-enables the effect */
     ASSERT(engine.pwmActiveFlag, "pwm: PWMC alone re-arms the active flag");
-    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);
-    m4a_engine_process(&engine, outL, outR, SAMPLES_PER_TICK);
+    advance_frames(&engine, 1, outL, outR);
+    advance_frames(&engine, 1, outL, outR);
     ASSERT_EQ(sq->dutyCycle, 1, "pwm: modulation resumes after PWMC re-arm");
 
     m4a_engine_destroy(&engine);
@@ -1103,7 +1126,7 @@ static void test_cgb_fixed_freq(void)
 
     M4AEngine engine;
     float outL[1024], outR[1024];
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
 
     /* Square-1 (cgb channel 0) and wave (cgb channel 2). */
@@ -1206,7 +1229,7 @@ static void test_sweep(void)
     M4AEngine engine;
     float outL[1024], outR[1024];
 
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     M4ACGBChannel *sq = &engine.cgbChannels[0];  /* SQUARE_1 -> cgb ch 0 */
 
@@ -1247,7 +1270,10 @@ static void test_sweep(void)
     ASSERT(sq->frequency > fu0, "sweep: frequency rose before the overflow");
     ASSERT(sq->frequency < 2048, "sweep: register never exceeds 11 bits");
     ASSERT(sq->status & CHN_ON, "sweep: software envelope keeps running while muted");
-    m4a_engine_process(&engine, outL, outR, 1024);
+    /* The output resampler's high-pass takes a few thousand samples to
+     * settle after a level step; then the muted channel must be silent. */
+    for (int i = 0; i < 8; i++)
+        m4a_engine_process(&engine, outL, outR, 1024);
     float energy = 0.0f;
     for (int i = 0; i < 1024; i++)
         energy += fabsf(outL[i]) + fabsf(outR[i]);
@@ -1331,7 +1357,7 @@ static void test_lfos_keeps_phase(void)
     printf("Testing LFOS keeps the LFO phase...\n");
 
     M4AEngine engine;
-    m4a_engine_init(&engine, 44100.0f);
+    engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_tempo_bpm(&engine, 150.0);
     m4a_engine_cc(&engine, 0, 0x15, 1);  /* LFOS */
     m4a_engine_cc(&engine, 0, 0x1, 64);  /* MOD */
@@ -1406,7 +1432,7 @@ static void test_golden_sun_synth(void)
         { M4A_SYNTH_TRIANGLE, M4A_SYNTH_SAW, M4A_SYNTH_PULSE };
     for (int v = 0; v < 3; v++) {
         M4AEngine engine;
-        m4a_engine_init(&engine, 44100.0f);
+        engine_init_booted(&engine, 44100.0f);
         m4a_engine_set_voicegroup(&engine, voices);
         m4a_engine_program_change(&engine, 0, (uint8_t)v);
         m4a_engine_cc(&engine, 0, 7, 127);
@@ -1543,7 +1569,7 @@ static void test_cgb_hw_envelope(void)
     printf("Testing CGB hardware envelope...\n");
 
     M4AEngine engine;
-    m4a_engine_init(&engine, 48000.0f);
+    engine_init_booted(&engine, 48000.0f);
 
     ToneData voices[128];
     memset(voices, 0, sizeof(voices));
@@ -1586,7 +1612,8 @@ static void test_cgb_hw_envelope(void)
     ASSERT(peakW0 > 0.01f, "hw env: goal level audible at note start");
     ASSERT(peakW1 > 0.005f, "hw env: level 1 audible after first 64 Hz step");
     ASSERT(peakW1 < peakW0 * 0.75f, "hw env: level dropped at ~15.6 ms");
-    ASSERT(peakW2 == 0.0f, "hw env: silent once the unit reaches zero (~31 ms)");
+    /* Only the output resampler's decaying high-pass tail may remain. */
+    ASSERT(peakW2 < peakW0 * 0.05f, "hw env: silent once the unit reaches zero (~31 ms)");
 
     m4a_engine_destroy(&engine);
 }
@@ -1620,7 +1647,7 @@ static void test_cgb_square_phase_continuity(void)
 
     /* Reference: one long square-1 note. */
     M4AEngine ref;
-    m4a_engine_init(&ref, 44100.0f);
+    engine_init_booted(&ref, 44100.0f);
     m4a_engine_set_voicegroup(&ref, voices);
     m4a_engine_program_change(&ref, 0, 0);
     m4a_engine_note_on(&ref, 0, 69, 100);
@@ -1628,52 +1655,61 @@ static void test_cgb_square_phase_continuity(void)
         m4a_engine_process(&ref, refL + b * BLOCK, refR + b * BLOCK, BLOCK);
 
     /* Same key retriggered back-to-back after one block, then again after a
-     * 300-sample rest.  Every rendered sample of a sounding stretch must equal
-     * the long note's sample at the same absolute position. */
+     * 300-sample rest.  The oscillator phase of every sounding stretch must
+     * equal the long note's phase at the same absolute position (a second
+     * reference engine runs in lockstep; the host-rate output itself is not
+     * compared sample for sample because the output resampler's high-pass
+     * carries history across the rest). */
+    M4AEngine refStep;
+    float stepL[BLOCK], stepR[BLOCK];
+    engine_init_booted(&refStep, 44100.0f);
+    m4a_engine_set_voicegroup(&refStep, voices);
+    m4a_engine_program_change(&refStep, 0, 0);
+    m4a_engine_note_on(&refStep, 0, 69, 100);
     M4AEngine eng;
-    m4a_engine_init(&eng, 44100.0f);
+    engine_init_booted(&eng, 44100.0f);
     m4a_engine_set_voicegroup(&eng, voices);
     m4a_engine_program_change(&eng, 0, 0);
     m4a_engine_note_on(&eng, 0, 69, 100);
     m4a_engine_process(&eng, outL, outR, BLOCK);
-    ASSERT(memcmp(outL, refL, sizeof(outL)) == 0, "sq phase: first note matches reference");
+    m4a_engine_process(&refStep, stepL, stepR, BLOCK);
+    ASSERT(memcmp(outL, stepL, sizeof(outL)) == 0, "sq phase: first note matches reference");
 
     /* Back-to-back retrigger. */
     m4a_engine_note_off(&eng, 0, 69);
     m4a_engine_note_on(&eng, 0, 69, 100);
     m4a_engine_process(&eng, outL, outR, BLOCK);
-    int mism = 0;
-    for (int i = 0; i < BLOCK; i++)
-        if (outL[i] != refL[BLOCK + i] || outR[i] != refR[BLOCK + i]) mism++;
-    ASSERT_EQ(mism, 0, "sq phase: back-to-back retrigger continues the waveform sample-exactly");
+    m4a_engine_process(&refStep, stepL, stepR, BLOCK);
+    ASSERT_EQ(eng.cgbChannels[0].phase, refStep.cgbChannels[0].phase,
+              "sq phase: back-to-back retrigger continues the waveform sample-exactly");
     /* Guard against a vacuous pass: the reference stretch is not silence. */
     float energy = 0;
-    for (int i = 0; i < BLOCK; i++) energy += fabsf(refL[BLOCK + i]);
+    for (int i = 0; i < BLOCK; i++) energy += fabsf(stepL[i]);
     ASSERT(energy > 1.0f, "sq phase: reference note is audible");
 
     /* Rest, then retrigger: the phase kept running through the silence.
      * Note-off takes effect at the next engine tick (CgbSound runs once per
      * VBlank), so render one block for it to land, then a REST of silence. */
-    int pos = 2 * BLOCK;
     m4a_engine_note_off(&eng, 0, 69);
     m4a_engine_process(&eng, outL, outR, BLOCK);
-    pos += BLOCK;
+    m4a_engine_process(&refStep, stepL, stepR, BLOCK);
     ASSERT(!(eng.cgbChannels[0].status & CHN_ON), "sq phase: note-off landed within a block");
     m4a_engine_process(&eng, outL, outR, REST);
+    m4a_engine_process(&refStep, stepL, stepR, REST);
     energy = 0;
-    for (int i = 0; i < REST; i++) energy += fabsf(outL[i]) + fabsf(outR[i]);
-    ASSERT(energy == 0.0f, "sq phase: silent during the rest");
-    pos += REST;
+    for (int i = REST / 2; i < REST; i++) energy += fabsf(outL[i]) + fabsf(outR[i]);
+    /* Only the resampler's decaying high-pass tail may remain. */
+    ASSERT(energy < 0.02f * (REST / 2), "sq phase: silent during the rest");
     m4a_engine_note_on(&eng, 0, 69, 100);
     m4a_engine_process(&eng, outL, outR, BLOCK);
-    mism = 0;
-    for (int i = 0; i < BLOCK; i++)
-        if (outL[i] != refL[pos + i] || outR[i] != refR[pos + i]) mism++;
-    ASSERT_EQ(mism, 0, "sq phase: retrigger after a rest resumes at the free-running phase");
+    m4a_engine_process(&refStep, stepL, stepR, BLOCK);
+    ASSERT_EQ(eng.cgbChannels[0].phase, refStep.cgbChannels[0].phase,
+              "sq phase: retrigger after a rest resumes at the free-running phase");
+    m4a_engine_destroy(&refStep);
 
     /* And a retrigger must not simply happen to land on phase 0: the
      * reference itself is not periodic in BLOCK samples at this key. */
-    mism = 0;
+    int mism = 0;
     for (int i = 0; i < BLOCK; i++)
         if (refL[i] != refL[BLOCK + i]) mism++;
     ASSERT(mism > 0, "sq phase: reference waveform is not BLOCK-periodic (test is not vacuous)");
@@ -1681,7 +1717,7 @@ static void test_cgb_square_phase_continuity(void)
     /* Two squares in unison: identical from engine reset, and still identical
      * after square 2 alone is released, rests, and retriggers. */
     M4AEngine duo;
-    m4a_engine_init(&duo, 44100.0f);
+    engine_init_booted(&duo, 44100.0f);
     m4a_engine_set_voicegroup(&duo, voices);
     m4a_engine_program_change(&duo, 0, 0);
     m4a_engine_program_change(&duo, 1, 1);
@@ -1732,7 +1768,7 @@ static void test_cgb_wave_phase_continuity(void)
 
     M4AEngine eng;
     float outL[64], outR[64];
-    m4a_engine_init(&eng, 44100.0f);
+    engine_init_booted(&eng, 44100.0f);
     m4a_engine_set_voicegroup(&eng, voices);
     M4ACGBChannel *ch = &eng.cgbChannels[2];
 
@@ -1960,17 +1996,18 @@ static void test_pcm_reverse(void)
 
         for (int v = 0; v < 3; v++) {
             M4AEngine engine;
-            m4a_engine_init(&engine, 44100.0f);
+            engine_init_booted(&engine, 44100.0f);
             m4a_engine_set_voicegroup(&engine, voices);
             m4a_engine_program_change(&engine, 0, (uint8_t)v);
             m4a_engine_cc(&engine, 0, 7, 127);
             m4a_engine_note_on(&engine, 0, 60, 127);
             float outL[512], outR[512];
-            m4a_engine_process(&engine, outL, outR, 512);
-            /* Compare an early and a late output of the block (the very
-             * first output precedes the channel's first mix and is 0):
-             * the ramp covers ~4096 source samples, so 512 outputs never
-             * reach the other end at any of these rates. */
+            /* Let the note start (next frame) and reach the output through
+             * the DMA buffer, then compare an early and a late output of a
+             * block: the ramp covers ~4096 source samples, so 512 outputs
+             * never reach the other end at any of these rates. */
+            for (int k = 0; k < 4; k++)
+                m4a_engine_process(&engine, outL, outR, 512);
             ASSERT(fabsf(outL[8]) > 0.01f, "reverse engine: audible");
             if (v == 0)
                 ASSERT(outL[504] > outL[8], "engine: plain sample rises with the ramp");
@@ -2022,14 +2059,14 @@ static void test_pcm_reverse_legato_inherit(void)
     for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
         M4AEngine engine;
         float outL[256], outR[256];
-        m4a_engine_init(&engine, 44100.0f);
+        engine_init_booted(&engine, 44100.0f);
         engine.portamentoEnabled = true;
         m4a_engine_set_voicegroup(&engine, voices);
         m4a_engine_cc(&engine, 0, 0x5, 2);  /* portamento on: 2-tick glide */
 
         m4a_engine_program_change(&engine, 0, cases[c].from);
         m4a_engine_note_on(&engine, 0, 60, 100);
-        m4a_engine_process(&engine, outL, outR, 32);
+        advance_frames(&engine, 1, outL, outR);  /* the note's first mixed frame */
         M4APCMChannel *first = find_pcm_channel(&engine, 0);
         ASSERT(first != NULL, "rev legato: first note has a channel");
         ASSERT(first->count < N && first->count > 0, "rev legato: first note is mid-sample");
@@ -2059,7 +2096,7 @@ static void test_pcm_reverse_legato_inherit(void)
     {
         M4AEngine engine;
         float outL[256], outR[256];
-        m4a_engine_init(&engine, 44100.0f);
+        engine_init_booted(&engine, 44100.0f);
         engine.portamentoEnabled = true;
         m4a_engine_set_voicegroup(&engine, voices);
         m4a_engine_cc(&engine, 0, 0x5, 2);
@@ -2232,7 +2269,7 @@ static void test_pcm_dpcm(void)
         voices[0].attack = 0xFF;
         voices[0].sustain = 0xFF;
         M4AEngine engine;
-        m4a_engine_init(&engine, 44100.0f);
+        engine_init_booted(&engine, 44100.0f);
         m4a_engine_set_voicegroup(&engine, voices);
         m4a_engine_program_change(&engine, 0, 0);
         m4a_engine_cc(&engine, 0, 7, 127);

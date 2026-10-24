@@ -86,6 +86,7 @@ set(ENGINE_SOURCES
     plugin/m4a_tables.c
     plugin/m4a_reverb.c
     plugin/m4a_blip.c
+    plugin/m4a_gba.c
     plugin/m4a_song.c
     plugin/m4a_sequencer.c
     plugin/voicegroup_loader.c
@@ -307,6 +308,7 @@ if(ACCURACY_MGBA_DIR)
     add_executable(poryaaaa_blip_tests
         test/test_blip.c
         plugin/m4a_blip.c
+    plugin/m4a_gba.c
         ${ACCURACY_MGBA_DIR}/src/third-party/blip_buf/blip_buf.c
     )
     target_include_directories(poryaaaa_blip_tests PRIVATE

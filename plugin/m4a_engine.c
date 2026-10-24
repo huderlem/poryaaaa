@@ -24,12 +24,19 @@ const PulseWidthModPattern gPulseWidthModPatterns[] =
 const uint8_t gNumPulseWidthModPatterns =
     sizeof(gPulseWidthModPatterns) / sizeof(gPulseWidthModPatterns[0]);
 
-/* Resolve the effective PCM mixing rate: the configured pcmMixRate, or the host
- * sample rate when pcmMixRate is 0 ("follow host"). */
-static inline float m4a_pcm_mix_rate(const M4AEngine *engine)
+/*
+ * PCM playback frequency word for a MidiKeyToFreq result: the per-sample step
+ * of the SoundMainRAM mixer (23-bit fraction) at the engine's PCM rate --
+ * MidiKeyToFreq(...) * SoundInfo.divFreq, as SoundMainRAM computes it.
+ */
+static inline uint32_t pcm_freq_word(const M4AEngine *engine, uint32_t freq)
 {
-    return engine->pcmMixRate > 0.0f ? engine->pcmMixRate : engine->sampleRate;
+    return (uint32_t)((uint64_t)freq * (uint32_t)engine->pcmDivFreq);
 }
+
+/* Fixed-frequency (TONEDATA_TYPE_FIX) voices advance exactly one source
+ * sample per mixed sample. */
+#define PCM_FIXED_FREQ_WORD 0x800000u
 
 /*
  * MidiKeyToFreq - matches m4a.c
@@ -307,20 +314,252 @@ static ToneData *resolve_voice(ToneData *voice, uint8_t key)
     return voice;
 }
 
+/*
+ * ---- Output stage and scheduler --------------------------------------------
+ *
+ * The engine runs on the GBA's CPU clock (16.78 MHz, 280896 cycles per video
+ * frame).  Two interrupt handlers do the driver's work each frame, at the
+ * cycle offsets measured in mgba 0.10.5 running the accuracy test ROM (which
+ * mirrors Emerald's interrupt layout):
+ *
+ *   VCOUNT 150 (line start + 250 cycles): m4aSoundVSync -- counts PCM DMA
+ *     frames and every pcmDmaPeriod frames restarts the FIFO DMAs at the
+ *     start of the ring buffer.
+ *   VBLANK, line 160 (line start + 197 cycles): m4aSoundMain -- MPlayMain
+ *     (the sequencer frame hook), the envelopes (SoundMainRAM / CgbSound),
+ *     then the mix of pcmSamplesPerVBlank samples into the ring slot given
+ *     by pcmDmaCounter.  The CGB register writes CgbSound makes land about
+ *     1740 cycles after the line start in a steady-state frame (the
+ *     song-start frame runs ~3000 cycles longer; not modeled).
+ *
+ * mgba's video starts a reset at line 126, so frame k >= 1 starts at
+ * 124773 + (k - 1) * 280896 cycles.  m4aSoundInit's own register writes
+ * (SoundInit, two SampleFreqSet passes that each wait for line 159) and the
+ * first interrupt the game catches (frame 2's) are replayed by
+ * m4a_engine_boot from the same measurements; see docs/ACCURACY_PLAN.md.
+ */
+#define FRAME1_START        124773
+#define VSYNC_FRAME_OFFSET  (150 * GBA_CYCLES_PER_LINE + 250)
+#define SOUNDMAIN_FRAME_OFFSET (160 * GBA_CYCLES_PER_LINE + 197)
+#define FIRST_IRQ_FRAME     2
+/* The frame boot ends in: right after its SoundMain. */
+#define BOOT_END_CYCLE      (FRAME1_START + (FIRST_IRQ_FRAME - 1) * GBA_CYCLES_PER_FRAME \
+                             + SOUNDMAIN_FRAME_OFFSET)
+
+enum {
+    BOOT_FIFO_RESET,     /* SoundInit: SOUNDCNT_H with both FIFO reset bits */
+    BOOT_SOUNDBIAS,      /* SoundInit: SOUNDBIAS_H = 0x40 (65536 Hz DAC) */
+    BOOT_DMA_ON,         /* m4aSoundVSyncOn from SoundInit's SampleFreqSet */
+    BOOT_TIMER_ON,       /* SampleFreqSet, after waiting for VCOUNT 159 */
+    BOOT_DMA_OFF,        /* m4aSoundMode -> m4aSoundVSyncOff */
+    BOOT_TIMER_OFF,      /* m4aSoundMode -> SampleFreqSet */
+    BOOT_DMA_ON_2,
+    BOOT_TIMER_ON_2,     /* second VCOUNT 159 wait, frame 1 */
+    BOOT_DONE
+};
+static const struct { int64_t cycle; int action; } sBootTable[] = {
+    { 5737,   BOOT_FIFO_RESET },
+    { 5750,   BOOT_SOUNDBIAS },
+    { 15873,  BOOT_DMA_ON },
+    { 39794,  BOOT_TIMER_ON },
+    { 41238,  BOOT_DMA_OFF },
+    { 47452,  BOOT_TIMER_OFF },
+    { 47893,  BOOT_DMA_ON_2 },
+    { 320682, BOOT_TIMER_ON_2 },
+};
+#define BOOT_TABLE_LEN ((int)(sizeof(sBootTable) / sizeof(sBootTable[0])))
+
+static int64_t frame_start(int frame)
+{
+    return FRAME1_START + (int64_t)(frame - 1) * GBA_CYCLES_PER_FRAME;
+}
+
+/* SampleFreqSet's per-rate numbers for the configured mix rate, and the ring
+ * buffer that goes with them.  Rates from gPcmSamplesPerVBlankTable give the
+ * game's exact figures (13379 Hz -> 224 samples, timer period 1254 cycles,
+ * 7 VBlanks per DMA buffer); any other rate is rounded to a whole number of
+ * samples per VBlank. */
+static void pcm_rate_setup(M4AEngine *engine)
+{
+    float rate = engine->pcmMixRate > 0.0f ? engine->pcmMixRate : engine->sampleRate;
+    int spv = (int)(rate / VBLANK_RATE + 0.5f);
+    if (spv < 16) spv = 16;
+    if (spv > 8192) spv = 8192;
+    engine->pcmSamplesPerVBlank = spv;
+    engine->pcmFreq = (597275 * spv + 5000) / 10000;
+    engine->pcmDivFreq = (16777216 / engine->pcmFreq + 1) >> 1;
+    int period = GBA_PCM_DMA_BUF_SIZE / spv;
+    if (period < 1) period = 1;
+    engine->pcmDmaPeriod = (uint8_t)period;
+    engine->pcmDmaCounter = 0;
+
+    int ringSize = GBA_PCM_DMA_BUF_SIZE;
+    if (period * spv + 16 > ringSize)
+        ringSize = period * spv + 16;
+    free(engine->pcmRing);
+    engine->pcmRing = (int16_t *)calloc((size_t)ringSize * 2, sizeof(int16_t));
+    engine->pcmRingSize = ringSize;
+}
+
+static void scheduler_reset(M4AEngine *engine)
+{
+    engine->bootStep = 0;
+    engine->booted = false;
+    engine->nextVSync = frame_start(FIRST_IRQ_FRAME) + VSYNC_FRAME_OFFSET;
+    engine->nextSoundMain = frame_start(FIRST_IRQ_FRAME) + SOUNDMAIN_FRAME_OFFSET;
+}
+
+static void boot_action(M4AEngine *engine, int action)
+{
+    M4AGbaAudio *g = &engine->gba;
+    switch (action) {
+    case BOOT_FIFO_RESET: m4a_gba_fifo_reset(g); break;
+    case BOOT_SOUNDBIAS:  m4a_gba_write_soundbias_resolution(g, 1); break;
+    case BOOT_DMA_ON:
+    case BOOT_DMA_ON_2:   m4a_gba_dma_enable(g); break;
+    case BOOT_DMA_OFF:    m4a_gba_dma_disable(g); break;
+    case BOOT_TIMER_ON:
+    case BOOT_TIMER_ON_2: m4a_gba_timer_enable(g); break;
+    case BOOT_TIMER_OFF:  m4a_gba_timer_disable(g); break;
+    default: break;
+    }
+}
+
+/* m4aSoundVSync (m4a_1.s): every pcmDmaPeriod VBlanks, restart the FIFO DMAs
+ * so they read from the start of the ring buffer again.  The disable/enable
+ * pair reloads the DMA source address; the FIFO contents are untouched. */
+static void sound_vsync(M4AEngine *engine)
+{
+    engine->pcmDmaCounter--;
+    if (engine->pcmDmaCounter > 0)
+        return;
+    engine->pcmDmaCounter = (int8_t)engine->pcmDmaPeriod;
+    m4a_gba_dma_disable(&engine->gba);
+    m4a_gba_dma_enable(&engine->gba);
+}
+
+/* SoundMainRAM's frame: mix pcmSamplesPerVBlank samples of every PCM channel
+ * (plus reverb) into the ring slot SoundMain selects from pcmDmaCounter.
+ * In the polyphony-overflow debug mode the shadow pool is heard instead of
+ * the real channels, which still render (into a discarded sum) so their
+ * positions advance exactly as in normal playback. */
+static void mix_pcm_frame(M4AEngine *engine)
+{
+    int spv = engine->pcmSamplesPerVBlank;
+    int counter = engine->pcmDmaCounter;
+    int offset = 0;
+    if (counter - 1 > 0)
+        offset = (engine->pcmDmaPeriod - (counter - 1)) * spv;
+    if (offset + spv > engine->pcmRingSize)
+        offset = 0;
+    int16_t *ringA = engine->pcmRing + offset;                        /* right */
+    int16_t *ringB = engine->pcmRing + engine->pcmRingSize + offset;  /* left */
+    bool invert = engine->polyDebugInvert;
+
+    for (int i = 0; i < spv; i++) {
+        int32_t pcmL = 0, pcmR = 0;
+        int32_t mutedL = 0, mutedR = 0;
+        for (int ch = 0; ch < TOTAL_PCM_CHANNELS; ch++) {
+            M4APCMChannel *c = &engine->pcmChannels[ch];
+            if (!(c->status & CHN_ON))
+                continue;
+            /* Real-pool audition notes stay audible in invert mode so the
+             * user can play against the lost sounds. */
+            bool audible = ((ch >= MAX_PCM_CHANNELS) == invert)
+                        || (ch < MAX_PCM_CHANNELS && c->audition);
+            m4a_pcm_channel_render(c, audible ? &pcmL : &mutedL, audible ? &pcmR : &mutedR);
+        }
+        /* Reverb is a DirectSound-buffer effect: it runs at the PCM mix rate,
+         * before the FIFO and before the PSG is added. */
+        m4a_reverb_process(&engine->reverb, &pcmL, &pcmR);
+        if (pcmL > 32767) pcmL = 32767; else if (pcmL < -32768) pcmL = -32768;
+        if (pcmR > 32767) pcmR = 32767; else if (pcmR < -32768) pcmR = -32768;
+        ringA[i] = (int16_t)pcmR;
+        ringB[i] = (int16_t)pcmL;
+    }
+}
+
+/* m4aSoundMain: the VBlank frame. */
+static void sound_main(M4AEngine *engine)
+{
+    m4a_engine_tick(engine);
+    mix_pcm_frame(engine);
+}
+
+/* PSG level at one DAC slot, in mgba's PSG units before the SOUNDCNT_H
+ * shift: the CGB oscillators stepped on the 65536 Hz sample grid. */
+static void psg_sample_cb(void *user, int64_t timestamp, int *left, int *right)
+{
+    M4AEngine *engine = (M4AEngine *)user;
+    (void)timestamp;
+    bool invert = engine->polyDebugInvert;
+    int32_t mixL = 0, mixR = 0, mutedL = 0, mutedR = 0;
+    float rate = (float)GBA_CPU_HZ / (float)engine->gba.sampleInterval;
+    for (int ch = 0; ch < TOTAL_CGB_CHANNELS; ch++) {
+        bool audible = ((ch >= MAX_CGB_CHANNELS) == invert)
+                    || (ch < MAX_CGB_CHANNELS && engine->cgbChannels[ch].audition);
+        m4a_cgb_channel_render(&engine->cgbChannels[ch],
+                               audible ? &mixL : &mutedL,
+                               audible ? &mixR : &mutedR, rate);
+    }
+    /* The oscillators produce +-2 * volume in the mixer's int8 units; the
+     * PSG bus is 16 of those per unit before the >> 2. */
+    *left = mixL * 16;
+    *right = mixR * 16;
+}
+
+/* Advance the whole machine to `until` cycles, running hardware events and
+ * the driver's interrupts in time order (hardware first on a tie, as a CPU
+ * write at a cycle lands after the events scheduled for it). */
+static void run_until(M4AEngine *engine, int64_t until)
+{
+    M4AGbaAudio *g = &engine->gba;
+    for (;;) {
+        int64_t next = engine->nextVSync < engine->nextSoundMain ? engine->nextVSync
+                                                                 : engine->nextSoundMain;
+        if (engine->bootStep < BOOT_TABLE_LEN && sBootTable[engine->bootStep].cycle < next)
+            next = sBootTable[engine->bootStep].cycle;
+        if (next > until) {
+            m4a_gba_run(g, until);
+            return;
+        }
+        m4a_gba_run(g, next);
+        if (engine->bootStep < BOOT_TABLE_LEN && sBootTable[engine->bootStep].cycle == next) {
+            boot_action(engine, sBootTable[engine->bootStep].action);
+            engine->bootStep++;
+        }
+        if (engine->nextVSync == next) {
+            sound_vsync(engine);
+            engine->nextVSync += GBA_CYCLES_PER_FRAME;
+        }
+        if (engine->nextSoundMain == next) {
+            sound_main(engine);
+            engine->nextSoundMain += GBA_CYCLES_PER_FRAME;
+        }
+    }
+}
+
+void m4a_engine_boot(M4AEngine *engine, bool emitAudio)
+{
+    if (engine->booted)
+        return;
+    engine->gba.psgSample = psg_sample_cb;
+    engine->gba.psgUser = engine;
+    run_until(engine, BOOT_END_CYCLE);
+    if (!emitAudio)
+        m4a_gba_discard(&engine->gba);
+    engine->booted = true;
+}
+
 /* Initialize engine */
 void m4a_engine_init(M4AEngine *engine, float sampleRate)
 {
     memset(engine, 0, sizeof(M4AEngine));
 
     engine->sampleRate = sampleRate;
-    engine->samplesPerTick = sampleRate / VBLANK_RATE;
-    engine->tickAccumulator = 0.0f;
     /* Default to the GBA's hardware DirectSound mix rate so high notes alias
      * the way they do in-game.  Set to 0 (follow host rate) for clean mixing. */
     engine->pcmMixRate = 13379.0f;
-    engine->pcmResampleAccum = 0.0f;
-    engine->pcmPrevL = engine->pcmPrevR = 0;
-    engine->pcmCurL = engine->pcmCurR = 0;
     /* 12 matches Pokemon Emerald's m4aSoundInit (12 << SOUND_MODE_MASVOL_SHIFT).
      * masterVolume scales only the PCM path -- CGB channels bypass it -- so a
      * higher value makes DirectSound too loud relative to PSG. */
@@ -374,14 +613,21 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
         engine->cgbChannels[i + 3].panMask = 0x88;
     }
 
-    /* Initialize reverb at the PCM mix rate (the GBA reverb is a DirectSound
-     * buffer effect that runs at the mixing rate, one VBlank frame of delay). */
-    m4a_reverb_init(&engine->reverb, m4a_pcm_mix_rate(engine), 0);
+    /* Output stage: PCM ring + GBA hardware model at the host rate, and the
+     * reverb (a DirectSound-buffer effect that runs at the mixing rate). */
+    pcm_rate_setup(engine);
+    m4a_gba_init(&engine->gba, sampleRate, engine->pcmRing, engine->pcmRingSize,
+                 engine->pcmSamplesPerVBlank);
+    scheduler_reset(engine);
+    m4a_reverb_init(&engine->reverb, (float)engine->pcmFreq, 0);
 }
 
 void m4a_engine_destroy(M4AEngine *engine)
 {
     m4a_reverb_destroy(&engine->reverb);
+    m4a_gba_destroy(&engine->gba);
+    free(engine->pcmRing);
+    engine->pcmRing = NULL;
 }
 
 void m4a_engine_set_pcm_mix_rate(M4AEngine *engine, float rate)
@@ -392,16 +638,15 @@ void m4a_engine_set_pcm_mix_rate(M4AEngine *engine, float rate)
         if (rate > 192000.0f) rate = 192000.0f;
     }
     engine->pcmMixRate = rate;
+    pcm_rate_setup(engine);
+    m4a_gba_set_pcm_rate(&engine->gba, engine->pcmSamplesPerVBlank, engine->pcmRing,
+                         engine->pcmRingSize);
 
     /* The reverb delay line is sized for the mixing rate; rebuild it, keeping
-     * the current amount.  Reset the resampler so it restarts cleanly. */
+     * the current amount. */
     uint8_t amount = engine->reverb.amount;
     m4a_reverb_destroy(&engine->reverb);
-    m4a_reverb_init(&engine->reverb, m4a_pcm_mix_rate(engine), amount);
-
-    engine->pcmResampleAccum = 0.0f;
-    engine->pcmPrevL = engine->pcmPrevR = 0;
-    engine->pcmCurL = engine->pcmCurR = 0;
+    m4a_reverb_init(&engine->reverb, (float)engine->pcmFreq, amount);
 }
 
 void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm)
@@ -576,11 +821,7 @@ static void apply_portamento_pitch(M4AEngine *engine, M4ATrack *track,
         if (ch->type & VOICE_TYPE_FIX)
             continue;
         uint32_t freq = m4a_midi_key_to_freq(ch->wav, (uint8_t)key, fine);
-        int32_t pcmSamplesPerVBlank = 224;
-        int32_t pcmFreq = (597275 * pcmSamplesPerVBlank + 5000) / 10000;
-        int32_t divFreq = (16777216 / pcmFreq + 1) >> 1;
-        float scale = (float)pcmFreq / m4a_pcm_mix_rate(engine);
-        ch->frequency = (uint32_t)((uint64_t)freq * divFreq * scale);
+        ch->frequency = pcm_freq_word(engine, freq);
     }
     for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
         M4ACGBChannel *ch = &engine->cgbChannels[i];
@@ -900,27 +1141,14 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
 
         chn_vol_set(ch, track);
 
-        /* Calculate frequency.
-         * GBA freq index 4 = 13379 Hz, pcmSamplesPerVBlank = 224.
-         * divFreq converts from MidiKeyToFreq units to source-samples-per-GBA-tick.
-         * scale converts from GBA tick rate to DAW sample rate. */
-        {
-            int32_t pcmSamplesPerVBlank = 224;
-            int32_t pcmFreq = (597275 * pcmSamplesPerVBlank + 5000) / 10000;
-            float scale = (float)pcmFreq / m4a_pcm_mix_rate(engine);
-
-            if (voice->type & VOICE_TYPE_FIX) {
-                /* Fixed-frequency (no resample): ignore MIDI key, play at GBA PCM rate.
-                 * On the GBA, SoundMainRAM uses fw advance = 0x800000 per PCM tick
-                 * (i.e., exactly one source sample per GBA output sample).
-                 * Scale that to the DAW sample rate. */
-                ch->frequency = (uint32_t)(0x800000 * scale);
-            } else {
-                int32_t divFreq = (16777216 / pcmFreq + 1) >> 1;
-                ch->frequency = m4a_midi_key_to_freq(voice->wav, (uint8_t)pcmFinalKey, track->pitM);
-                ch->frequency = (uint32_t)((uint64_t)ch->frequency * divFreq * scale);
-            }
-        }
+        /* Calculate the playback frequency word (SoundMainRAM's per-sample
+         * step).  Fixed-frequency voices ignore the key and play one source
+         * sample per mixed sample. */
+        if (voice->type & VOICE_TYPE_FIX)
+            ch->frequency = PCM_FIXED_FREQ_WORD;
+        else
+            ch->frequency = pcm_freq_word(engine,
+                m4a_midi_key_to_freq(voice->wav, (uint8_t)pcmFinalKey, track->pitM));
 
         m4a_pcm_channel_start(ch, voice->wav, voice->type);
 
@@ -1019,11 +1247,7 @@ static void refresh_channel_pitches(M4AEngine *engine, M4ATrack *track, int trac
             int32_t finalKey = (int32_t)ch->key + track->keyM;
             if (finalKey < 0) finalKey = 0;
             uint32_t freq = m4a_midi_key_to_freq(ch->wav, (uint8_t)finalKey, track->pitM);
-            int32_t pcmSamplesPerVBlank = 224;
-            int32_t pcmFreq = (597275 * pcmSamplesPerVBlank + 5000) / 10000;
-            int32_t divFreq = (16777216 / pcmFreq + 1) >> 1;
-            float scale = (float)pcmFreq / m4a_pcm_mix_rate(engine);
-            ch->frequency = (uint32_t)((uint64_t)freq * divFreq * scale);
+            ch->frequency = pcm_freq_word(engine, freq);
         }
     }
     for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
@@ -1460,11 +1684,7 @@ static void m4a_lfo_tick(M4AEngine *engine)
                         int32_t finalKey = (int32_t)ch->key + track->keyM;
                         if (finalKey < 0) finalKey = 0;
                         uint32_t freq = m4a_midi_key_to_freq(ch->wav, (uint8_t)finalKey, track->pitM);
-                        int32_t pcmSamplesPerVBlank = 224;
-                        int32_t pcmFreq = (597275 * pcmSamplesPerVBlank + 5000) / 10000;
-                        int32_t divFreq = (16777216 / pcmFreq + 1) >> 1;
-                        float scale = (float)pcmFreq / m4a_pcm_mix_rate(engine);
-                        ch->frequency = (uint32_t)((uint64_t)freq * divFreq * scale);
+                        ch->frequency = pcm_freq_word(engine, freq);
                     }
                 }
             }
@@ -1640,99 +1860,35 @@ void m4a_engine_tick(M4AEngine *engine)
 
 /*
  * Main audio processing function.
- * Generates numSamples of stereo float output.
+ * Generates numSamples of stereo float output at the host rate by running the
+ * cycle scheduler until the resampler holds that many samples.
  */
 void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamples)
 {
-    /* Number of PCM-rate samples that elapse per host output sample.  When the
-     * mix rate is below the host rate (the GBA-accurate case, e.g. 13379 vs
-     * 44100), pcmStep < 1: each PCM sample spans several host samples and we
-     * linearly interpolate between the two most recent PCM samples.  This
-     * reproduces the hardware mixer's low-rate resampling -- including the
-     * aliasing that high notes produce in-game.  A mix rate equal to the host
-     * rate (pcmMixRate == 0) collapses to one PCM sample per host sample. */
-    float pcmStep = m4a_pcm_mix_rate(engine) / engine->sampleRate;
+    if (!engine->booted)
+        m4a_engine_boot(engine, false);
 
-    /* Polyphony-overflow debug: when inverted, the real channels still render
-     * (into a discarded accumulator, so sample positions, loop ends, and
-     * oscillator phases advance exactly as in normal playback) but only the
-     * shadow channels -- the sounds lost to the polyphony limit -- are heard. */
-    bool invert = engine->polyDebugInvert;
+    M4AGbaAudio *g = &engine->gba;
+    int done = 0;
+    while (done < numSamples) {
+        int want = numSamples - done;
+        if (want > 4096) want = 4096;
+        while (m4a_gba_samples_avail(g) < want)
+            run_until(engine, g->now + GBA_SAMPLE_EVENT);
+        int got = m4a_gba_read(g, outL + done, outR + done, want);
+        if (got <= 0)
+            break;
+        done += got;
+    }
+    for (int i = done; i < numSamples; i++)
+        outL[i] = outR[i] = 0.0f;
 
-    for (int i = 0; i < numSamples; i++) {
-        /* Check for engine tick (~60Hz) */
-        engine->tickAccumulator += 1.0f;
-        if (engine->tickAccumulator >= engine->samplesPerTick) {
-            engine->tickAccumulator -= engine->samplesPerTick;
-            m4a_engine_tick(engine);
-        }
-
-        /* Advance the PCM resample clock, generating a new PCM-rate sample
-         * (all DirectSound channels mixed + reverb) each time it crosses a
-         * whole sample boundary. */
-        engine->pcmResampleAccum += pcmStep;
-        while (engine->pcmResampleAccum >= 1.0f) {
-            engine->pcmResampleAccum -= 1.0f;
-            engine->pcmPrevL = engine->pcmCurL;
-            engine->pcmPrevR = engine->pcmCurR;
-
-            int32_t pcmL = 0, pcmR = 0;
-            int32_t mutedL = 0, mutedR = 0;  /* discarded output of muted channels */
-            for (int ch = 0; ch < TOTAL_PCM_CHANNELS; ch++) {
-                if (!(engine->pcmChannels[ch].status & CHN_ON))
-                    continue;
-                /* Real-pool audition notes stay audible in invert mode so the
-                 * user can play against the lost sounds. */
-                bool audible = ((ch >= MAX_PCM_CHANNELS) == invert)
-                            || (ch < MAX_PCM_CHANNELS && engine->pcmChannels[ch].audition);
-                m4a_pcm_channel_render(&engine->pcmChannels[ch],
-                                       audible ? &pcmL : &mutedL,
-                                       audible ? &pcmR : &mutedR);
-            }
-            /* Reverb is a GBA DirectSound-buffer effect: it runs at the PCM mix
-             * rate, before the upsample and before CGB is added. */
-            m4a_reverb_process(&engine->reverb, &pcmL, &pcmR);
-
-            engine->pcmCurL = pcmL;
-            engine->pcmCurR = pcmR;
-        }
-
-        /* Linear interpolation of the PCM mix at this host-sample instant. */
-        float frac = engine->pcmResampleAccum;
-        int32_t mixL = engine->pcmPrevL
-                     + (int32_t)((float)(engine->pcmCurL - engine->pcmPrevL) * frac);
-        int32_t mixR = engine->pcmPrevR
-                     + (int32_t)((float)(engine->pcmCurR - engine->pcmPrevR) * frac);
-
-        /* CGB channels are oscillators synthesized directly at the host rate,
-         * so they are mixed in after the PCM upsample.  They are not reverbed,
-         * matching the GBA where reverb only touches the DirectSound buffer. */
-        {
-            int32_t mutedL = 0, mutedR = 0;
-            for (int ch = 0; ch < TOTAL_CGB_CHANNELS; ch++) {
-                bool audible = ((ch >= MAX_CGB_CHANNELS) == invert)
-                            || (ch < MAX_CGB_CHANNELS && engine->cgbChannels[ch].audition);
-                m4a_cgb_channel_render(&engine->cgbChannels[ch],
-                                       audible ? &mixL : &mutedL,
-                                       audible ? &mixR : &mutedR,
-                                       engine->sampleRate);
-            }
-        }
-
-
-        /* Normalize to float (-1.0 to 1.0)
-         * The GBA mixer accumulates (int8_sample * uint8_envVol) >> 8 per channel,
-         * giving ~±127 per channel. With maxPcmChannels typically 5-6, the sum
-         * can reach ~±700. We use a divider that gives good headroom while
-         * keeping CGB channels (which are quieter) audible. */
-        outL[i] = (float)mixL / 256.0f;
-        outR[i] = (float)mixR / 256.0f;
-
-        /* GBA analog output emulation: single-pole IIR low-pass filter (6 dB/octave).
-         * The GBA's PWM output circuit has a characteristic frequency rolloff due to
-         * the output capacitor. Adapted from mGBA _audioLowPassFilter (libretro.c).
-         * Coefficient 0.6/0.4 matches mGBA's default audioLowPassRange (60%). */
-        if (engine->analogFilter) {
+    /* GBA analog output emulation: single-pole IIR low-pass filter (6 dB/octave).
+     * The GBA's PWM output circuit has a characteristic frequency rolloff due to
+     * the output capacitor. Adapted from mGBA _audioLowPassFilter (libretro.c).
+     * Coefficient 0.6/0.4 matches mGBA's default audioLowPassRange (60%). */
+    if (engine->analogFilter) {
+        for (int i = 0; i < numSamples; i++) {
             engine->lowPassLeft  = engine->lowPassLeft  * 0.6f + outL[i] * 0.4f;
             engine->lowPassRight = engine->lowPassRight * 0.6f + outR[i] * 0.4f;
             outL[i] = engine->lowPassLeft;

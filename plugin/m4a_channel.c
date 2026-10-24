@@ -85,22 +85,12 @@ void m4a_pcm_channel_start(M4APCMChannel *ch, WaveData *wav, uint8_t type)
         }
     }
 
-    /* Set status to attack and immediately process first envelope step.
-     * On the GBA, the channel starts with CHN_START flag and the mixer
-     * handles the transition. Since our tick runs at ~60Hz but render runs
-     * at the DAW sample rate, we need the envelope to be non-zero from
-     * the first render call to avoid silence at the start. */
-    ch->status = CHN_ENV_ATTACK;
+    /* The channel waits for the next SoundMain frame with SF_START set, as
+     * ply_note leaves it on the GBA: that frame's envelope pass turns it
+     * into the attack phase (envelope volume = attack) and mixes it. */
+    ch->status = CHN_START;
     if (ch->isLoop)
         ch->status |= CHN_LOOP;
-
-    /* Immediately process attack to get a non-zero envelope volume */
-    uint8_t envVol = ch->attack;
-    if (envVol >= 0xFF) {
-        envVol = 0xFF;
-        ch->status = CHN_ENV_DECAY | (ch->status & CHN_LOOP);
-    }
-    ch->envelopeVolume = envVol;
 }
 
 void m4a_pcm_channel_stop(M4APCMChannel *ch)
