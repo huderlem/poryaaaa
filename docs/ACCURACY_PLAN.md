@@ -749,7 +749,7 @@ the sample-and-hold are right; the port must not move them.
 
 **31/38 pass at -40 dB** (timing-model baseline: 27/38);
 `compare_reports.py baselines/2026-10-24_timing-model.json
-baselines/2026-10-24_mixer.json`: 0 regressions, 21 improvements, every
+baselines/2026-10-24_mixer.json`: 0 regressions, 20 improvements, every
 test that was -inf is still -inf.  Three commits on `accuracy-harness`
 after cf9ac17, harness after each:
 
@@ -862,6 +862,51 @@ branch; the memory note describing it records work that was never
 committed.  With the port the 8-bit wrap is simply stock behaviour; an
 "off"/"clip" deviation would need a wider lane accumulator and is not
 implemented.
+
+Code review of the mixer (two independent reads, given the sources and
+the diff: the mixer/reverb/envelope against m4a_1.s SoundMainRAM, Unk1,
+Unk2 and m4a.c SoundMain/SampleFreqSet; the loader's layouts, the
+look-ahead byte, the rate plumbing and the plugin state against
+m4a_internal.h, wav2agb, music_voice.inc and m4a.c).  Both found **no
+divergence in the stock mixing paths** (every loop, exit path, the reverb,
+the slot selection and SampleFreqSet's arithmetic confirmed instruction by
+instruction; the second review also verified the .wav loader byte-exact
+against all 105 vanilla .bin files).  Each claim below was applied alone and
+measured; every one was harness-neutral (31/38, 0 regressions, 0
+improvements against the mixer baseline), as expected for changes outside
+the stock paths, and the unit tests gate them (1018/1018):
+
+- The Golden Sun synth pitch was wrong after the port: `mix_synth` advanced
+  the phase by `frequency << 3` while `frequency` had become the raw
+  MidiKeyToFreq value (the step is `divFreq * frequency`); and the START
+  envelope step, now run right before the first mix, wiped the triangle's
+  90-degree start phase.  Found through the review's "first frame starts at
+  the negative peak" claim; fixed (the step is scaled, the tick keeps a
+  synth's primed phase), and the unit tests now check the first mixed frame.
+- A `cry` / `voice_directsound_compressed` voice whose .bin was missing or
+  stale fell back to the uncompressed source, which the verbatim Unk1 then
+  mixes as silence (`_081DD468: tst REV; beq _081DD4F0`); the loader now
+  clears the voice's CMP bit on that fallback so it plays as a plain voice.
+- The .wav path's look-ahead byte is now the source's own extra sample
+  (`sample[size]` when the header size is the `agbl` override below the
+  written count, else 0, as wav2agb's `.bin` output has it) rather than the
+  derived `data[loopStart]`; identical for every vanilla file, right for a
+  user .wav without `agbl`.  The .aif path reads its last sample the same
+  way.
+- `m4a_engine_set_pcm_freq_mode` now does what m4aSoundMode does around
+  SampleFreqSet: DMA off, ring cleared, timer off, reload, DMA on, timer on
+  one period later (the VCOUNT 159 wait is not modeled; call while stopped).
+- Unk1's stop path stores count 0 (`_081DD4F4: mov r2, 0`), the Unk2 block
+  pointer is only formed inside the data, a stale ring comment.
+
+Review notes not acted on: `masterVolume` starts at 12 (m4aSoundInit's
+value; the memory note saying 15 "must stay" predates the PSG model and the
+bit-exact harness, and is now wrong); `_081DCFC8` keeps the decay bits
+under IEC where the port clears them (no observable effect); a loop with
+loopStart >= size is disabled by the loader where the GBA would never end
+(malformed data); the DPCM reverse look-behind at index -1 and the
+look-ahead past the last block decode zeros where the GBA reads unrelated
+memory.
 
 ### Reference: milestone 1 decisions as agreed
 

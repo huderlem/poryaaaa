@@ -94,11 +94,13 @@ static int32_t unk2(M4AEngine *engine, M4APCMChannel *r4, int32_t r3)
     uint32_t r0 = (uint32_t)r3 >> 6;
     if (r0 != r4->xpi) {
         r4->xpi = r0;
-        const uint8_t *r2 = (const uint8_t *)r4->wav->data + (size_t)r0 * 0x21;
         uint8_t zero[0x21];
+        const uint8_t *r2;
         /* The loader allocates (size / 64 + 1) blocks. */
         uint32_t blocks = r4->wav->size / M4A_DPCM_BLOCK_SAMPLES + 1;
-        if (r0 >= blocks) {
+        if (r0 < blocks) {
+            r2 = (const uint8_t *)r4->wav->data + (size_t)r0 * 0x21;
+        } else {
             memset(zero, 0, sizeof(zero));
             r2 = zero;
         }
@@ -123,10 +125,14 @@ static int32_t unk2(M4AEngine *engine, M4APCMChannel *r4, int32_t r3)
 }
 
 /* ---- Golden Sun synth voices (ipatix improved mixer; not in m4a_1.s) ----
- * One generated value per output sample, accumulated like a sample. */
-static void mix_synth(M4APCMChannel *ch, int8_t *r5, int8_t *bufB, int spv,
-                      uint32_t r10, uint32_t r11)
+ * One generated value per output sample, accumulated like a sample.  The
+ * oscillator phase (fw, one period = 2^32) advances by the sample step
+ * (divFreq * frequency, as for a sample) << 3 per output sample: the pitch
+ * of a 64-sample looped wave at the descriptor's header frequency. */
+static void mix_synth(const M4AEngine *engine, M4APCMChannel *ch, int8_t *r5, int8_t *bufB,
+                      int spv, uint32_t r10, uint32_t r11)
 {
+    uint32_t step = ((uint32_t)engine->pcmDivFreq * ch->frequency) << 3;
     for (int i = 0; i < spv; i += 4) {
         uint32_t r6 = ld32(r5), r7 = ld32(bufB);
         for (int k = 0; k < 4; k++) {
@@ -134,15 +140,15 @@ static void mix_synth(M4APCMChannel *ch, int8_t *r5, int8_t *bufB, int spv,
             int32_t value;
             if (ch->synthType == M4A_SYNTH_PULSE) {
                 value = (phase < ch->synthPulseDuty) ? 64 : -64;
-                phase += ch->frequency << 3;
+                phase += step;
             } else if (ch->synthType == M4A_SYNTH_SAW) {
-                phase += ch->frequency << 3;
+                phase += step;
                 int32_t raw = (int32_t)(phase >> 24) - 0x70
                             - (int32_t)((phase << 1) >> 27);
                 ch->count = raw + (ch->count >> 1);
                 value = ch->count >> 1;
             } else {
-                phase += ch->frequency << 3;
+                phase += step;
                 if ((int32_t)phase < 0)
                     value = 0x180 - (int32_t)(phase >> 23);
                 else
@@ -349,7 +355,8 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
         goto done_special;
     }
 
-stop_special:                                            /* _081DD4F4 */
+stop_special:                                            /* _081DD4F4: mov r2, 0 */
+    r2 = 0;
     r4->status = 0;
     finish_word(r5, r6, r7, n);
 done_special:                                            /* _081DD4F0 */
@@ -379,7 +386,7 @@ void m4a_mixer_mix_channel(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame)
     r11 <<= 16;
 
     if (r4->synthType != M4A_SYNTH_NONE) {
-        mix_synth(r4, r5, r5 + BUF, r8, r10, r11);
+        mix_synth(engine, r4, r5, r5 + BUF, r8, r10, r11);
         return;
     }
 

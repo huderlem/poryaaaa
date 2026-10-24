@@ -2166,6 +2166,16 @@ static void test_golden_sun_synth(void)
                       "gs synth: initial pulse duty threshold");
         }
         float outL[8192], outR[8192];
+        if (expectType[v] == M4A_SYNTH_TRIANGLE) {
+            /* The first mixed frame keeps the 90-degree start: the first
+             * output is the zero crossing, not the negative peak. */
+            advance_frames(&engine, 1, outL, outR);
+            int off = (engine.pcmDmaPeriod - (engine.pcmDmaCounter - 1)) * engine.pcmSamplesPerVBlank;
+            if (engine.pcmDmaCounter - 1 <= 0) off = 0;
+            ASSERT(engine.pcmBuffer[off] >= 0 && engine.pcmBuffer[off] < 8,
+                   "gs synth: triangle's first mixed sample is near the zero crossing");
+            ASSERT(engine.pcmBuffer[off + 8] > engine.pcmBuffer[off], "gs synth: triangle rises from the zero crossing");
+        }
         m4a_engine_process(&engine, outL, outR, 8192);
         float maxVal = 0;
         for (int i = 0; i < 8192; i++)
@@ -2190,6 +2200,7 @@ static void test_golden_sun_synth_waveforms(void)
 
     M4AEngine e;
     m4a_engine_init(&e, 44100.0f);
+    e.pcmDivFreq = 1;   /* frequency is the sample step; the phase step is step << 3 */
     const int spv = e.pcmSamplesPerVBlank;
     static int8_t frame[GBA_PCM_DMA_BUF_SIZE * 2];
 

@@ -667,10 +667,18 @@ void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode)
     if (mode == engine->pcmFreqMode)
         return;
     engine->pcmFreqMode = (uint8_t)mode;
-    pcm_rate_setup(engine);
-    m4a_gba_set_pcm_rate(&engine->gba, engine->pcmSamplesPerVBlank, engine->pcmBuffer,
-                         GBA_PCM_DMA_BUF_SIZE);
+    /* m4aSoundMode -> m4aSoundVSyncOff (DMA off, ring cleared) ->
+     * SampleFreqSet (timer off, reload, DMA on, timer on one period later;
+     * its wait for VCOUNT 159 is not modeled: call while stopped). */
+    M4AGbaAudio *g = &engine->gba;
+    m4a_gba_dma_disable(g);
     memset(engine->pcmBuffer, 0, sizeof(engine->pcmBuffer));
+    pcm_rate_setup(engine);
+    m4a_gba_timer_disable(g);
+    m4a_gba_set_pcm_rate(g, engine->pcmSamplesPerVBlank, engine->pcmBuffer,
+                         GBA_PCM_DMA_BUF_SIZE);
+    m4a_gba_dma_enable(g);
+    m4a_gba_timer_enable(g);
 }
 
 void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm)

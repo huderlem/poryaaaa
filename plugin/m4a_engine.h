@@ -53,8 +53,10 @@ extern "C" {
  * channel ends when it runs off the front of the data. */
 #define VOICE_TYPE_REV              0x10
 /* TONEDATA_TYPE_CMP: the voice's WaveData is DPCM-compressed (the `cry`
- * macros).  Informational only -- the mixer keys the decode off the
- * WaveData.type header field, exactly like SoundMainRAM does. */
+ * macros).  Routes the channel through SoundMainRAM_Unk1, which decodes
+ * when the WaveData.type header field is nonzero and mixes nothing when it
+ * is zero (the loader clears the bit when a compressed sample fell back to
+ * its uncompressed source). */
 #define VOICE_TYPE_CMP              0x20
 
 /* DPCM (aif2pcm/wav2agb `--compress`) sample layout: 64 samples per block,
@@ -370,7 +372,7 @@ struct M4AEngine {
     /* Output stage: the GBA hardware the mixed PCM and the PSG go through
      * (timer-driven FIFOs, DAC sample grid, bias, host-rate resampler), the
      * PCM ring buffer SoundMain writes (A = right, then B = left, each
-     * pcmRingSize samples), and the scheduler state for the driver's two
+     * GBA_PCM_DMA_BUF_SIZE samples), and the scheduler state for the driver's two
      * per-frame interrupts.  See m4a_gba.h and the scheduler notes in
      * m4a_engine.c. */
     M4AGbaAudio gba;

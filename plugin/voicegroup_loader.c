@@ -1308,10 +1308,16 @@ static WaveData *load_wav_from_path(const char *absoluteWavPath)
         loopEnd = numSamples;
     if (loopEnd > numSamples)
         loopEnd = numSamples;
+    /* wav2agb writes loopEnd samples; the header's size is the agbl
+     * override when present (vanilla files: one less), so the byte after
+     * the data is sample[size] when size < loopEnd, else the alignment
+     * padding (0). */
+    uint32_t writtenSamples = loopEnd;
     if (agbLoopEnd != 0)
         loopEnd = agbLoopEnd;
 
     uint32_t size = loopEnd;
+    uint32_t convCount = (size < writtenSamples && size < numSamples) ? size + 1 : size;
 
     uint32_t freq;
     if (agbPitch != 0) {
@@ -1337,7 +1343,7 @@ static WaveData *load_wav_from_path(const char *absoluteWavPath)
     wd->size      = size;
     wd->data      = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
 
-    size_t rawBytes = (size_t)size * bytesPerSample;
+    size_t rawBytes = (size_t)convCount * bytesPerSample;
     uint8_t *rawData = NULL;
     if (rawBytes > 0) {
         rawData = malloc(rawBytes);
@@ -1358,8 +1364,9 @@ static WaveData *load_wav_from_path(const char *absoluteWavPath)
     }
     fclose(f);
 
-    /* Convert raw samples to int8_t */
-    for (uint32_t i = 0; i < size; i++) {
+    /* Convert raw samples to int8_t (plus the converter's extra sample) */
+    wd->data[size] = 0;
+    for (uint32_t i = 0; i < convCount; i++) {
         uint8_t *sp = rawData + (size_t)i * bytesPerSample;
         int8_t s;
         if (fmtTag == 1) {
@@ -1403,12 +1410,12 @@ static WaveData *load_wav_from_path(const char *absoluteWavPath)
     }
 
     free(rawData);
-    /* The byte after the data, which the mixer's look-ahead reads at the
-     * last sample.  The sample converter writes one extra sample after the
-     * data: the loop-start sample for a looped sound, 0 otherwise (checked
-     * against the accuracy test ROM: sc88pro_flute / pizzicato / fretless
-     * bass carry data[loopStart], sd90_solo_snare carries 0). */
-    wd->data[size] = (loopEnabled && smplLoopStart < size) ? wd->data[smplLoopStart] : 0;
+    /* data[size] is the byte after the data, which the mixer's look-ahead
+     * reads at the last sample: the converter's extra sample (in vanilla
+     * pokeemerald every looped .wav carries its loop-start sample there and
+     * every unlooped one a 0, matching the test ROM: sc88pro_flute /
+     * pizzicato / fretless_bass hold data[loopStart], sd90_solo_snare 0) or
+     * the alignment padding. */
     return wd;
 }
 
@@ -1593,7 +1600,11 @@ static WaveData *load_aif_from_path(const char *absoluteAifPath)
     wd->size      = size;
     wd->data      = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
 
-    size_t rawBytes = (size_t)size * bytesPerSample;
+    /* aif2pcm writes every sample and sets size = numSamples - 1, so the
+     * byte after the data is the source's last sample. */
+    uint32_t convCount = (size + 1 <= availableSamples) ? size + 1 : size;
+    wd->data[size] = 0;
+    size_t rawBytes = (size_t)convCount * bytesPerSample;
     if (rawBytes > 0) {
         uint8_t *rawData = malloc(rawBytes);
         if (!rawData) {
@@ -1607,17 +1618,14 @@ static WaveData *load_aif_from_path(const char *absoluteAifPath)
         if (bytesRead < rawBytes)
             memset(rawData + bytesRead, 0, rawBytes - bytesRead);
         if (bytesPerSample == 1) {
-            memcpy(wd->data, rawData, size);
+            memcpy(wd->data, rawData, convCount);
         } else {
-            for (uint32_t i = 0; i < size; i++)
+            for (uint32_t i = 0; i < convCount; i++)
                 wd->data[i] = (int8_t)rawData[(size_t)i * 2]; /* big-endian high byte */
         }
         free(rawData);
     }
     fclose(f);
-
-    /* The converter's extra sample after the data: see load_wav_from_path. */
-    wd->data[size] = (loopEnabled && loopStart < size) ? wd->data[loopStart] : 0;
     return wd;
 }
 
@@ -1856,8 +1864,8 @@ static time_t file_mtime(const char *path)
  * and friends).  The DPCM encoding is lossy, so the build's .bin is what the
  * hardware plays: prefer it while it is at least as new as its source file.
  * In a project that hasn't been built (or whose source was edited since) fall
- * back to the uncompressed source, which the mixer plays through its plain
- * path -- the CMP bit alone never triggers a decode.
+ * back to the uncompressed source; the caller then clears the voice's CMP bit,
+ * since SoundMainRAM mixes nothing for a CMP voice on uncompressed data.
  */
 static WaveData *resolve_and_load_compressed_sample(const char *projectRoot, const char *symbol,
                                                      const SymbolMap *dsMap, ProjectDiscovery *disc,
@@ -2606,6 +2614,12 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                     : resolve_and_load_sample(projectRoot, sampleSymbol, dsMap, disc, vg, waveCache);
                 if (wd) {
                     td->wav = wd;
+                    /* SoundMainRAM_Unk1 mixes nothing for a CMP-typed voice
+                     * whose data is not compressed, so when the compressed
+                     * sample fell back to its uncompressed source the voice
+                     * plays as a plain DirectSound voice instead. */
+                    if ((td->type & VOICE_TYPE_CMP) && wd->type == 0)
+                        td->type &= (uint8_t)~VOICE_TYPE_CMP;
                 }
             }
             voiceIndex++;
@@ -2828,6 +2842,12 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
                     : resolve_and_load_sample(projectRoot, sampleSymbol, dsMap, disc, vg, waveCache);
                 if (wd) {
                     td->wav = wd;
+                    /* SoundMainRAM_Unk1 mixes nothing for a CMP-typed voice
+                     * whose data is not compressed, so when the compressed
+                     * sample fell back to its uncompressed source the voice
+                     * plays as a plain DirectSound voice instead. */
+                    if ((td->type & VOICE_TYPE_CMP) && wd->type == 0)
+                        td->type &= (uint8_t)~VOICE_TYPE_CMP;
                 }
             }
             voiceIndex++;

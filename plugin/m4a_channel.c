@@ -112,7 +112,12 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
         if (ch->isLoop)
             ch->status |= CHN_LOOP;
         envVol = 0;
-        ch->fw = 0;
+        /* SF_START zeroes fw.  A Golden Sun synth (extension) keeps the
+         * oscillator phase m4a_pcm_channel_start primed (the triangle's
+         * 90-degree start), since this step now runs right before the
+         * channel's first mix and would otherwise wipe it. */
+        if (ch->synthType == M4A_SYNTH_NONE)
+            ch->fw = 0;
         /* Fall through to attack */
     }
 
