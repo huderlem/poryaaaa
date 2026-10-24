@@ -1894,12 +1894,14 @@ void m4a_engine_tick(M4AEngine *engine)
     int64_t cgbEntry = (engine->soundMainStamp >= 0 ? engine->soundMainStamp : engine->gba.now)
                      + engine->cgbEntryCycles;
     for (int pool = 0; pool < TOTAL_CGB_CHANNELS / MAX_CGB_CHANNELS; pool++) {
-        int64_t cursor = cgbEntry + M4A_CYC_CGB_PROLOGUE;
+        /* The cursor is the cycle of each channel's loop head (`for (ch = 1
+         * ...)` in CgbSound); a channel's pass moves it to the next one's. */
+        int64_t cursor = cgbEntry + (engine->c15 == 14 ? M4A_CYC_CGB_ENTRY_RELOAD : M4A_CYC_CGB_ENTRY_TO_LOOP);
         for (int c = 0; c < MAX_CGB_CHANNELS; c++) {
             int i = pool * MAX_CGB_CHANNELS + c;
             M4ACGBChannel *ch = &engine->cgbChannels[i];
             if (!(ch->status & CHN_ON)) {
-                cursor += M4A_CYC_CGB_INACTIVE;
+                cursor += M4A_CYC_CGB_INACTIVE + m4a_gba_fifo_dma_stall(&engine->gba, cursor, cursor + M4A_CYC_CGB_INACTIVE);
                 continue;
             }
             if (!seq && ch->gateTime > 0) {

@@ -1688,7 +1688,7 @@ static void test_cgb_driver_square(void)
      * first write lands at the CgbSound entry + prologue + square-1 start
      * offset, and the rest follow at the gaps measured in mgba. */
     int64_t cgbEntry = soundMain + M4A_CYC_CGB_ENTRY_BASE + M4A_CYC_PER_TRACK - M4A_CYC_SOUNDMAIN_ENTRY;
-    ASSERT_EQ(log.when[0], cgbEntry + M4A_CYC_CGB_PROLOGUE + 231, "driver: NR10 at CgbSound entry + 351");
+    ASSERT_EQ(log.when[0], cgbEntry + 351, "driver: NR10 at CgbSound entry + 351 (loop head 53, active 26, switch 69, start 24, CgbModVol 44, NR10 135)");
     ASSERT_EQ(log.when[1] - log.when[0], 10, "driver: NR11 10 cycles after NR10");
     ASSERT_EQ(log.when[2] - log.when[0], 212, "driver: NR13 212 after NR10 (envelope setup between)");
     ASSERT_EQ(log.when[3] - log.when[0], 244, "driver: NR14 32 after NR13");
@@ -1793,6 +1793,17 @@ static void test_cgb_driver_square(void)
                PSG_REG_NR51, (nr51Before & ~0x22u) | (0x22 & sq2->pan),
                PSG_REG_NR22, 0x08 | (sq2->envelopeVolume << 4),
                PSG_REG_NR24, 0x80 | ((f >> 8) & 0x07));
+    /* Channel 1 is inactive (44), then square 2's pass: loop 26, switch 61,
+     * start 24, CgbModVol 44, NR21 131 (centre pan); the decay -> sustain
+     * start block (70 + 76), envelope_complete 18, pitch 10 + 28. */
+    {
+        int64_t entry2 = log.when[0] - (53 + 44 + 26 + 61 + 24 + 44 + 131);
+        ASSERT_EQ((entry2 - soundMain) % GBA_CYCLES_PER_FRAME,
+                  (int64_t)(M4A_CYC_CGB_ENTRY_BASE + M4A_CYC_PER_TRACK - M4A_CYC_SOUNDMAIN_ENTRY),
+                  "driver: square-2 NR21 at CgbSound entry + 383 (an inactive channel 1 before it)");
+        ASSERT_EQ(log.when[1] - log.when[0], 146 + 18 + 10 + 28, "driver: NR23 202 after NR21 (sustain start block)");
+        ASSERT_EQ(log.when[3] - log.when[2], 12 + 21, "driver: NR51 33 after NR24");
+    }
 
     /* TrackStop / all-sound-off: CgbOscOff immediately. */
     log.n = 0;

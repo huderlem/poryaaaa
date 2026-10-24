@@ -32,7 +32,16 @@
  * loop, ply_note's channel search and the VOLCHG/PITCHG pass (the `_081DD*`
  * labels of m4a_1.s) and each one logs r3-r5 and r7, so a per-track, per-note
  * and per-channel cost can be read from the raw log (tools/probe_mplay.py).
- * The map still works and gives the function entries only.
+ * The map still works and gives the function entries only.  Lines of the
+ * form "<hex addr> t CgbSound_<name>" appended to the nm listing add
+ * breakpoints inside CgbSound (compiled C, no labels of its own):
+ * CgbSound_loop 0x8001020 (per-channel loop head), _active 0x8001036,
+ * _step2 0x80010b0, _start 0x80010c8, _nostart 0x80011a6, _oscoff
+ * 0x80011ca, _step 0x8001218 (envelope_step_repeat), _modvol 0x800122c,
+ * _stepdone 0x800130c, _envdone 0x800131e, _pit 0x8001328, _vol
+ * 0x80013a0, _done 0x800141c, _next 0x8001420 in the 2026-10-24 ROM
+ * (test/accuracy/rom/build/accuracy_test.elf, CgbSound at 0x8000ff0;
+ * re-derive from `objdump -d` if m4a.c or the toolchain changes).
  *
  * `<out>.events` summarizes mgba's own scheduler lateness: for the timer-0
  * overflow, the audio sample event and the PSG frame-sequencer event, the
@@ -298,11 +307,15 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 			struct ARMCore* cpu = gGba->cpu;
 			fprintf(gOut, " flg=%02X vt=%02X lfodl=%02X", rd8(cpu->gprs[2]), rd8(cpu->gprs[2] + 0x24), rd8(cpu->gprs[2] + 0x1B));
 		}
-		if (name[0] == '_' || !strncmp(name, "TrackStop_", 10) || !strcmp(name, "ply_note") || !strcmp(name, "TrackStop") || !strcmp(name, "ClearChain") || !strcmp(name, "RealClearChain") || !strcmp(name, "TrkVolPitSet")) {
+		if (name[0] == '_' || !strncmp(name, "TrackStop_", 10) || !strncmp(name, "CgbSound_", 9) || !strcmp(name, "CgbModVol") || !strcmp(name, "ply_note") || !strcmp(name, "TrackStop") || !strcmp(name, "ClearChain") || !strcmp(name, "RealClearChain") || !strcmp(name, "TrkVolPitSet")) {
 			/* r5 = track (MPlayMain, ply_note), r4 = channel, r7 = player
 			 * (MPlayMain) / chosen track (ply_note scan), r3 = loop count */
 			struct ARMCore* cpu = gGba->cpu;
-			fprintf(gOut, " r0=%08X r3=%08X r4=%08X r5=%08X r7=%08X", cpu->gprs[0], cpu->gprs[3], cpu->gprs[4], cpu->gprs[5], cpu->gprs[7]);
+			fprintf(gOut, " r0=%08X r3=%08X r4=%08X r5=%08X r7=%08X r6=%08X", cpu->gprs[0], cpu->gprs[3], cpu->gprs[4], cpu->gprs[5], cpu->gprs[7], cpu->gprs[6]);
+			if (!strcmp(name, "CgbModVol"))        /* r0 = CgbChannel: CgbPan's and the clamp's inputs */
+				fprintf(gOut, " rv=%02X lv=%02X sus=%02X", rd8(cpu->gprs[0] + 2), rd8(cpu->gprs[0] + 3), rd8(cpu->gprs[0] + 6));
+			if (!strncmp(name, "CgbSound_", 9))   /* r4 = CgbChannel, r6 = ch: the state its branches test */
+				fprintf(gOut, " ch%d st=%02X mod=%02X envc=%02X envv=%02X goal=%02X iec=%02X n4=%02X swp=%02X", cpu->gprs[6], rd8(cpu->gprs[4]), rd8(cpu->gprs[4] + 0x1D), rd8(cpu->gprs[4] + 0x0B), rd8(cpu->gprs[4] + 0x09), rd8(cpu->gprs[4] + 0x0A), rd8(cpu->gprs[4] + 0x0D), rd8(cpu->gprs[4] + 0x21), rd8(cpu->gprs[4] + 0x1F));
 			if (!strcmp(name, "RealClearChain"))   /* r0 = channel: its track / prev / next decide the unlink path */
 				fprintf(gOut, " trk=%08X prev=%08X next=%08X", rd32(cpu->gprs[0] + 0x2C), rd32(cpu->gprs[0] + 0x30), rd32(cpu->gprs[0] + 0x34));
 			else if (!strcmp(name, "_081DD938"))   /* r5 = track: wait and the LFO fields the tick tests */
@@ -370,7 +383,7 @@ int main(int argc, char** argv) {
 		while (m && fgets(line, sizeof line, m)) {
 			unsigned long a; char name[128]; char kind;
 			if (sscanf(line, " 0x%lx %127s", &a, name) == 2 || sscanf(line, "%lx %c %127s", &a, &kind, name) == 3) {
-				int take = !strncmp(name, "ply_", 4);
+				int take = !strncmp(name, "ply_", 4) || !strncmp(name, "CgbSound_", 9);
 				for (int i = 0; !take && want[i]; ++i) if (!strcmp(name, want[i])) take = 1;
 				if (!strcmp(name, "gSoundInfo")) ADDR_gSoundInfo = (uint32_t) a;
 				if (!strcmp(name, "gMPlayInfo_BGM")) ADDR_gMPlayInfo_BGM = (uint32_t) a;

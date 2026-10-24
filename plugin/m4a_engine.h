@@ -626,12 +626,13 @@ struct M4AEngine {
 #define M4A_CYC_NOTE_PCM_FREQ      267   /* _081DDCA0 -> _081DDCCE 12, MidiKeyToFreq 20 + 235 */
 #define M4A_CYC_NOTE_STORE         14    /* _081DDCDC -> _081DDCEA */
 #define M4A_CYC_NOTE_EXIT          30    /* _081DDCEA -> _081DD938 */
-/* Inside CgbSound: prologue before channel 1, an inactive channel, an active
- * channel without register writes, and the tail after a channel's last write. */
-#define M4A_CYC_CGB_PROLOGUE       120
-#define M4A_CYC_CGB_INACTIVE       41
-#define M4A_CYC_CGB_ACTIVE_QUIET   238
-#define M4A_CYC_CGB_CHANNEL_TAIL   93
+/* Inside CgbSound (test/accuracy/tools/probe_cgb.py over the corpus): the
+ * entry to channel 1's loop head, an inactive channel's pass (loop head to
+ * the next loop head), and the segment costs of an active pass, which live
+ * in m4a_channel.c next to the code they time. */
+#define M4A_CYC_CGB_ENTRY_TO_LOOP  53    /* CgbSound -> the channel-1 loop head (c15 decremented) ... */
+#define M4A_CYC_CGB_ENTRY_RELOAD   51    /* ... when c15 was 0 and reloads 14 */
+#define M4A_CYC_CGB_INACTIVE       44    /* loop head -> next (28) -> next loop head (16), SF_ON clear */
 
 /* Engine lifecycle */
 void m4a_engine_init(M4AEngine *engine, float sampleRate);
