@@ -85,6 +85,7 @@ set(ENGINE_SOURCES
     plugin/m4a_channel.c
     plugin/m4a_tables.c
     plugin/m4a_reverb.c
+    plugin/m4a_blip.c
     plugin/m4a_song.c
     plugin/m4a_sequencer.c
     plugin/voicegroup_loader.c
@@ -300,6 +301,19 @@ if(ACCURACY_MGBA_DIR)
             target_link_libraries(mgba_render PRIVATE ${_accuracy_${_lib}})
         endif()
     endforeach()
+
+    # Bit-exactness test of the engine's resampler against blip_buf's fast
+    # linear path (the LGPL reference is only ever linked into this test).
+    add_executable(poryaaaa_blip_tests
+        test/test_blip.c
+        plugin/m4a_blip.c
+        ${ACCURACY_MGBA_DIR}/src/third-party/blip_buf/blip_buf.c
+    )
+    target_include_directories(poryaaaa_blip_tests PRIVATE
+        plugin
+        ${ACCURACY_MGBA_DIR}/include
+        ${ACCURACY_MGBA_DIR}/build/include
+    )
 endif()
 
 if(ACCURACY_POKEEMERALD_DIR)
