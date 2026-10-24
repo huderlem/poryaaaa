@@ -86,6 +86,7 @@ set(ENGINE_SOURCES
     plugin/m4a_tables.c
     plugin/m4a_reverb.c
     plugin/m4a_song.c
+    plugin/m4a_sequencer.c
     plugin/voicegroup_loader.c
 )
 

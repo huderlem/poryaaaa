@@ -392,6 +392,11 @@ typedef struct {
 /* Forward declaration */
 typedef struct M4AEngine M4AEngine;
 
+/* Frame hook: called at the start of every VBlank tick (m4a_engine_tick),
+ * before the envelopes advance -- where MPlayMain runs inside SoundMain on
+ * the GBA.  Installed by the song sequencer (m4a_sequencer.c). */
+typedef void (*M4AFrameHook)(M4AEngine *engine, void *user);
+
 #include "m4a_reverb.h"
 
 /* Engine state */
@@ -494,6 +499,13 @@ struct M4AEngine {
 
     /* Loaded voice data */
     ToneData *voiceGroup;   /* array of 128 ToneData entries */
+
+    /* External sequencer (m4a_sequencer.c).  frameHook runs first in every
+     * tick; while externalSequencer is set the engine leaves the per-song-tick
+     * work (channel gate times, the tempo accumulator and the LFO) to it. */
+    M4AFrameHook frameHook;
+    void *frameHookUser;
+    bool externalSequencer;
 };
 
 /* Engine lifecycle */
@@ -514,7 +526,13 @@ void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup);
 void m4a_engine_refresh_voices(M4AEngine *engine);
 
 /* MIDI event handling */
-void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity);
+
+/* Start a note.  Returns a handle for the channel the note started on --
+ * 0..TOTAL_PCM_CHANNELS-1 for pcmChannels[], TOTAL_PCM_CHANNELS + i for
+ * cgbChannels[i] -- or M4A_CHANNEL_NONE when no channel was taken (the note
+ * was dropped, or the voice could not be resolved). */
+#define M4A_CHANNEL_NONE (-1)
+int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity);
 void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key);
 void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program);
 void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value);
@@ -566,6 +584,13 @@ void m4a_engine_tick(M4AEngine *engine);
 
 /* Internal: track volume/pitch calculation (matches TrkVolPitSet) */
 void m4a_track_vol_pit_set(M4ATrack *track);
+
+/* MPlayMain's end-of-frame pass for one track: TrkVolPitSet, then push the
+ * track's volume (ChnVolSetAsm, MO_VOL on CGB) and/or pitch (MidiKeyToFreq /
+ * MidiKeyToCgbFreq, MO_PIT) into every channel the track owns.  The song
+ * sequencer writes track parameters directly and calls this once per frame
+ * for tracks flagged VOLCHG / PITCHG. */
+void m4a_engine_track_apply(M4AEngine *engine, int trackIndex, bool volume, bool pitch);
 
 /* Frequency helpers */
 uint32_t m4a_midi_key_to_freq(WaveData *wav, uint8_t key, uint8_t fineAdjust);

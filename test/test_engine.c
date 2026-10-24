@@ -5,6 +5,8 @@
 #include "m4a_engine.h"
 #include "m4a_channel.h"
 #include "m4a_tables.h"
+#include "m4a_song.h"
+#include "m4a_sequencer.h"
 
 /*
  * Unit tests for the m4a engine.
@@ -2246,6 +2248,541 @@ static void test_pcm_dpcm(void)
     free(wd);
 }
 
+
+/* ------------------------------------------------------------------------
+ * Song parser and sequencer (milestone 1 of docs/ACCURACY_PLAN.md)
+ * ------------------------------------------------------------------------ */
+
+static M4ASong *parse_song_text(const char *text)
+{
+    char err[256];
+    M4ASong *song = m4a_song_parse(text, strlen(text), err, sizeof(err));
+    if (!song)
+        fprintf(stderr, "  parse error: %s\n", err);
+    return song;
+}
+
+static void test_song_parser(void)
+{
+    printf("Testing .s song parser...\n");
+
+    /* mid2agb's output shapes: .equ header, running-status note forms
+     * (a bare note name, note + velocity), expressions, labels, GOTO/PATT
+     * targets, the header with the voicegroup word. */
+    const char *text =
+        "\t.include \"MPlayDef.s\"\n"
+        "\n"
+        "\t.equ\tt_grp, voicegroup_littleroot\n"
+        "\t.equ\tt_pri, 0\n"
+        "\t.equ\tt_rev, reverb_set+50\n"
+        "\t.equ\tt_mvl, 100\n"
+        "\t.equ\tt_key, 0\n"
+        "\t.equ\tt_tbs, 1\n"
+        "\n"
+        "\t.section .rodata\n"
+        "\t.global\tt\n"
+        "\t.align\t2\n"
+        "\n"
+        "@**************** Track 1 (Midi-Chn.1) ****************@\n"
+        "\n"
+        "t_1:\n"
+        "\t.byte\tKEYSH , t_key+0\n"
+        "@ 000   ----------------------------------------\n"
+        "\t.byte\tTEMPO , 120*t_tbs/2\n"
+        "\t.byte\t\tVOICE , 48\n"
+        "\t.byte\t\tVOL   , 127*t_mvl/mxv\n"
+        "\t.byte\t\tPAN   , c_v-16\n"
+        "\t.byte\t\tBEND  , c_v+2\n"
+        "t_1_B1:\n"
+        "\t.byte\t\tN24   , Cn3 , v127\n"
+        "\t.byte\tW36\n"
+        "\t.byte\t\t        Gn3 \n"
+        "\t.byte\tW12\n"
+        "\t.byte\t\t        An3 , v064\n"
+        "\t.byte\tW24\n"
+        "\t.byte\t\tTIE   , Cn4 , v100\n"
+        "\t.byte\tW96\n"
+        "\t.byte\t\tEOT   \n"
+        "\t.byte\tPATT\n"
+        "\t .word\tt_1_000\n"
+        "\t.byte\tGOTO\n"
+        "\t .word\tt_1_B1\n"
+        "\t.byte\tFINE\n"
+        "\n"
+        "t_1_000:\n"
+        "\t.byte\tMEMACC, mem_set, 0x00, 117\n"
+        "\t.byte\t\tXCMD  , xIECV , 18\n"
+        "\t.byte\tPEND\n"
+        "\n"
+        "@******************************************************@\n"
+        "\t.align\t2\n"
+        "\n"
+        "t:\n"
+        "\t.byte\t1\t@ NumTrks\n"
+        "\t.byte\t0\t@ NumBlks\n"
+        "\t.byte\tt_pri\t@ Priority\n"
+        "\t.byte\tt_rev\t@ Reverb.\n"
+        "\n"
+        "\t.word\tt_grp\n"
+        "\n"
+        "\t.word\tt_1\n"
+        "\n"
+        "\t.end\n";
+
+    M4ASong *song = parse_song_text(text);
+    ASSERT(song != NULL, "song parses");
+    if (!song) return;
+
+    static const uint8_t expected[] = {
+        0xBC, 0,                /* KEYSH 0 */
+        0xBB, 60,               /* TEMPO 120*1/2 */
+        0xBD, 48,               /* VOICE 48 */
+        0xBE, 100,              /* VOL 127*100/127 */
+        0xBF, 0x40 - 16,        /* PAN */
+        0xC0, 0x40 + 2,         /* BEND */
+        /* t_1_B1 = 12 */
+        0xCF + 24, 60, 127,     /* N24 Cn3 v127 (clock index 24) */
+        0x80 + 28,              /* W36 */
+        67,                     /* Gn3 (running status) */
+        0x80 + 12,              /* W12 */
+        69, 64,                 /* An3 v064 */
+        0x80 + 24,              /* W24 */
+        0xCF, 72, 100,          /* TIE Cn4 v100 */
+        0x80 + 48,              /* W96 */
+        0xCE,                   /* EOT */
+        0xB3, 0, 0, 0, 0,       /* PATT t_1_000 (offset 37) */
+        0xB2, 0, 0, 0, 0,       /* GOTO t_1_B1 (offset 12) */
+        0xB1,                   /* FINE */
+        /* t_1_000 = 37 */
+        0xB9, 0, 0x00, 117,     /* MEMACC mem_set 0 117 */
+        0xCD, 0x08, 18,         /* XCMD xIECV 18 */
+        0xB4,                   /* PEND */
+        0, 0, 0,                /* .align 2 padding: 45 -> 48 */
+        /* header t = 48 */
+        1, 0, 0, 0x80 + 50,
+        0, 0, 0, 0,             /* voicegroup (external) */
+        0, 0, 0, 0,             /* t_1 = offset 0 */
+    };
+    ASSERT_EQ(song->size, (uint32_t)sizeof(expected), "song size");
+    if (song->size == sizeof(expected)) {
+        /* Patch the expected words that are relocations with their offsets. */
+        uint8_t exp[sizeof(expected)];
+        memcpy(exp, expected, sizeof(exp));
+        exp[27] = 37;   /* PATT target */
+        exp[32] = 12;   /* GOTO target */
+        ASSERT(memcmp(song->data, exp, sizeof(exp)) == 0, "song bytes");
+        if (memcmp(song->data, exp, sizeof(exp)) != 0)
+            for (uint32_t i = 0; i < song->size; i++)
+                if (song->data[i] != exp[i])
+                    fprintf(stderr, "  byte %u: got %02x want %02x\n", i, song->data[i], exp[i]);
+    }
+    ASSERT_EQ(song->headerOffset, 48, "header offset");
+    ASSERT_EQ(song->trackCount, 1, "track count");
+    ASSERT_EQ(song->reverb, 0x80 + 50, "reverb byte");
+    ASSERT_EQ(song->priority, 0, "priority");
+    ASSERT_EQ(song->trackOffsets[0], 0, "track 1 offset");
+    ASSERT(strcmp(song->voicegroup, "littleroot") == 0, "voicegroup from _grp");
+    ASSERT(strcmp(song->name, "t") == 0, "song name from .global");
+    ASSERT_EQ(song->relocCount, 4, "relocation count");
+
+    /* Relocation to a ROM image: label words get base + offset, the
+     * voicegroup word its own address. */
+    uint8_t img[sizeof(expected)];
+    m4a_song_relocate(song, 0x08001000, 0x08ABCDEF, img);
+    ASSERT_EQ(img[27] | (img[28] << 8) | (img[29] << 16) | ((uint32_t)img[30] << 24), 0x08001000 + 37, "PATT relocated");
+    ASSERT_EQ(img[32] | (img[33] << 8) | (img[34] << 16) | ((uint32_t)img[35] << 24), 0x08001000 + 12, "GOTO relocated");
+    ASSERT_EQ(img[52] | (img[53] << 8) | (img[54] << 16) | ((uint32_t)img[55] << 24), 0x08ABCDEF, "voicegroup relocated");
+    ASSERT_EQ(img[56] | (img[57] << 8) | (img[58] << 16) | ((uint32_t)img[59] << 24), 0x08001000, "track relocated");
+    m4a_song_free(song);
+
+    /* Errors are reported, not crashed on. */
+    char err[128];
+    ASSERT(m4a_song_parse("\t.byte\tBOGUS\n", 13, err, sizeof(err)) == NULL, "undefined symbol in .byte fails");
+    ASSERT(strstr(err, "line 1") != NULL, "error names the line");
+    ASSERT(m4a_song_parse("x:\n\t.byte 1\n", 12, err, sizeof(err)) == NULL, "missing .global fails");
+}
+
+/* A one-voice square-wave voicegroup for sequencer tests (CGB channel 1,
+ * so there is no sample data to build). */
+static void seq_test_voices(ToneData *voices)
+{
+    memset(voices, 0, 128 * sizeof(ToneData));
+    voices[0].type = VOICE_SQUARE_1;
+    voices[0].key = 60;
+    voices[0].wavePointer = (uint32_t *)(uintptr_t)2; /* 50% duty */
+    voices[0].attack = 0;
+    voices[0].decay = 0;
+    voices[0].sustain = 15;
+    voices[0].release = 0;
+}
+
+static const char *seq_song_header =
+    "\t.equ\tt_grp, voicegroup_test\n"
+    "\t.equ\tt_pri, 0\n"
+    "\t.equ\tt_rev, 0\n"
+    "\t.equ\tt_mvl, 127\n"
+    "\t.equ\tt_key, 0\n"
+    "\t.equ\tt_tbs, 1\n"
+    "\t.section .rodata\n"
+    "\t.global\tt\n"
+    "\t.align\t2\n"
+    "t_1:\n";
+
+static const char *seq_song_footer =
+    "\t.align\t2\n"
+    "t:\n"
+    "\t.byte\t1, 0, t_pri, t_rev\n"
+    "\t.word\tt_grp\n"
+    "\t.word\tt_1\n";
+
+static M4ASong *seq_song(const char *body)
+{
+    char buf[4096];
+    snprintf(buf, sizeof(buf), "%s%s%s", seq_song_header, body, seq_song_footer);
+    return parse_song_text(buf);
+}
+
+static void test_sequencer_tempo(void)
+{
+    printf("Testing sequencer tempo accumulator...\n");
+
+    /* MPlayMain: tempoC += tempoI per frame; one tick per 150.  TEMPO 60
+     * (byte 60 -> tempoD 120 -> tempoI 120) gives 4 ticks in 5 frames; the
+     * clock must follow the GBA's integer arithmetic exactly. */
+    ToneData voices[128];
+    seq_test_voices(voices);
+    M4ASong *song = seq_song(
+        "\t.byte\tTEMPO , 120*t_tbs/2\n"
+        "\t.byte\tW96\n\t.byte\tW96\n\t.byte\tW96\n\t.byte\tW96\n\t.byte\tW96\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "tempo song parses");
+    if (!song) return;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+    ASSERT_EQ(seq.tempoI, 150, "tempo defaults to 150 (one tick per frame)");
+
+    uint16_t tempoC = 0;
+    uint32_t clock = 0;
+    for (int frame = 1; frame <= 400; frame++) {
+        m4a_sequencer_frame(&seq);
+        /* Reference: the first tick runs TEMPO 60 (tempoI 120) before any
+         * further accumulation. */
+        uint16_t tempoI = (frame == 1) ? 150 : 120;
+        tempoC += tempoI;
+        while (tempoC >= 150) {
+            tempoC -= 150;
+            clock++;
+        }
+        if (seq.clock != clock) {
+            ASSERT_EQ(seq.clock, clock, "clock matches the per-frame accumulator");
+            break;
+        }
+    }
+    ASSERT_EQ(seq.tempoD, 120, "TEMPO byte doubled");
+    ASSERT_EQ(seq.tempoI, 120, "tempoI = tempoD * tempoU >> 8");
+    ASSERT_EQ(seq.clock, clock, "clock after 400 frames");
+    ASSERT(!m4a_sequencer_finished(&seq), "still waiting after 400 frames");
+    /* 5 x W96 = 480 ticks, then FINE: the player pauses on the tick after
+     * the last track ends.  480 ticks + 1 FINE tick + 1 empty tick = 482
+     * ticks; at 120/150 ticks per frame that is frame ceil(482*150/120)
+     * (first frame counts 150). */
+    int finishedFrame = 0;
+    for (int frame = 401; frame <= 1000 && !finishedFrame; frame++) {
+        m4a_sequencer_frame(&seq);
+        if (m4a_sequencer_finished(&seq))
+            finishedFrame = frame;
+    }
+    ASSERT_EQ(seq.clock, 482, "ticks to finish");
+    /* tempoC after frame 1: 0 (150 consumed).  Ticks 2..482 need 481 more
+     * ticks = 72150 units at 120 per frame = 601.25 frames -> frame 1 + 602. */
+    ASSERT_EQ(finishedFrame, 603, "frame on which the song finished");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
+static void test_sequencer_notes(void)
+{
+    printf("Testing sequencer note timing and gate times...\n");
+
+    ToneData voices[128];
+    seq_test_voices(voices);
+    /* TEMPO 75 -> tempoI 150: one tick per frame. */
+    M4ASong *song = seq_song(
+        "\t.byte\tTEMPO , 150*t_tbs/2\n"
+        "\t.byte\t\tVOICE , 0\n"
+        "\t.byte\t\tVOL   , 127*t_mvl/mxv\n"
+        "\t.byte\t\tN24   , Cn3 , v127\n"
+        "\t.byte\tW24\n"
+        "\t.byte\t\t        En3 \n"       /* running status: N24 En3 v127 */
+        "\t.byte\tW12\n"
+        "\t.byte\t\tTIE   , Gn3 , v100\n"
+        "\t.byte\tW24\n"
+        "\t.byte\t\tEOT   , Gn3\n"
+        "\t.byte\tW12\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "note song parses");
+    if (!song) return;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+    M4ACGBChannel *sq = &engine.cgbChannels[0];
+
+    /* Frame 1 (tick 1): track init, commands up to W24, the note starts. */
+    m4a_sequencer_frame(&seq);
+    ASSERT_EQ(seq.clock, 1, "one tick on the first frame");
+    ASSERT(sq->status & CHN_ON, "note started on tick 1");
+    ASSERT_EQ(sq->midiKey, 60, "note key");
+    ASSERT_EQ(sq->velocity, 127, "note velocity");
+    ASSERT_EQ(sq->gateTime, 24, "gate time from N24");
+    ASSERT_EQ(engine.tracks[0].volume, 127, "VOL applied to the engine track");
+    ASSERT_EQ(engine.tracks[0].bendRange, 2, "track init: bend range 2");
+    ASSERT_EQ(engine.tracks[0].lfoSpeed, 22, "track init: LFO speed 22");
+    ASSERT_EQ(engine.tracks[0].volX, 64, "track init: volX 64");
+
+    /* The gate counts down one per tick; the channel stops when it hits 0,
+     * on the same tick the next note starts (W24 later). */
+    for (int i = 0; i < 23; i++)
+        m4a_sequencer_frame(&seq);
+    ASSERT_EQ(sq->gateTime, 1, "gate about to expire");
+    ASSERT(!(sq->status & CHN_STOP), "not stopped yet");
+    m4a_sequencer_frame(&seq);  /* tick 25: gate -> 0 (STOP), then N24 En3 retriggers the channel */
+    ASSERT_EQ(sq->midiKey, 64, "running-status note En3 started on tick 25");
+    ASSERT_EQ(sq->velocity, 127, "running-status note keeps the velocity");
+    ASSERT_EQ(sq->gateTime, 24, "running-status note keeps the N24 length");
+    ASSERT_EQ(seq.noteCount, 2, "two notes so far");
+
+    /* W12 later a TIE starts: gate 0 (never auto-stops) until EOT. */
+    for (int i = 0; i < 12; i++)
+        m4a_sequencer_frame(&seq);
+    ASSERT_EQ(sq->midiKey, 67, "TIE Gn3 started");
+    ASSERT_EQ(sq->gateTime, 0, "TIE has no gate");
+    for (int i = 0; i < 23; i++)
+        m4a_sequencer_frame(&seq);
+    ASSERT(!(sq->status & CHN_STOP), "tied note still held");
+    m4a_sequencer_frame(&seq);  /* EOT */
+    ASSERT(sq->status & CHN_STOP, "EOT releases the tied note");
+    ASSERT(!m4a_sequencer_finished(&seq), "not finished before FINE");
+    for (int i = 0; i < 12; i++)
+        m4a_sequencer_frame(&seq);  /* W12, FINE */
+    m4a_sequencer_frame(&seq);      /* empty tick -> pause */
+    ASSERT(m4a_sequencer_finished(&seq), "finished after FINE");
+    ASSERT_EQ(seq.noteCount, 3, "three notes in total");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
+static void test_sequencer_deferred_volume(void)
+{
+    printf("Testing sequencer deferred volume (MPlayMain VOLCHG pass)...\n");
+
+    /* Two tracks so two notes can sound at once (square 1 and square 2). */
+    ToneData voices[128];
+    seq_test_voices(voices);
+    voices[1] = voices[0];
+    voices[1].type = VOICE_SQUARE_2;
+    const char *text =
+        "\t.equ\tt_grp, voicegroup_test\n"
+        "\t.section .rodata\n"
+        "\t.global\tt\n"
+        "t_1:\n"
+        "\t.byte\tTEMPO , 75\n"
+        "\t.byte\t\tVOICE , 0\n"
+        "\t.byte\t\tVOL   , 100\n"
+        "\t.byte\t\tTIE   , Cn3 , v127\n"
+        "\t.byte\tW24\n"
+        "\t.byte\t\tVOL   , 50\n"       /* same tick as a note on track 2: see below */
+        "\t.byte\tW24\n"
+        "\t.byte\t\tPAN   , c_v+0\n"    /* a later change re-applies everything */
+        "\t.byte\tW24\n"
+        "\t.byte\tFINE\n"
+        "t_2:\n"
+        "\t.byte\t\tVOICE , 1\n"
+        "\t.byte\t\tVOL   , 100\n"
+        "\t.byte\t\tTIE   , Cn3 , v127\n"
+        "\t.byte\tW24\n"
+        "\t.byte\t\tVOL   , 50\n"
+        "\t.byte\t\tTIE   , En3 , v127\n"  /* VOL then a note in the same tick */
+        "\t.byte\tW48\n"
+        "\t.byte\tFINE\n"
+        "\t.align\t2\n"
+        "t:\n"
+        "\t.byte\t2, 0, 0, 0\n"
+        "\t.word\tt_grp\n"
+        "\t.word\tt_1\n"
+        "\t.word\tt_2\n";
+    M4ASong *song = parse_song_text(text);
+    ASSERT(song != NULL, "deferred-volume song parses");
+    if (!song) return;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+    M4ACGBChannel *sq1 = &engine.cgbChannels[0];
+    M4ACGBChannel *sq2 = &engine.cgbChannels[1];
+
+    m4a_sequencer_frame(&seq);
+    ASSERT(sq1->status & CHN_ON, "track 1 note sounding");
+    ASSERT(sq2->status & CHN_ON, "track 2 note sounding");
+    uint8_t vol100 = sq1->leftVolume;
+    ASSERT(vol100 > 0, "VOL 100 note has volume");
+    ASSERT_EQ(sq2->leftVolume, vol100, "both tracks start at VOL 100");
+
+    for (int i = 0; i < 24; i++)
+        m4a_sequencer_frame(&seq);
+    /* Track 1: VOL 50 alone -> applied at the end of the frame to the
+     * sounding channel.  Track 2: VOL 50 then a note on the same tick -> the
+     * new note has VOL 50 but the quirk is that nothing else would have been
+     * re-applied; the square-2 channel IS the new note here, so check the
+     * track-1 channel got its change and the track-2 note has the new VOL. */
+    ASSERT(sq1->leftVolume < vol100, "track 1: VOL 50 applied at frame end");
+    uint8_t vol50 = sq1->leftVolume;
+    ASSERT_EQ(sq2->leftVolume, vol50, "track 2: new note keyed at VOL 50");
+    ASSERT_EQ(seq.tracks[0].flags & 0x0F, 0, "track 1 flags cleared after the pass");
+    ASSERT_EQ(seq.tracks[1].flags & 0x0F, 0, "track 2 flags cleared by the note");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
+static void test_sequencer_flow(void)
+{
+    printf("Testing sequencer PATT/PEND/GOTO/REPT flow...\n");
+
+    ToneData voices[128];
+    seq_test_voices(voices);
+    M4ASong *song = seq_song(
+        "\t.byte\tTEMPO , 75\n"
+        "\t.byte\t\tVOICE , 0\n"
+        "\t.byte\t\tVOL   , 100\n"
+        "t_1_B1:\n"
+        "\t.byte\tPATT\n"
+        "\t .word\tt_1_000\n"
+        "\t.byte\tPATT\n"
+        "\t .word\tt_1_000\n"
+        "\t.byte\tREPT , 3\n"           /* repeat the following GOTO target 3 times */
+        "\t .word\tt_1_R\n"
+        "\t.byte\tGOTO\n"
+        "\t .word\tt_1_B1\n"
+        "t_1_000:\n"
+        "\t.byte\t\tN12   , Cn3 , v127\n"
+        "\t.byte\tW12\n"
+        "\t.byte\tPEND\n"
+        "t_1_R:\n"
+        "\t.byte\t\tN06   , En3 , v127\n"
+        "\t.byte\tW06\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "flow song parses");
+    if (!song) return;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+
+    /* Tick 1: two patterns are called (first plays, second queued): the
+     * first note.  After 2 x 12 ticks both patterns are done; REPT 3 jumps
+     * to t_1_R and the En3 plays, W06, FINE.  REPT's counter means the
+     * jump happens while repN < 3, so t_1_R runs once and FINE ends it
+     * (REPT jumps only when the target is reached again, which FINE
+     * prevents): expect 2 Cn3 + 1 En3 notes. */
+    for (int i = 0; i < 40 && !m4a_sequencer_finished(&seq); i++)
+        m4a_sequencer_frame(&seq);
+    ASSERT(m4a_sequencer_finished(&seq), "flow song finishes");
+    ASSERT_EQ(seq.noteCount, 3, "two pattern notes plus one after REPT");
+    ASSERT_EQ(seq.loopPasses, 0, "REPT is not counted as a GOTO loop pass");
+    m4a_song_free(song);
+
+    /* A GOTO loop: the loop pass counter advances once per backward GOTO. */
+    song = seq_song(
+        "\t.byte\tTEMPO , 75\n"
+        "\t.byte\t\tVOICE , 0\n"
+        "\t.byte\t\tVOL   , 100\n"
+        "t_1_B1:\n"
+        "\t.byte\t\tN06   , Cn3 , v127\n"
+        "\t.byte\tW12\n"
+        "\t.byte\tGOTO\n"
+        "\t .word\tt_1_B1\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "loop song parses");
+    if (song) {
+        m4a_sequencer_start(&seq, song);
+        for (int i = 0; i < 12 * 5 + 1; i++)
+            m4a_sequencer_frame(&seq);
+        ASSERT_EQ(seq.loopPasses, 5, "five GOTO passes in 61 ticks");
+        ASSERT_EQ(seq.noteCount, 6, "six notes in 61 ticks");
+        ASSERT(!m4a_sequencer_finished(&seq), "a looping song never finishes");
+        m4a_song_free(song);
+    }
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+}
+
+static void test_sequencer_lfo_and_engine_tick(void)
+{
+    printf("Testing sequencer LFO on the frame hook...\n");
+
+    /* Through the engine's own tick: the hook runs the sequencer, and the
+     * engine's internal tempo/LFO loop stays off while attached. */
+    ToneData voices[128];
+    seq_test_voices(voices);
+    M4ASong *song = seq_song(
+        "\t.byte\tTEMPO , 75\n"
+        "\t.byte\t\tVOICE , 0\n"
+        "\t.byte\t\tVOL   , 100\n"
+        "\t.byte\t\tLFOS  , 1\n"
+        "\t.byte\t\tMOD   , 64\n"
+        "\t.byte\t\tTIE   , Cn3 , v127\n"
+        "\t.byte\tW96\n"
+        "\t.byte\tW96\n"
+        "\t.byte\tEOT\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "lfo song parses");
+    if (!song) return;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    ASSERT(engine.externalSequencer, "engine knows a sequencer is attached");
+    m4a_sequencer_start(&seq, song);
+
+    for (int i = 0; i < 100; i++)
+        m4a_engine_tick(&engine);
+    ASSERT_EQ(seq.clock, 100, "engine ticks drive the sequencer");
+    /* lfoSpeed 1: lfoSpeedC counts the LFO steps.  The LFO steps once per
+     * tick after the wait is consumed: 100 ticks, the first one starting
+     * the note (its W96 is consumed on that tick too, so it steps). */
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 100, "one LFO step per song tick");
+    ASSERT(engine.cgbChannels[0].status & CHN_ON, "tied note still sounding");
+    ASSERT_EQ(engine.cgbChannels[0].gateTime, 0, "engine tick did not touch the TIE gate");
+
+    m4a_sequencer_detach(&seq);
+    ASSERT(!engine.externalSequencer, "detach restores the engine's own tick");
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -2275,6 +2812,12 @@ int main(void)
     test_pcm_reverse();
     test_pcm_reverse_legato_inherit();
     test_pcm_dpcm();
+    test_song_parser();
+    test_sequencer_tempo();
+    test_sequencer_notes();
+    test_sequencer_deferred_volume();
+    test_sequencer_flow();
+    test_sequencer_lfo_and_engine_tick();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

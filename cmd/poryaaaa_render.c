@@ -26,6 +26,8 @@
 #endif
 #include "m4a_engine.h"
 #include "m4a_reverb.h"
+#include "m4a_song.h"
+#include "m4a_sequencer.h"
 #include "voicegroup_loader.h"
 
 /* ========================================================================
@@ -717,11 +719,17 @@ static void print_usage(const char *prog)
 {
     fprintf(stderr,
         "Usage: %s <project_root> <voicegroup> --midi <file.mid> [options]\n"
+        "       %s <project_root> [<voicegroup>] --song <file.s> [options]\n"
         "\n"
         "Required:\n"
         "  <project_root>              Path to pokeemerald/pokefirered project root\n"
-        "  <voicegroup>                Voicegroup name (e.g. petalburg)\n"
-        "  --midi <file.mid>           MIDI input file\n"
+        "  <voicegroup>                Voicegroup name (e.g. petalburg); with --song it\n"
+        "                              is optional and overrides the song's _grp symbol\n"
+        "  --midi <file.mid>           MIDI input file, or\n"
+        "  --song <file.s>             compiled song (mid2agb output) played through the\n"
+        "                              MPlayMain sequencer port.  Master volume, reverb\n"
+        "                              and the voicegroup are baked into the .s file, so\n"
+        "                              --song-volume / --reverb are ignored on this path.\n"
         "\n"
         "Output (at least one required):\n"
         "  --output <file.wav>         Write rendered audio to WAV file\n"
@@ -746,8 +754,164 @@ static void print_usage(const char *prog)
         "                              the loop end is tied (held forever, as on hardware)\n"
         "  --fadeout <seconds>         Fadeout duration after final loop (default: 5.0)\n"
         "  --total-duration-seconds <s>  Override loop-count; set exact total duration\n"
-        "                                (fadeout occupies the final --fadeout seconds)\n",
-        prog);
+        "                                (fadeout occupies the final --fadeout seconds)\n"
+        "  (with --song, loop-count counts passes through the song's GOTO; the song's\n"
+        "   FINE ends the render after --tail seconds)\n",
+        prog, prog);
+}
+
+/* ========================================================================
+ * Compiled-song path: play a mid2agb .s file through the sequencer port.
+ * Produces the rendered buffers; the caller handles output.
+ * ======================================================================== */
+
+typedef struct {
+    const char *projectRoot;
+    const char *voicegroup;      /* NULL: use the song header's */
+    const char *songPath;
+    bool analogFilter, respectBaseMidiKey, portamento, pwm;
+    int maxChannels;
+    double sampleRate;
+    float pcmMixRate;
+    double tailSeconds, fadeoutSeconds, totalDurSeconds;
+    int loopCount;
+} SongRenderOpts;
+
+static int grow_buffers(float **l, float **r, uint64_t *cap, uint64_t need)
+{
+    if (need <= *cap)
+        return 0;
+    uint64_t cap2 = *cap ? *cap : (1u << 20);
+    while (cap2 < need)
+        cap2 *= 2;
+    float *nl = realloc(*l, cap2 * sizeof(float));
+    float *nr = realloc(*r, cap2 * sizeof(float));
+    if (!nl || !nr) {
+        free(nl ? nl : *l);
+        free(nr ? nr : *r);
+        *l = *r = NULL;
+        return -1;
+    }
+    *l = nl; *r = nr; *cap = cap2;
+    return 0;
+}
+
+static int render_song(const SongRenderOpts *o, float **outL, float **outR,
+                       uint64_t *outTotal, uint64_t *outFadeStart)
+{
+    char err[256];
+    printf("Parsing song file: %s\n", o->songPath);
+    M4ASong *song = m4a_song_load(o->songPath, err, sizeof(err));
+    if (!song) {
+        fprintf(stderr, "Failed to parse %s: %s\n", o->songPath, err);
+        return -1;
+    }
+    printf("  %s: %u tracks, %u bytes, priority %u, reverb %s%u, voicegroup %s\n",
+           song->name, song->trackCount, song->size, song->priority,
+           (song->reverb & 0x80) ? "" : "(unset) ", song->reverb & 0x7F, song->voicegroup);
+
+    const char *vgName = o->voicegroup ? o->voicegroup : song->voicegroup;
+    if (o->voicegroup && strcmp(o->voicegroup, song->voicegroup) != 0)
+        printf("  Voicegroup override: %s (song says %s)\n", o->voicegroup, song->voicegroup);
+
+    printf("Loading voicegroup '%s' from %s...\n", vgName, o->projectRoot);
+    fflush(stdout);
+    LoadedVoiceGroup *vg = voicegroup_load(o->projectRoot, vgName, NULL);
+    if (!vg) {
+        fprintf(stderr, "Failed to load voicegroup '%s'\n", vgName);
+        m4a_song_free(song);
+        return -1;
+    }
+    printf("Voicegroup loaded successfully.\n");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, (float)o->sampleRate);
+    m4a_engine_set_voicegroup(&engine, vg->voices);
+    m4a_engine_set_song_volume(&engine, MAX_SONG_VOLUME); /* baked into the song's VOL bytes */
+    engine.analogFilter = o->analogFilter;
+    engine.maxPcmChannels = (uint8_t)o->maxChannels;
+    engine.respectBaseMidiKey = o->respectBaseMidiKey;
+    m4a_engine_set_portamento_enabled(&engine, o->portamento);
+    m4a_engine_set_pwm_enabled(&engine, o->pwm);
+    m4a_engine_set_pcm_mix_rate(&engine, o->pcmMixRate);
+
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+
+    /* Render plan.  A fixed --total-duration-seconds renders exactly that
+     * long (fadeout in the final --fadeout seconds).  Otherwise the song
+     * decides: FINE on every track ends it after --tail seconds, and the
+     * --loop-count'th pass through its GOTO starts the fadeout. */
+    const double rate = o->sampleRate;
+    uint64_t fadeSamps = (uint64_t)(o->fadeoutSeconds * rate + 0.5);
+    uint64_t tailSamps = (uint64_t)(o->tailSeconds * rate + 0.5);
+    uint64_t total = 0, fadeStart = UINT64_MAX, cap = 0;
+    float *l = NULL, *r = NULL;
+    bool fixed = o->totalDurSeconds >= 0.0;
+    uint64_t limit = fixed ? (uint64_t)(o->totalDurSeconds * rate + 0.5)
+                           : (uint64_t)(30.0 * 60.0 * rate); /* safety cap */
+    if (fixed) {
+        fadeStart = limit > fadeSamps ? limit - fadeSamps : 0;
+        printf("  Total render: %.2f s (fadeout starts %.3f s)\n",
+               (double)limit / rate, (double)fadeStart / rate);
+    }
+    uint64_t endAt = UINT64_MAX;  /* dynamic: set when FINE / loop count reached */
+
+    printf("Rendering...\n");
+    fflush(stdout);
+    const int block = 256;
+    while (total < limit && total < endAt) {
+        uint64_t n = block;
+        if (total + n > limit) n = limit - total;
+        if (total + n > endAt) n = endAt - total;
+        if (grow_buffers(&l, &r, &cap, total + n) != 0) {
+            fprintf(stderr, "Out of memory allocating audio buffers\n");
+            m4a_sequencer_detach(&seq);
+            m4a_engine_destroy(&engine);
+            voicegroup_free(vg);
+            m4a_song_free(song);
+            return -1;
+        }
+        m4a_engine_process(&engine, l + total, r + total, (int)n);
+        total += n;
+
+        if (!fixed && endAt == UINT64_MAX) {
+            if (m4a_sequencer_finished(&seq)) {
+                endAt = total + tailSamps;
+                printf("  Song ended (FINE) at %.3f s; %.2f s tail\n",
+                       (double)total / rate, o->tailSeconds);
+            } else if (seq.loopPasses >= (uint32_t)o->loopCount) {
+                fadeStart = total;
+                endAt = total + fadeSamps;
+                printf("  Loop pass %u reached at %.3f s; fading out over %.2f s\n",
+                       seq.loopPasses, (double)total / rate, o->fadeoutSeconds);
+            }
+        }
+    }
+    if (!fixed && endAt == UINT64_MAX)
+        fprintf(stderr, "Warning: stopped at the %.0f s safety limit (no FINE or GOTO reached)\n",
+                (double)limit / rate);
+
+    printf("  %u notes, %u song ticks\n", seq.noteCount, seq.clock);
+    if (fadeStart != UINT64_MAX && fadeStart < total) {
+        uint64_t fs = total - fadeStart;
+        for (uint64_t i = 0; i < fs; i++) {
+            float gain = 1.0f - (float)i / (float)fs;
+            l[fadeStart + i] *= gain;
+            r[fadeStart + i] *= gain;
+        }
+    }
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    voicegroup_free(vg);
+    m4a_song_free(song);
+    *outL = l;
+    *outR = r;
+    *outTotal = total;
+    *outFadeStart = fadeStart;
+    return 0;
 }
 
 /* Loop-expansion bookkeeping: which notes are keyed on (note-on emitted, no
@@ -826,6 +990,9 @@ static void render_frames(M4AEngine *engine, float *outL, float *outR,
     }
 }
 
+static int output_audio(const float *outL, const float *outR, uint64_t totalSamples,
+                        int sampleRateHz, const char *outputPath, bool doPlay);
+
 int main(int argc, char *argv[])
 {
     /* Line-buffer stdout even when piped so progress prints stay visible
@@ -838,8 +1005,13 @@ int main(int argc, char *argv[])
     }
 
     const char *projectRoot   = argv[1];
-    const char *vgName        = argv[2];
+    /* The voicegroup positional is optional with --song (the header names it). */
+    const char *vgName        = (strncmp(argv[2], "--", 2) == 0) ? NULL : argv[2];
+    int         firstOpt      = vgName ? 3 : 2;
     const char *midiPath      = NULL;
+    const char *songPath      = NULL;
+    bool        songVolumeSet = false;
+    bool        reverbSet     = false;
     const char *outputPath    = NULL;
     bool        doPlay        = false;
     int         songVolume    = 127;
@@ -857,19 +1029,23 @@ int main(int argc, char *argv[])
     double      fadeoutSeconds = 5.0;
     double      totalDurSeconds = -1.0; /* -1 = not set */
 
-    for (int i = 3; i < argc; i++) {
+    for (int i = firstOpt; i < argc; i++) {
         if (strcmp(argv[i], "--midi") == 0 && i + 1 < argc) {
             midiPath = argv[++i];
+        } else if (strcmp(argv[i], "--song") == 0 && i + 1 < argc) {
+            songPath = argv[++i];
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
             outputPath = argv[++i];
         } else if (strcmp(argv[i], "--play") == 0) {
             doPlay = true;
         } else if (strcmp(argv[i], "--song-volume") == 0 && i + 1 < argc) {
             songVolume = atoi(argv[++i]);
+            songVolumeSet = true;
             if (songVolume < 0)   songVolume = 0;
             if (songVolume > 127) songVolume = 127;
         } else if (strcmp(argv[i], "--reverb") == 0 && i + 1 < argc) {
             reverbAmount = atoi(argv[++i]);
+            reverbSet = true;
             if (reverbAmount < 0)   reverbAmount = 0;
             if (reverbAmount > 127) reverbAmount = 127;
         } else if (strcmp(argv[i], "--analog-filter") == 0) {
@@ -911,8 +1087,13 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!midiPath) {
-        fprintf(stderr, "Error: --midi is required\n\n");
+    if ((midiPath == NULL) == (songPath == NULL)) {
+        fprintf(stderr, "Error: exactly one of --midi or --song is required\n\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+    if (midiPath && !vgName) {
+        fprintf(stderr, "Error: --midi needs a <voicegroup> argument\n\n");
         print_usage(argv[0]);
         return 1;
     }
@@ -923,6 +1104,29 @@ int main(int argc, char *argv[])
     }
 
     double sampleRate = (double)sampleRateHz;
+
+    if (songPath) {
+        if (songVolumeSet || reverbSet)
+            fprintf(stderr, "Note: --song-volume / --reverb are ignored with --song "
+                            "(the .s file carries its own master volume and reverb)\n");
+        SongRenderOpts o = {
+            .projectRoot = projectRoot, .voicegroup = vgName, .songPath = songPath,
+            .analogFilter = analogFilter, .respectBaseMidiKey = respectBaseMidiKey,
+            .portamento = portamento, .pwm = pwm, .maxChannels = maxChannels,
+            .sampleRate = sampleRate, .pcmMixRate = pcmMixRate,
+            .tailSeconds = tailSeconds, .fadeoutSeconds = fadeoutSeconds,
+            .totalDurSeconds = totalDurSeconds, .loopCount = loopCount,
+        };
+        float *sl, *sr;
+        uint64_t sTotal, sFade;
+        if (render_song(&o, &sl, &sr, &sTotal, &sFade) != 0)
+            return 1;
+        printf("Rendering complete.\n");
+        int rc = output_audio(sl, sr, sTotal, sampleRateHz, outputPath, doPlay);
+        free(sl);
+        free(sr);
+        return rc;
+    }
 
     /* ---- Parse MIDI ---- */
     printf("Parsing MIDI file: %s\n", midiPath);
@@ -1306,6 +1510,24 @@ oom:
 
     printf("Rendering complete.\n");
 
+    int rc = output_audio(outL, outR, totalSamples, sampleRateHz, outputPath, doPlay);
+
+    /* ---- Cleanup ---- */
+    free(outL);
+    free(outR);
+    m4a_engine_destroy(&engine);
+    voicegroup_free(vg);
+    free(extEvts);
+    free(events->events);
+    free(events);
+
+    return rc;
+}
+
+/* Write and/or play the rendered buffers. */
+static int output_audio(const float *outL, const float *outR, uint64_t totalSamples,
+                        int sampleRateHz, const char *outputPath, bool doPlay)
+{
     /* ---- WAV output ---- */
     if (outputPath) {
         printf("Writing %s...\n", outputPath);
@@ -1368,15 +1590,6 @@ oom:
 
         printf("Playback complete.\n");
     }
-
-    /* ---- Cleanup ---- */
-    free(outL);
-    free(outR);
-    m4a_engine_destroy(&engine);
-    voicegroup_free(vg);
-    free(extEvts);
-    free(events->events);
-    free(events);
 
     return 0;
 }

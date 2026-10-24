@@ -632,15 +632,51 @@ static void portamento_note_started(M4AEngine *engine, M4ATrack *track,
 /*
  * Note On
  */
-void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity)
+static void clear_mod_m(M4AEngine *engine, M4ATrack *track, int trackIndex);
+
+/* ply_note, after a channel has been taken: the LFO delay restarts for the
+ * new note (lfoDelayC = lfoDelay) and, when a delay is set, clear_modM zeroes
+ * the LFO output so the note starts unmodulated.  Returns true when keyM /
+ * pitM changed and note keys must be recomputed. */
+static bool note_on_restart_lfo_delay(M4AEngine *engine, M4ATrack *track, int trackIndex)
+{
+    track->lfoDelayC = track->lfoDelay;
+    if (track->lfoDelay == 0)
+        return false;
+    clear_mod_m(engine, track, trackIndex);
+    return true;
+}
+
+/* Final keys for a note: the played key plus the track's keyM transposition,
+ * with the PCM variants used by the base-MIDI-key opt-in. */
+static void note_on_keys(const M4AEngine *engine, const M4ATrack *track, uint8_t useKey,
+                         int32_t pcmBaseAdjust, int32_t *finalKey, int32_t *pcmKey,
+                         int32_t *pcmFinalKey)
+{
+    int32_t fk = (int32_t)useKey + track->keyM;
+    if (fk < 0) fk = 0;
+    if (fk > 127) fk = 127;
+    int32_t pk = (int32_t)useKey + pcmBaseAdjust;
+    if (pk < 0) pk = 0;
+    if (pk > 255) pk = 255;
+    int32_t pfk = pk + track->keyM;
+    int32_t pcmFinalKeyMax = engine->respectBaseMidiKey ? 178 : 127;
+    if (pfk < 0) pfk = 0;
+    if (pfk > pcmFinalKeyMax) pfk = pcmFinalKeyMax;
+    *finalKey = fk;
+    *pcmKey = pk;
+    *pcmFinalKey = pfk;
+}
+
+int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity)
 {
     /* Keysplit/rhythm voices index 128-entry tables by key. */
     if (trackIndex < 0 || trackIndex >= MAX_TRACKS || key > 127)
-        return;
+        return M4A_CHANNEL_NONE;
 
     M4ATrack *track = &engine->tracks[trackIndex];
     ToneData *voice = resolve_voice(&track->currentVoice, key);
-    if (!voice) return;
+    if (!voice) return M4A_CHANNEL_NONE;
 
     uint8_t voiceType = voice->type & VOICE_TYPE_CGB_MASK;
     int8_t rhythmPan = 0;
@@ -673,16 +709,8 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
      * the base-MIDI-key opt-in is on) is folded into the PCM key/clamp; with the
      * feature off pcmBaseAdjust is 0 and pcmKey/pcmFinalKey collapse to the
      * original useKey/finalKey values. */
-    int32_t finalKey = (int32_t)useKey + track->keyM;
-    if (finalKey < 0) finalKey = 0;
-    if (finalKey > 127) finalKey = 127;
-    int32_t pcmKey = (int32_t)useKey + pcmBaseAdjust;
-    if (pcmKey < 0) pcmKey = 0;
-    if (pcmKey > 255) pcmKey = 255;
-    int32_t pcmFinalKey = pcmKey + track->keyM;
-    int32_t pcmFinalKeyMax = engine->respectBaseMidiKey ? 178 : 127;
-    if (pcmFinalKey < 0) pcmFinalKey = 0;
-    if (pcmFinalKey > pcmFinalKeyMax) pcmFinalKey = pcmFinalKeyMax;
+    int32_t finalKey, pcmKey, pcmFinalKey;
+    note_on_keys(engine, track, useKey, pcmBaseAdjust, &finalKey, &pcmKey, &pcmFinalKey);
 
     if (voiceType >= 1 && voiceType <= 4) {
         /* CGB channel */
@@ -700,7 +728,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
             record_poly_event(engine, M4A_POLY_DROPPED, (uint8_t)trackIndex, key,
                               (uint8_t)trackIndex);
             if (!engine->polyDebugInvert)
-                return;
+                return M4A_CHANNEL_NONE;
             ch = &engine->cgbChannels[MAX_CGB_CHANNELS + cgbIdx];
             shadow = true;
         } else if ((ch->status & CHN_ON) && ch->trackIndex != trackIndex) {
@@ -713,6 +741,10 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
             if (engine->polyDebugInvert)
                 preserve_stolen_cgb(engine, ch, cgbIdx);
         }
+
+        /* A dropped note never got this far on the GBA. */
+        if (!shadow && note_on_restart_lfo_delay(engine, track, trackIndex))
+            note_on_keys(engine, track, useKey, pcmBaseAdjust, &finalKey, &pcmKey, &pcmFinalKey);
 
         /* Portamento legato: CGB tone types share one channel slot, so a
          * non-zero envelope volume means the previous note was still audible
@@ -797,9 +829,10 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
          * start key of a later portamento glide. */
         if (!shadow)
             portamento_note_started(engine, track, trackIndex, ch->key);
+        return (int)(TOTAL_PCM_CHANNELS + (ch - engine->cgbChannels));
     } else {
         /* PCM DirectSound channel */
-        if (!voice->wav) return;
+        if (!voice->wav) return M4A_CHANNEL_NONE;
 
         bool shadow = false;
         M4APCMChannel *ch = allocate_pcm_channel(engine, combinedPriority, trackIndex,
@@ -818,12 +851,16 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
             record_poly_event(engine, M4A_POLY_DROPPED, (uint8_t)trackIndex, key,
                               (uint8_t)trackIndex);
             if (!engine->polyDebugInvert)
-                return;
+                return M4A_CHANNEL_NONE;
             ch = allocate_pcm_channel(engine, combinedPriority, trackIndex,
                                       MAX_PCM_CHANNELS, MAX_PCM_CHANNELS);
-            if (!ch) return;
+            if (!ch) return M4A_CHANNEL_NONE;
             shadow = true;
         }
+
+        /* A dropped note never got this far on the GBA. */
+        if (!shadow && note_on_restart_lfo_delay(engine, track, trackIndex))
+            note_on_keys(engine, track, useKey, pcmBaseAdjust, &finalKey, &pcmKey, &pcmFinalKey);
 
         ch->midiKey = key;
         ch->key = (uint8_t)pcmKey;
@@ -913,6 +950,7 @@ void m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t 
          * start key of a later portamento glide. */
         if (!shadow)
             portamento_note_started(engine, track, trackIndex, ch->key);
+        return (int)(ch - engine->pcmChannels);
     }
 }
 
@@ -976,9 +1014,10 @@ static void refresh_channel_pitches(M4AEngine *engine, M4ATrack *track, int trac
 /* Recalculate track vol/pan and push updated rightVolume/leftVolume into
 * all active channels on the track. Matches MPlayMain's behavior of calling
 * ChnVolSetAsm on every active channel when MPT_FLG_VOLCHG is set. */
-static inline void refresh_volumes(M4AEngine *engine, M4ATrack *track, int trackIndex)
+/* Push the track's (already computed) volMR/volML into its channels: the
+ * ChnVolSetAsm half of MPlayMain's VOLCHG pass. */
+static void apply_track_volumes(M4AEngine *engine, M4ATrack *track, int trackIndex)
 {
-    m4a_track_vol_pit_set(track);
     for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
         M4APCMChannel *ch = &engine->pcmChannels[i];
         if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex)
@@ -995,6 +1034,24 @@ static inline void refresh_volumes(M4AEngine *engine, M4ATrack *track, int track
             ch->modify |= 0x01;
         }
     }
+}
+
+static inline void refresh_volumes(M4AEngine *engine, M4ATrack *track, int trackIndex)
+{
+    m4a_track_vol_pit_set(track);
+    apply_track_volumes(engine, track, trackIndex);
+}
+
+void m4a_engine_track_apply(M4AEngine *engine, int trackIndex, bool volume, bool pitch)
+{
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
+        return;
+    M4ATrack *track = &engine->tracks[trackIndex];
+    m4a_track_vol_pit_set(track);
+    if (volume)
+        apply_track_volumes(engine, track, trackIndex);
+    if (pitch)
+        refresh_channel_pitches(engine, track, trackIndex);
 }
 
 /* Mirrors the GBA's clear_modM: zero the LFO accumulator and immediately push
@@ -1086,8 +1143,15 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         if (value == 0)
             clear_mod_m(engine, track, trackIndex);
         break;
-    case 0x16: /* Modulation type (MODT) */
-        // TODO: none of the pokemon emerald songs use MODT
+    case 0x16: /* Modulation type (MODT): 0 vibrato, 1 tremolo, 2 auto-pan.
+                * Mirrors ply_modt: a change re-evaluates both volume and pitch
+                * (the LFO output moves from one to the other). */
+        if (track->modT != value) {
+            track->modT = value;
+            m4a_track_vol_pit_set(track);
+            refresh_channel_pitches(engine, track, trackIndex);
+            refresh_volumes(engine, track, trackIndex);
+        }
         break;
     case 0x17: { /* Pulse-width mod duty-cycle pattern (PWMC); 0 = disable.
                   * Opt-in: ignored unless the PWM feature is enabled.  Mirrors
@@ -1139,11 +1203,14 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
             }
         }
         break;
-    case 0x18: /* Micro tuning (TUNE) */
-        // TODO: none of the pokemon emerald songs use TUNE
+    case 0x18: /* Micro tuning (TUNE), c_v-centred like PAN/BEND: mirrors ply_tune. */
+        track->tune = (int8_t)(value - 64);
+        m4a_track_vol_pit_set(track);
+        refresh_channel_pitches(engine, track, trackIndex);
         break;
-    case 0x1A: /* LFO delay (LFODL) */
-        // TODO: none of the pokemon emerald songs use LFODL
+    case 0x1A: /* LFO delay (LFODL) in song ticks: mirrors ply_lfodl.  Takes
+                * effect at the next note start, which reloads lfoDelayC. */
+        track->lfoDelay = value;
         break;
     case 0x1E: /* XCMD select: stashed until CC 0x1D/0x1F fires it (mid2agb's
                 * s_extendedCommand). */
@@ -1490,6 +1557,11 @@ static void m4a_pwm_tick(M4AEngine *engine)
  */
 void m4a_engine_tick(M4AEngine *engine)
 {
+    /* The song sequencer runs first, like MPlayMain inside SoundMain. */
+    if (engine->frameHook)
+        engine->frameHook(engine, engine->frameHookUser);
+    bool seq = engine->externalSequencer;
+
     /* Advance c15 counter (0-14 cycle) */
     if (engine->c15 > 0)
         engine->c15--;
@@ -1501,8 +1573,8 @@ void m4a_engine_tick(M4AEngine *engine)
     for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
         M4APCMChannel *ch = &engine->pcmChannels[i];
         if (ch->status & CHN_ON) {
-            /* Decrement gate time */
-            if (ch->gateTime > 0) {
+            /* Decrement gate time (the sequencer counts gates in song ticks) */
+            if (!seq && ch->gateTime > 0) {
                 ch->gateTime--;
                 if (ch->gateTime == 0)
                     ch->status |= CHN_STOP;
@@ -1515,7 +1587,7 @@ void m4a_engine_tick(M4AEngine *engine)
     for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
         M4ACGBChannel *ch = &engine->cgbChannels[i];
         if (ch->status & CHN_ON) {
-            if (ch->gateTime > 0) {
+            if (!seq && ch->gateTime > 0) {
                 ch->gateTime--;
                 if (ch->gateTime == 0)
                     ch->status |= CHN_STOP;
@@ -1526,10 +1598,12 @@ void m4a_engine_tick(M4AEngine *engine)
 
     /* Tempo accumulator drives LFO ticks, matching MPlayMain's tempo loop.
      * tempoC += tempoI each VBlank; fires one LFO tick per 150 accumulated. */
-    engine->tempoC += engine->tempoI;
-    while (engine->tempoC >= 150) {
-        engine->tempoC -= 150;
-        m4a_lfo_tick(engine);
+    if (!seq) {
+        engine->tempoC += engine->tempoI;
+        while (engine->tempoC >= 150) {
+            engine->tempoC -= 150;
+            m4a_lfo_tick(engine);
+        }
     }
 
     /* Advance portamento glides last so they override any pitch the LFO
