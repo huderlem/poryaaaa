@@ -159,7 +159,103 @@ must address:
    sweep unit stops the channel on a downward sweep. It falls to the
    mixer/CgbSound port, but if it is a one-line bug it can go earlier.
 
-### Next: engine milestone 1, the sequencer
+### Done: engine milestone 1, the sequencer (branch `accuracy-harness`)
+
+What landed (commits after 9ccb294):
+
+- `plugin/m4a_song.{h,c}`: parser for mid2agb `.s` output (the GNU as
+  subset it uses plus the MPlayDef.s vocabulary built in; no binutils at run
+  time). Output is the song's `.rodata` image with offsets in place of
+  addresses and a relocation list. `test/test_song_parser.c`
+  (`poryaaaa_song_tests`, run by the `accuracy` target) relocates every song
+  to its address from `accuracy_test.map` and compares with the ROM: all 561
+  songs in the ROM (31 micro-tests, every vanilla song, SE and phoneme)
+  match byte for byte.
+- `plugin/m4a_sequencer.{h,c}`: port of MPlayMain and the ply_* handlers,
+  structured like m4a_1.s. Runs from a new engine frame hook at the top of
+  `m4a_engine_tick` (where MPlayMain sits in SoundMain), with the engine's
+  own gate-time / tempo / LFO work disabled while attached. Tempo is the
+  per-frame accumulator verbatim. Track parameters are written to the engine
+  track and applied at frame end through `m4a_engine_track_apply` (the
+  VOLCHG/PITCHG pass), including the quirk that ply_note clears the pending
+  flags. Notes go through `m4a_engine_note_on`, which now returns the
+  channel it started so the sequencer can set the gate time in ticks and
+  pick the newest channel for EOT. Engine fidelity fixes that came with it:
+  ply_note's LFO-delay restart (`lfoDelayC = lfoDelay`, clear_modM) at note
+  start, and the MODT (CC 0x16), TUNE (CC 0x18) and LFODL (CC 0x1A)
+  commands, which were unimplemented on the MIDI path too.
+- `poryaaaa_render --song <file.s>` (voicegroup from the header, master
+  volume and reverb baked in; `--song-volume`/`--reverb` are ignored with a
+  note). Without `--total-duration-seconds` the song's FINE ends the render
+  and `--loop-count` counts passes through its GOTO.
+- `accuracy.py --input song|midi`, default `song`. `metrics.find_lag` now
+  picks, among the envelope-correlation estimate and the top waveform
+  cross-correlation peaks, the lag with the deepest raw null: the old
+  two-stage aligner missed the true lag by 4 to 30 ms on a third of the PCM
+  tests once the renders got close, and reported it as lag scatter.
+- Corpus: `songs.json` has 7 songs (littleroot, weather_groudon = pure PSG
+  with pseudo-echo, vs_wild = DirectSound-heavy battle, mt_chimney = noise,
+  rg_vs_trainer = FRLG drumset, vs_trainer = the one vanilla MEMACC,
+  credits = 60 s). No vanilla music uses compressed samples (cries only), so
+  that category is the `pcm_cmp` micro-test until milestone 4.
+
+Reports: `baselines/2026-10-24_sequencer.json` (song input) and
+`baselines/2026-10-24_sequencer_midi-path.json` (the same build on `--input
+midi`, scored with the new aligner, for an apples-to-apples "before").
+
+| test | before null | after null | before drift | after drift | lag before -> after |
+|------|------------:|-----------:|-------------:|------------:|--------------------|
+| mus_littleroot | +1.4 | -4.8 | 3.9 | 0.0 | 118.9 -> 53.6 |
+| mus_vs_wild (new) | +1.6* | -5.3 | 2.6* | 0.0 | 53.6 |
+| mus_mt_chimney (new) | +1.7* | -2.1 | 4.2* | 0.0 | 53.6 |
+| mus_rg_vs_trainer (new) | +1.5* | -1.9 | 4.2* | 0.0 | 53.6 |
+| mus_vs_trainer (new) | +1.6* | -4.8 | 2.6* | 0.0 | 53.6 |
+| mus_credits (new, 60 s) | +1.5* | -4.0 | 5.5* | 0.0 | 53.6 |
+| mus_weather_groudon (new) | +1.2* | +1.2 | n/a | n/a | uncorrelated |
+| pcm micro-tests (16) | -3.6 .. +0.6 | -7.4 .. -9.4 | | | all 53.6 (pcm_hi 28.8) |
+| wave / wave_alt | -2.6 | -6.9 / -6.2 | | | 36.7 / 36.6 |
+| square / noise micro-tests | -4.3 .. +1.2 | -2.4 .. +0.3 | | | period-ambiguous |
+
+(*) measured with `--input midi` on the sequencer build. Gate: still 0/38
+at -40 dB, as expected. `compare_reports.py` against the f57f5a4 baseline
+flags three square tests (sq1_env, sq1_alt, sq2_alt) as 1 to 2 dB worse;
+see finding 3.
+
+Findings for the next milestones:
+
+1. **Exit criterion met for PCM and songs.** Drift is 0.0 on every song
+   that correlates, and the lag is 53.6 ms (2575 samples at 48 kHz) on
+   every PCM micro-test and every song. This is the constant the output
+   stage must reproduce: ROM start on frame 1 plus DMA latency. Wave and
+   noise tests agree on ~36.5 ms, 17 ms (one frame) less than PCM, which
+   is the PSG-vs-DMA path difference the cycle-based scheduler should
+   produce by itself.
+2. **Two renders only null down to the PCM step phase.** A note that starts
+   at a different phase of the 13379 Hz mix grid gives a different
+   sub-sample waveform; the same engine playing the same note from the MIDI
+   and song paths is bit-identical at host mix rate but only -3 dB at 13379
+   Hz. The null depth against mgba is bounded the same way until the output
+   stage models the DMA sample-and-hold at the real cycle offsets.
+3. **Square-wave tests are in the uncorrelated regime** (null -2 .. +3 dB)
+   and move by +-2 dB with the oscillator phase and the free-running 64 Hz
+   hardware-envelope phase at note start, both of which the engine does not
+   reset on retrigger and which the frame-quantized note start shifted. The
+   three flagged "regressions" are this noise; nothing to chase before the
+   PSG port. Pure-PSG mus_weather_groudon likewise does not correlate at
+   all, so its drift column is noise.
+4. **pcm_hi** prefers a lag of 28.8 ms: its high-key aliasing differs enough
+   that the best null is off the true onset. Mixer milestone.
+5. The MIDI path numbers on the same build show MODT/TUNE/LFODL and the
+   LFO-delay restart working there too (lfo_trem -7.5, lfo_pan -7.4, tune
+   -2.3, lfo_delay -2.9 dB, from +0.7, +0.8, +0.5, -0.7).
+
+### Next: engine milestone 2, the output stage
+
+The plan section above stands.  The sequencer's frame hook is where the
+cycle-based scheduler should call MPlayMain; the per-frame tick already
+runs the sequencer before the envelopes, as SoundMain does.
+
+### Reference: milestone 1 decisions as agreed
 
 Goal restated: `poryaaaa_render` and the harness play the **compiled** song
 data (mid2agb output) through a port of MPlayMain, so the input to both
