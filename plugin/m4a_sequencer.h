@@ -81,12 +81,19 @@ typedef struct {
      * matching channel: the GBA's chain is newest-first). */
     uint32_t chanSeq[TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS];
     uint32_t seqCounter;
+    /* Track (+1) whose chain a channel was started in; 0 once the tick's
+     * chain walk has dropped it (ClearChain cost in the timing model). */
+    uint8_t chainOwner[TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS];
 
     /* Statistics for hosts: GOTO loop passes (on the first track that
      * executes a GOTO) and notes started. */
     uint32_t loopPasses;
     int loopTrack;
     uint32_t noteCount;
+
+    /* SoundMain timing model: CPU cycles of MPlayMain work this frame
+     * (M4A_CYC_* in m4a_engine.h), published to engine->cgbEntryCycles. */
+    int32_t frameCycles;
 } M4ASequencer;
 
 /* Attach to an engine: installs the frame hook and takes over the per-tick

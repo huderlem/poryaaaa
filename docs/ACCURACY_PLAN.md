@@ -569,6 +569,87 @@ the raw logs.  All cycles below are relative to the start of VBlank line
   256 cycles wide, puts this floor around -50 dB on songs and nowhere on
   the micro-tests; not worth modeling before the mixer.
 
+### Done: SoundMain timing model (step 2, 2026-10-24)
+
+**27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`
+against `baselines/2026-10-24_output-stage.json`: 0 regressions, 18
+improvements.  Every single-track PSG micro-test and psg_mix are now
+**bit-exact** (sq1, sq1_env, sq1_sweep, sq1_alt, sq2_alt, wave, wave_alt,
+noise, noise7, tune_psg, psg_mix: -inf), lfo_psg -59.9; pcm_psg -17.0 ->
+-29.8; mus_weather_groudon +1.3 -> -5.0, the other songs 0-3 dB better.
+Still failing: pcm_reverb -10.4, pcm_chord -28.6, vel's worst second
+-38.7 (mixer items), pcm_psg -29.8 (loud PCM+PSG; the mixer's 8-bit sum),
+and the seven songs (-4..-10).
+
+The model (constants `M4A_CYC_*` in `plugin/m4a_engine.h`, every number a
+probe measurement, none fitted to the harness):
+
+- `m4aSoundMain` is stamped at VBlank line 160 + 197 (SoundMain's entry;
+  was +1740 for every write).  The sequencer (`m4a_sequencer.c`) sums
+  MPlayMain's work in cycles while it runs: CgbSound entry = 1007 when the
+  player is paused, else 1396 + 6 per existing track, + per tempo tick 404
+  + 60 for the first track and 84 for each further one, + per command its
+  measured handler cost (keysh 182, tempo 184, voice 277, vol 182, pan
+  184, bend 168, bendr 182, lfos 162, mod 164, modt 184, tune 184, xcmd
+  203, others 180), + 264 per track start, + 924 per CGB note (noise 832,
+  +50 when the CGB channel was still sounding, +6 for an explicit N##
+  byte), + 810 + 130 x busy channels scanned per DirectSound note, + 120
+  per active LFO step, + 87 per dead channel dropped from a chain, + 376
+  per sounding channel in a flagged track's VOLCHG/PITCHG pass.  It is
+  published as `engine->cgbEntryCycles`; without a sequencer (the plugin's
+  MIDI path) the steady one-track value applies, so those writes land at
+  +1753, where they used to land at +1740.
+- The CgbSound driver (`m4a_channel.c`) carries a cycle cursor through the
+  four channels: prologue 120, inactive channel 41, active channel without
+  writes 244 (+163 per envelope pass with envelopeCounter 0, +36 for the
+  c15 double step), a channel ends 93 after its last write.  Write offsets
+  inside a channel: start sequence first write at 231 (sq1) / 239 (sq2) /
+  255 (wave with RAM upload, 261 without) / 246 (noise), the gaps of the
+  probe table (NR10->NR11 10, NR30->WAVE 26, WAVE 15, NR41->NR43 8, ...),
+  start block -> NRx3 166 (sq) / 158 (wave) / 162 (noise), +36 when the
+  start goes straight to sustain (decay 0), +40 for TONEDATA_TYPE_FIX;
+  NRx3->NRx4 32 (noise 24); NR51 33 after NRx4 or, when nothing was
+  written before, at 207 (decay start) / 215 (release start) / 380 (sq) /
+  416 (wave) / 417 (noise) (decay->sustain) / 350 (wave sustain step) /
+  376 (pseudo-echo start); NR51->NRx2 28 (wave 32), NRx2->NRx4 10, wave
+  NR32->NR30 16, NR30->NR34 6; CgbOscOff at 211 / 237 / 228 (release 0)
+  or 149 / 175 / 166 (echo expired), NRx2->NRx4 14 (noise 6).  Each write
+  runs the hardware up to its cycle (`m4a_gba_run`) first, so DAC slots,
+  timer ticks and the PSG frame sequencer interleave with the writes as in
+  mgba.
+- `c15` starts at 0 (the ROM's SoundInit value; the first CgbSound, frame
+  2's, reloads 14, frame 3's sees 13 as measured).  The harness cannot
+  tell 0 from 14 (bit-identical on all 38 tests: every micro-test
+  envelope is in sustain when the double step lands), so the probe decides.
+  The frame-1 SoundMain of the earlier reading does not exist (1b), so
+  nothing is replayed in `m4a_engine_boot`.
+
+Verification: `poryaaaa_render --song ... --psg-log <file>` logs every PSG
+write with its cycle and `tools/probe_diff.py` diffs it against the probe.
+**Residual** (engine minus mgba, cycles): sq1, sq1_env, wave (180
+frames), noise: 0 on every write (wave 180: one write +3); lfo_psg <= 4;
+psg_mix <= 36 (one wave sustain step +12); pcm_psg -18 on the 3-track
+start frame, -98 on a note frame after four PCM notes ended; groudon
+-10 on the start frame, -12..-88 on steady frames (per-track tick cost
+varies with track state: 61-84 per track measured); littleroot (9 tracks,
+PCM-heavy) -1049 on the start frame and -460..+320 on note frames.  What
+the data does not resolve: the DirectSound note cost beyond the channel
+scan (voice type, keysplit/drum lookup, ClearChain of a dead channel it
+takes: 806-1423 measured), the per-track tick cost's dependence on track
+state, and the VOLCHG/PITCHG pass's per-track share (376 was measured on
+one track with one channel).  These bound the songs' PSG timing to about
++-400 cycles (1.5 DAC slots) on PCM-note frames; a probe with breakpoints
+inside MPlayMain's track loop and ply_note's channel search would settle
+them.  The square tests are insensitive to this (duty phase free-running,
+-inf already); wave and noise are not (their phase runs on the CPU
+clock), which is why the songs with wave content remain at -5..-9 dB
+until those costs are measured.
+
+Not a timing item but found on the way: `voicegroup_loader.c` had made
+`sq1_sweep` silent with `%d` (fixed in milestone 2); nothing comparable
+this time.  The MIDI path (`--input midi`) still renders (lag 35-50 ms
+against the ROM as before; it is not expected to null).
+
 ### Reference: milestone 1 decisions as agreed
 
 Goal restated: `poryaaaa_render` and the harness play the **compiled** song

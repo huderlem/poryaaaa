@@ -1650,7 +1650,17 @@ static void test_cgb_driver_square(void)
                PSG_REG_NR51, nr51,
                PSG_REG_NR12, 0x08 | (vol << 4),
                PSG_REG_NR14, 0x80 | ((f >> 8) & 0x07));
-    ASSERT_EQ(log.when[0], soundMain, "driver: writes are stamped at the SoundMain cycle");
+    /* SoundMain timing model (MIDI path: steady one-track MPlayMain): the
+     * first write lands at the CgbSound entry + prologue + square-1 start
+     * offset, and the rest follow at the gaps measured in mgba. */
+    int64_t cgbEntry = soundMain + M4A_CYC_CGB_ENTRY_BASE + M4A_CYC_PER_TRACK - M4A_CYC_SOUNDMAIN_ENTRY;
+    ASSERT_EQ(log.when[0], cgbEntry + M4A_CYC_CGB_PROLOGUE + 231, "driver: NR10 at CgbSound entry + 351");
+    ASSERT_EQ(log.when[1] - log.when[0], 10, "driver: NR11 10 cycles after NR10");
+    ASSERT_EQ(log.when[2] - log.when[0], 212, "driver: NR13 212 after NR10 (envelope setup between)");
+    ASSERT_EQ(log.when[3] - log.when[0], 244, "driver: NR14 32 after NR13");
+    ASSERT_EQ(log.when[4] - log.when[0], 277, "driver: NR51 33 after NR14");
+    ASSERT_EQ(log.when[5] - log.when[0], 305, "driver: NR12 28 after NR51");
+    ASSERT_EQ(log.when[6] - log.when[0], 315, "driver: NR14 10 after NR12");
     ASSERT_EQ((soundMain - engine.nextSoundMain + GBA_CYCLES_PER_FRAME) % GBA_CYCLES_PER_FRAME, 0,
               "driver: one SoundMain per frame");
     ASSERT_EQ(engine.psg[0].ch1.frequency, (int)f, "driver: PSG frequency follows NR13/NR14");

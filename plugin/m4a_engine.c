@@ -330,11 +330,14 @@ static ToneData *resolve_voice(ToneData *voice, uint8_t key)
  *   VBLANK, line 160: m4aSoundMain -- MPlayMain (the sequencer frame hook),
  *     the envelopes (SoundMainRAM / CgbSound), then the mix of
  *     pcmSamplesPerVBlank samples into the ring slot given by pcmDmaCounter.
- *     The handler is entered at line start + 197; the frame is stamped at
- *     line start + 1740, where CgbSound's register writes land in a
- *     steady-state frame (CgbSound entry + ~350; the song-start frame runs
- *     ~3000 cycles longer and is not modeled).  The PCM mix only fills a
- *     ring slot the DMA reads frames later, so its stamp does not matter.
+ *     The handler is entered at line start + 197, where the frame is
+ *     stamped.  CgbSound's register writes are then placed by the SoundMain
+ *     timing model: the sequencer accounts MPlayMain's work in CPU cycles
+ *     (engine->cgbEntryCycles, M4A_CYC_* in m4a_engine.h) and the CgbSound
+ *     driver (m4a_channel.c) advances a write cursor through the measured
+ *     per-channel offsets, running the hardware up to each write.  The PCM
+ *     mix only fills a ring slot the DMA reads frames later, so its stamp
+ *     does not matter.
  *
  * mgba's video starts a reset at line 126, so frame k >= 1 starts at
  * 124773 + (k - 1) * 280896 cycles.  m4aSoundInit's own register writes
@@ -344,7 +347,7 @@ static ToneData *resolve_voice(ToneData *voice, uint8_t key)
  */
 #define FRAME1_START        124773
 #define VSYNC_FRAME_OFFSET  (150 * GBA_CYCLES_PER_LINE + 250)
-#define SOUNDMAIN_FRAME_OFFSET (160 * GBA_CYCLES_PER_LINE + 1740)
+#define SOUNDMAIN_FRAME_OFFSET (160 * GBA_CYCLES_PER_LINE + M4A_CYC_SOUNDMAIN_ENTRY)
 #define FIRST_IRQ_FRAME     2
 /* The frame boot ends in: right after its SoundMain. */
 #define BOOT_END_CYCLE      (FRAME1_START + (FIRST_IRQ_FRAME - 1) * GBA_CYCLES_PER_FRAME \
@@ -571,7 +574,8 @@ static void run_until(M4AEngine *engine, int64_t until)
             return;
         }
         m4a_gba_run(g, next - 1);
-        g->now = next;
+        if (g->now < next)   /* a frame's register writes may already be past */
+            g->now = next;
         while (engine->bootStep < BOOT_TABLE_LEN && sBootTable[engine->bootStep].cycle == next) {
             boot_action(engine, engine->bootStep);
             engine->bootStep++;
@@ -618,13 +622,15 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     engine->auditionPan = M4A_AUDITION_PAN_NONE;
     engine->maxPcmChannels = 5;  /* default, matches Pokemon Emerald init */
     engine->polyEventClock = M4A_POLY_TICK_NONE;
-    /* c15 phase.  SoundInit zero-fills SoundInfo, so the first CgbSound the
-     * ROM runs sees c15 == 0 and reloads 14; the engine's first tick is the
-     * frame-2 SoundMain and starting from 14 (-> 13) nulls against mgba
-     * (lfo_psg -20.7 dB vs -10.8 with 0), i.e. the ROM has already run one
-     * CgbSound by then -- frame 1's VBlank IRQ, pending when IME is set at
-     * cycle 323299 right after it.  Not modeled further; see the plan. */
-    engine->c15 = 14;
+    /* c15 phase.  SoundInit zero-fills SoundInfo and the first CgbSound the
+     * ROM runs is frame 2's (there is no frame-1 interrupt: DISPSTAT's IRQ
+     * enables are written after frame 1's VBlank), measured in mgba as c15
+     * 0 -> 14 on frame 2 and 14 -> 13 on frame 3, the song's first
+     * MPlayMain.  The engine's first tick is frame 2's SoundMain, so it
+     * starts from 0 as the ROM does.  (The harness cannot tell 0 from 14:
+     * every micro-test envelope is in sustain when the double-step lands.) */
+    engine->c15 = 0;
+    engine->cgbEntryCycles = M4A_CYC_CGB_ENTRY_BASE + M4A_CYC_PER_TRACK - M4A_CYC_SOUNDMAIN_ENTRY;
     engine->tempoD = 150;
     engine->tempoU = 0x100;
     engine->tempoI = 150;
@@ -786,11 +792,13 @@ static M4APCMChannel *allocate_pcm_channel(M4AEngine *engine, uint8_t priority,
     int bestTrackIndex = trackIndex;
     int bestIsStopping = 0;
 
+    engine->lastNoteScan = count;
     for (int i = first; i < first + count; i++) {
         M4APCMChannel *ch = &engine->pcmChannels[i];
 
         if (!(ch->status & CHN_ON)) {
             /* Free channel - use immediately */
+            engine->lastNoteScan = i - first;
             return ch;
         }
 
@@ -1648,9 +1656,12 @@ void m4a_engine_kill_channel(M4AEngine *engine, int handle)
     if (i >= TOTAL_CGB_CHANNELS)
         return;
     M4ACGBChannel *ch = &engine->cgbChannels[i];
-    /* TrackStop: CgbOscOff before clearing a CGB channel's status. */
-    if (ch->status)
-        m4a_cgb_osc_off(ch, &engine->psg[i >= MAX_CGB_CHANNELS], &engine->gba);
+    /* TrackStop: CgbOscOff before clearing a CGB channel's status.  The
+     * writes land at the current CPU cycle (MPlayMain time). */
+    if (ch->status) {
+        int64_t cursor = engine->gba.now;
+        m4a_cgb_osc_off(ch, &engine->psg[i >= MAX_CGB_CHANNELS], &engine->gba, &cursor);
+    }
     ch->status = 0;
 }
 
@@ -1913,17 +1924,27 @@ void m4a_engine_tick(M4AEngine *engine)
         }
     }
 
-    /* Process CGB channel envelopes (VBlank rate) */
-    for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
-        M4ACGBChannel *ch = &engine->cgbChannels[i];
-        if (ch->status & CHN_ON) {
+    /* Process CGB channel envelopes (VBlank rate): CgbSound.  Its register
+     * writes are placed on the CPU clock: the entry follows MPlayMain's work
+     * (cgbEntryCycles) and each channel advances a cursor through the
+     * measured write offsets.  The shadow pool (polyphony debug) replays
+     * the same timeline on its own PSG. */
+    int64_t cgbEntry = engine->gba.now + engine->cgbEntryCycles;
+    for (int pool = 0; pool < TOTAL_CGB_CHANNELS / MAX_CGB_CHANNELS; pool++) {
+        int64_t cursor = cgbEntry + M4A_CYC_CGB_PROLOGUE;
+        for (int c = 0; c < MAX_CGB_CHANNELS; c++) {
+            int i = pool * MAX_CGB_CHANNELS + c;
+            M4ACGBChannel *ch = &engine->cgbChannels[i];
+            if (!(ch->status & CHN_ON)) {
+                cursor += M4A_CYC_CGB_INACTIVE;
+                continue;
+            }
             if (!seq && ch->gateTime > 0) {
                 ch->gateTime--;
                 if (ch->gateTime == 0)
                     ch->status |= CHN_STOP;
             }
-            m4a_cgb_channel_tick(ch, engine->c15, &engine->psg[i >= MAX_CGB_CHANNELS],
-                                 &engine->gba);
+            m4a_cgb_channel_tick(ch, engine->c15, &engine->psg[pool], &engine->gba, &cursor);
         }
     }
 

@@ -425,10 +425,28 @@ void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
  * read side by side, with the register accesses going to the PSG instance the
  * channel belongs to (the real pool or the polyphony-debug shadow pool).
  *
- * Every write is stamped at the scheduler's current cycle, which the engine
- * sets to the CgbSound entry point of the VBlank frame, and is preceded by
- * the DAC catch-up mgba performs in GBAAudioSample (m4a_gba_catch_up), so a
- * level change lands on the same 65536 Hz slot it does in mgba.
+ * Every write is stamped on the CPU clock: the channel tick carries a cycle
+ * cursor that starts where CgbSound reaches the channel and advances through
+ * the offsets measured in mgba between consecutive register writes
+ * (docs/ACCURACY_PLAN.md, "SoundMain timing probe"); the hardware is run up
+ * to each write (m4a_gba_run) and the write is preceded by the DAC catch-up
+ * mgba performs in GBAAudioSample (m4a_gba_catch_up), so a level change
+ * lands on the same 65536 Hz slot it does in mgba.
+ *
+ * Offsets inside a channel (cycles from the channel's start):
+ *   start sequence, first write: square 1 +231, square 2 +239, wave +257,
+ *     noise +246; then NR10->NR11 10; NR30->WAVE 26, WAVE->WAVE 15, WAVE->
+ *     NR30 6, NR30->NR31 4; NR41->NR43 8; start block -> MO_PIT NRx3: square
+ *     202, wave 158, noise 162.
+ *   MO_PIT without a start: NRx3 +163; NRx3->NRx4 32 (noise 24).
+ *   MO_VOL: NR51 33 after the MO_PIT NRx4, or +207 (square) / +416 (wave,
+ *     noise) when nothing was written before; NR51->NRx2 28 (wave 32),
+ *     NRx2->NRx4 10, wave NR32->NR30 16, NR30->NR34 6.
+ *   CgbOscOff: square NRx2 +203, noise NR42 +220, wave NR30 +229; NRx2->NRx4
+ *     14 (square) / 6 (noise).
+ *   The envelope double-step (prevC15 == 0) adds 199 before the writes.
+ *   A channel ends 93 cycles after its last write, or after 244 if it wrote
+ *   nothing.
  */
 
 #define MO_VOL 0x01
@@ -438,12 +456,27 @@ void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
 typedef struct {
     M4APsg *psg;
     M4AGbaAudio *gba;
+    int64_t cursor;     /* CPU cycle of the next register write */
+    bool wrote;         /* a write has happened in this channel's pass */
 } CgbIo;
+
+/* Move the CPU clock to the cursor: hardware events due before it run
+ * first; a cursor in the past (the polyphony-debug shadow pool replaying
+ * the real pool's timeline) writes at the current cycle. */
+static void cgb_sync(CgbIo *io)
+{
+    if (io->cursor > io->gba->now) {
+        m4a_gba_run(io->gba, io->cursor - 1);
+        io->gba->now = io->cursor;
+    }
+}
 
 static void cgb_write(CgbIo *io, uint32_t reg, uint8_t value)
 {
+    cgb_sync(io);
     m4a_gba_catch_up(io->gba, io->gba->now);
     m4a_psg_write8(io->psg, reg, value, io->gba->now);
+    io->wrote = true;
 }
 
 static uint8_t cgb_read(CgbIo *io, uint32_t reg)
@@ -455,7 +488,9 @@ static uint8_t cgb_read(CgbIo *io, uint32_t reg)
  * wave RAM (GBAIOWrite32 -> GBAAudioWriteWaveRAM) without a DAC catch-up. */
 static void cgb_write_wave_ram(CgbIo *io, int index, uint32_t value)
 {
+    cgb_sync(io);
     m4a_psg_write_wave_ram(io->psg, index, value, io->gba->now);
+    io->wrote = true;
 }
 
 /* The register set of hardware channel `chn` (1..4), as CgbSound picks it. */
@@ -482,27 +517,37 @@ static void cgb_regs(int chn, uint32_t *nrx0, uint32_t *nrx1, uint32_t *nrx2,
     }
 }
 
-/* CgbOscOff */
-void m4a_cgb_osc_off(M4ACGBChannel *ch, M4APsg *psg, M4AGbaAudio *gba)
+/* CgbOscOff.  `io->cursor` is the cycle of the first write. */
+static void cgb_osc_off(M4ACGBChannel *ch, CgbIo *io)
 {
-    CgbIo io = { psg, gba };
     switch (ch->type) {
     case 1:
-        cgb_write(&io, PSG_REG_NR12, 8);
-        cgb_write(&io, PSG_REG_NR14, 0x80);
+        cgb_write(io, PSG_REG_NR12, 8);
+        io->cursor += 14;
+        cgb_write(io, PSG_REG_NR14, 0x80);
         break;
     case 2:
-        cgb_write(&io, PSG_REG_NR22, 8);
-        cgb_write(&io, PSG_REG_NR24, 0x80);
+        cgb_write(io, PSG_REG_NR22, 8);
+        io->cursor += 14;
+        cgb_write(io, PSG_REG_NR24, 0x80);
         break;
     case 3:
-        cgb_write(&io, PSG_REG_NR30, 0);
+        cgb_write(io, PSG_REG_NR30, 0);
         break;
     default:
-        cgb_write(&io, PSG_REG_NR42, 8);
-        cgb_write(&io, PSG_REG_NR44, 0x80);
+        cgb_write(io, PSG_REG_NR42, 8);
+        io->cursor += 6;
+        cgb_write(io, PSG_REG_NR44, 0x80);
         break;
     }
+}
+
+/* CgbOscOff from outside CgbSound (TrackStop): writes from `*cursor` on. */
+void m4a_cgb_osc_off(M4ACGBChannel *ch, M4APsg *psg, M4AGbaAudio *gba, int64_t *cursor)
+{
+    CgbIo io = { psg, gba, *cursor, false };
+    cgb_osc_off(ch, &io);
+    *cursor = io.cursor;
 }
 
 /* ply_note's share of a CGB note start: the channel is flagged to start at
@@ -586,6 +631,7 @@ static void cgb_start_registers(M4ACGBChannel *ch, CgbIo *io, int chn,
     switch (chn) {
     case 1:
         cgb_write(io, nrx0, ch->sweep);
+        io->cursor += 10;
         /* fallthrough */
     case 2:
         cgb_write(io, nrx1, (uint8_t)(((uint32_t)ch->dutyCycle << 6) + ch->length));
@@ -593,13 +639,19 @@ static void cgb_start_registers(M4ACGBChannel *ch, CgbIo *io, int chn,
     case 3:
         if (ch->wavePointer != ch->currentWavePointer) {
             cgb_write(io, nrx0, 0x40);
+            io->cursor += 26;
             cgb_write_wave_ram(io, 0, ch->wavePointer[0]);
+            io->cursor += 15;
             cgb_write_wave_ram(io, 1, ch->wavePointer[1]);
+            io->cursor += 15;
             cgb_write_wave_ram(io, 2, ch->wavePointer[2]);
+            io->cursor += 15;
             cgb_write_wave_ram(io, 3, ch->wavePointer[3]);
+            io->cursor += 6;
             ch->currentWavePointer = ch->wavePointer;
         }
         cgb_write(io, nrx0, 0);
+        io->cursor += 4;
         cgb_write(io, nrx1, ch->length);
         if (ch->length)
             ch->n4 = 0xC0;
@@ -608,6 +660,7 @@ static void cgb_start_registers(M4ACGBChannel *ch, CgbIo *io, int chn,
         break;
     default:
         cgb_write(io, nrx1, ch->length);
+        io->cursor += 8;
         /* (u32)wavePointer << 3: the noise voice's period bit, which the
          * engine keeps in bit 3 of ch->frequency. */
         cgb_write(io, nrx3, (uint8_t)(ch->frequency & 0x08));
@@ -625,13 +678,29 @@ static void cgb_start_registers(M4ACGBChannel *ch, CgbIo *io, int chn,
  * CgbSound() for one channel.  `c15` is SoundInfo.c15 after this frame's
  * decrement (the engine does that once per frame for all channels).
  */
-void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAudio *gba)
+void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAudio *gba,
+                          int64_t *cursor)
 {
     if (!(ch->status & CHN_ON))
         return;
 
-    CgbIo io = { psg, gba };
+    const int64_t chanStart = *cursor;
+    CgbIo io = { psg, gba, chanStart, false };
     int chn = ch->type;
+    /* First register write of a start sequence, a pitch-only update, a
+     * volume-only update and an oscillator-off, from the channel's start. */
+    int startAt = chn == 1 ? 231 : chn == 2 ? 239 : chn == 3 ? 255 : 246;
+    if (chn == 3 && ch->wavePointer == ch->currentWavePointer)
+        startAt = 261;                   /* no wave RAM upload: NR30 = 0 is the first write */
+    /* Start block -> MO_PIT write, for a start that goes straight to the
+     * decay phase; the decay -> sustain transition on a start (decay 0)
+     * costs 36 more (sq1 202 vs sq1_env 166). */
+    int startToPit = chn == 3 ? 158 : chn == 4 ? 162 : 166;
+    const int fixPit = (chn < 4 && ch->fixedFreq) ? 40 : 0;   /* TONEDATA_TYPE_FIX rounding */
+    const int pitAt = 166 + fixPit;
+    int volAt = 207;                     /* decay start (and other transitions) */
+    int offAt = chn == 3 ? 237 : chn == 4 ? 228 : 211;   /* release 0 / no echo -> off */
+    int envExtra = 0;                    /* envelope passes before the first write */
     uint32_t nrx0, nrx1, nrx2, nrx3, nrx4;
     cgb_regs(chn, &nrx0, &nrx1, &nrx2, &nrx3, &nrx4);
 
@@ -647,6 +716,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
     if (ch->hwResync && !(ch->status & CHN_START)) {
         int unused;
         ch->hwResync = false;
+        io.cursor = chanStart + startAt;
         cgb_start_registers(ch, &io, chn, nrx0, nrx1, nrx3, &unused);
         if (chn == 3)
             ch->n4 |= 0x80;
@@ -659,6 +729,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
             ch->status = CHN_ENV_ATTACK;
             ch->modify = MO_PIT | MO_VOL;
             m4a_cgb_mod_vol(ch);
+            io.cursor = chanStart + startAt;
             cgb_start_registers(ch, &io, chn, nrx0, nrx1, nrx3, &envelopeStepTimeAndDir);
             ch->envelopeCounter = ch->attack;
             if ((int8_t)(ch->attack & mask)) {
@@ -674,8 +745,10 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
     } else if (ch->status & CHN_IEC) {
         ch->pseudoEchoLength--;
         if ((int8_t)(ch->pseudoEchoLength & mask) <= 0) {
+            offAt = chn == 3 ? 175 : chn == 4 ? 166 : 149;   /* echo expired */
         oscillator_off:
-            m4a_cgb_osc_off(ch, psg, gba);
+            io.cursor = chanStart + offAt;
+            cgb_osc_off(ch, &io);
             ch->status = 0;
             goto channel_complete;
         }
@@ -683,6 +756,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
     } else if ((ch->status & CHN_STOP) && (ch->status & CHN_ENV_MASK)) {
         ch->status &= ~CHN_ENV_MASK;
         ch->envelopeCounter = ch->release;
+        volAt = 215;                     /* release start */
         if ((int8_t)(ch->release & mask)) {
             ch->modify |= MO_VOL;
             if (chn != 3)
@@ -696,6 +770,8 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
         if (ch->envelopeCounter == 0) {
             if (chn == 3)
                 ch->modify |= MO_VOL;
+            if (chn != 3)
+                envExtra += 163;         /* CgbModVol + the step (lfo_psg sustain steps) */
 
             m4a_cgb_mod_vol(ch);
             if ((ch->status & CHN_ENV_MASK) == CHN_ENV_RELEASE) {
@@ -706,6 +782,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
                     if (ch->envelopeVolume) {
                         ch->status |= CHN_IEC;
                         ch->modify |= MO_VOL;
+                        volAt = 376;     /* pseudo-echo start */
                         if (chn != 3)
                             envelopeStepTimeAndDir = 0 | 0x08;
                         goto envelope_complete;
@@ -719,6 +796,8 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
             envelope_sustain:
                 ch->envelopeVolume = ch->sustainGoal;
                 ch->envelopeCounter = 7;
+                if (volAt == 207)
+                    volAt = 350;         /* a plain sustain step (wave writes NR51/NR32) */
             } else if ((ch->status & CHN_ENV_MASK) == CHN_ENV_DECAY) {
                 ch->envelopeVolume--;
                 envelopeVolume = (int8_t)(ch->envelopeVolume & mask);
@@ -731,6 +810,9 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
                     } else {
                         ch->status--;
                         ch->modify |= MO_VOL;
+                        volAt = chn == 3 ? 416 : chn == 4 ? 417 : 380;   /* decay -> sustain transition */
+                        if (io.wrote)
+                            startToPit += 36;           /* reached from the start block */
                         if (chn != 3)
                             envelopeStepTimeAndDir = 0 | 0x08;
                         goto envelope_sustain;
@@ -765,6 +847,7 @@ envelope_step_complete:
     ch->envelopeCounter--;
     if (prevC15 == 0) {
         prevC15--;
+        envExtra += 36;                  /* the second pass */
         goto envelope_step_repeat;
     }
 
@@ -782,34 +865,45 @@ envelope_complete:
         if (chn < 4 && ch->fixedFreq)
             ch->frequency = (ch->frequency + 1) & 0x7fe;
 
+        io.cursor = io.wrote ? io.cursor + startToPit + fixPit : chanStart + pitAt + envExtra;
         if (chn != 4)
             cgb_write(&io, nrx3, (uint8_t)ch->frequency);
         else
             cgb_write(&io, nrx3, (uint8_t)((cgb_read(&io, nrx3) & 0x08) | ch->frequency));
         ch->n4 = (uint8_t)((ch->n4 & 0xC0) + ((ch->frequency >> 8) & 0xFF));
+        io.cursor += chn == 4 ? 24 : 32;
         cgb_write(&io, nrx4, ch->n4);
     }
 
     /* 4. apply envelope & volume to HW registers */
     if (ch->modify & MO_VOL) {
+        io.cursor = io.wrote ? io.cursor + 33 : chanStart + volAt + (envExtra % 163);
         cgb_write(&io, PSG_REG_NR51,
                   (uint8_t)((cgb_read(&io, PSG_REG_NR51) & ~ch->panMask) | ch->pan));
         if (chn == 3) {
+            io.cursor += 32;
             cgb_write(&io, nrx2, cgb3_vol(ch->envelopeVolume));
             if (ch->n4 & 0x80) {
+                io.cursor += 16;
                 cgb_write(&io, nrx0, 0x80);
+                io.cursor += 6;
                 cgb_write(&io, nrx4, ch->n4);
                 ch->n4 &= 0x7f;
             }
         } else {
             uint32_t envMask = 0xF;
+            io.cursor += 28;
             cgb_write(&io, nrx2, (uint8_t)((envelopeStepTimeAndDir & envMask) + (ch->envelopeVolume << 4)));
+            io.cursor += 10;
             cgb_write(&io, nrx4, ch->n4 | 0x80);
-            if (chn == 1 && !(cgb_read(&io, nrx0) & 0x08))
+            if (chn == 1 && !(cgb_read(&io, nrx0) & 0x08)) {
+                io.cursor += 10;
                 cgb_write(&io, nrx4, ch->n4 | 0x80);
+            }
         }
     }
 
 channel_complete:
     ch->modify = 0;
+    *cursor = io.wrote ? io.cursor + 93 : chanStart + 244 + envExtra;
 }

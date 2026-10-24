@@ -443,11 +443,26 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
     /* Voice resolution, priority, channel allocation and the note start are
      * the engine's note-on (see m4a_engine_note_on for the correspondence).
      * It returns the channel it started, if any. */
+    bool cgbBusy[MAX_CGB_CHANNELS];
+    for (int c = 0; c < MAX_CGB_CHANNELS; c++)
+        cgbBusy[c] = s->engine->cgbChannels[c].status != 0;
     int h = m4a_engine_note_on(s->engine, i, t->key, t->velocity);
-    if (h < 0)
+    if (h < 0) {
+        s->frameCycles += M4A_CYC_NOTE_NONE;
         return;
+    }
+    if (chan_is_pcm(h)) {
+        s->frameCycles += M4A_CYC_NOTE_PCM + M4A_CYC_NOTE_PCM_SCAN * s->engine->lastNoteScan;
+    } else {
+        int c = h - TOTAL_PCM_CHANNELS;
+        s->frameCycles += s->engine->cgbChannels[c].type == 4 ? M4A_CYC_NOTE_NOISE : M4A_CYC_NOTE_CGB;
+        /* A CGB channel still sounding is taken over (ClearChain etc.). */
+        if (c < MAX_CGB_CHANNELS && cgbBusy[c])
+            s->frameCycles += M4A_CYC_NOTE_CGB_BUSY;
+    }
     *chan_gate_time(s->engine, h) = t->gateTime;
     s->chanSeq[h] = ++s->seqCounter;
+    s->chainOwner[h] = (uint8_t)(i + 1);
     s->noteCount++;
 
     /* ply_note ran TrkVolPitSet for the new note; the pending flags are
@@ -455,9 +470,31 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
     t->flags &= 0xF0;
 }
 
+/* Measured handler + dispatch cost of a command (delta from its ply_* entry
+ * to the next breakpoint in mgba); unmeasured ones take the default. */
+static int cmd_cycles(uint8_t cmd)
+{
+    switch (cmd) {
+    case 0xBB: return 184;   /* tempo */
+    case 0xBC: return 182;   /* keysh */
+    case 0xBD: return 277;   /* voice */
+    case 0xBE: return 182;   /* vol */
+    case 0xBF: return 184;   /* pan */
+    case 0xC0: return 168;   /* bend */
+    case 0xC1: return 182;   /* bendr */
+    case 0xC2: return 162;   /* lfos */
+    case 0xC4: return 164;   /* mod */
+    case 0xC5: return 184;   /* modt */
+    case 0xC8: return 184;   /* tune */
+    case 0xCD: return 203;   /* xcmd + its sub-command */
+    default:   return M4A_CYC_CMD_DEFAULT;
+    }
+}
+
 /* gMPlayJumpTable, indexed by command - 0xB1, after m4aSoundInit's patches. */
 static void dispatch(M4ASequencer *s, int i, uint8_t cmd)
 {
+    s->frameCycles += cmd_cycles(cmd);
     switch (cmd) {
     case 0xB1: ply_fine(s, i); break;
     case 0xB2: {
@@ -510,6 +547,7 @@ static void lfo_step(M4ASequencer *s, int i)
         et->lfoDelayC--;
         return;
     }
+    s->frameCycles += M4A_CYC_LFO_STEP;
     et->lfoSpeedC = (uint8_t)(et->lfoSpeedC + et->lfoSpeed);
     int32_t r;
     if ((int8_t)(et->lfoSpeedC - 0x40) < 0)
@@ -532,6 +570,12 @@ static void track_tick(M4ASequencer *s, int i)
     /* Walk the track's channels: count down gate times; channels that have
      * died drop out of the chain (ClearChain). */
     for (int h = 0; h < CHAN_COUNT; h++) {
+        if (s->chainOwner[h] == i + 1 && !chan_in_chain(e, h, i)) {
+            /* The channel died (or was taken over): ClearChain drops it. */
+            s->chainOwner[h] = 0;
+            if (chan_track(e, h) == i)
+                s->frameCycles += M4A_CYC_CLEAR_CHAIN;
+        }
         if (!chan_in_chain(e, h, i))
             continue;
         uint8_t *gate = chan_gate_time(e, h);
@@ -541,8 +585,10 @@ static void track_tick(M4ASequencer *s, int i)
         }
     }
 
-    if (t->flags & MPT_FLG_START)
+    if (t->flags & MPT_FLG_START) {
+        s->frameCycles += M4A_CYC_TRACK_START;
         track_start(s, i);
+    }
 
     for (;;) {
         if (t->wait != 0) {
@@ -552,6 +598,7 @@ static void track_tick(M4ASequencer *s, int i)
         }
 
         uint8_t c = rd8(s, t->cmdPtr);
+        bool explicitCmd = c >= 0x80;
         if (c < 0x80) {
             c = t->runningStatus;
             if (c < 0x80) {
@@ -567,6 +614,8 @@ static void track_tick(M4ASequencer *s, int i)
         }
 
         if (c >= 0xCF) {
+            if (explicitCmd)
+                s->frameCycles += M4A_CYC_NOTE_CMD_BYTE;   /* explicit N## byte read */
             ply_note(s, i, (uint8_t)(c - 0xCF));
         } else if (c > 0xB0) {
             dispatch(s, i, c);
@@ -574,29 +623,45 @@ static void track_tick(M4ASequencer *s, int i)
                 return;          /* FINE: no LFO step this tick */
         } else {
             t->wait = gClockTable[c - 0x80];
+            s->frameCycles += M4A_CYC_WAIT_CMD;
         }
     }
 }
 
 void m4a_sequencer_frame(M4ASequencer *s)
 {
-    if (!s->song || (s->status & MUSICPLAYER_STATUS_PAUSE))
+    /* SoundMain timing model: the CgbSound entry follows MPlayMain's work.
+     * Costs are the probe measurements in m4a_engine.h; the running sum is
+     * published as cycles from the SoundMain entry. */
+    s->frameCycles = M4A_CYC_CGB_ENTRY_PAUSED;
+    if (!s->song || (s->status & MUSICPLAYER_STATUS_PAUSE)) {
+        s->engine->cgbEntryCycles = s->frameCycles - M4A_CYC_SOUNDMAIN_ENTRY;
         return;
+    }
+
+    int exist = 0;
+    for (int i = 0; i < s->trackCount; i++)
+        if (s->tracks[i].flags & MPT_FLG_EXIST)
+            exist++;
+    s->frameCycles = M4A_CYC_CGB_ENTRY_BASE + M4A_CYC_PER_TRACK * exist;
 
     /* FadeOutBody: no fades are started by this host, so nothing to do. */
 
     s->tempoC = (uint16_t)(s->tempoC + s->tempoI);
     while (s->tempoC >= 150) {
         uint32_t trackBits = 0;
+        s->frameCycles += M4A_CYC_TICK_BASE;
         for (int i = 0; i < s->trackCount; i++) {
             if (!(s->tracks[i].flags & MPT_FLG_EXIST))
                 continue;
+            s->frameCycles += trackBits ? M4A_CYC_TICK_PER_TRACK : M4A_CYC_TICK_FIRST_TRACK;
             trackBits |= 1u << i;
             track_tick(s, i);
         }
         s->clock++;
         if (trackBits == 0) {
             s->status = MUSICPLAYER_STATUS_PAUSE;
+            s->engine->cgbEntryCycles = s->frameCycles - M4A_CYC_SOUNDMAIN_ENTRY;
             return;              /* skips the volume/pitch pass, as the GBA does */
         }
         s->status = trackBits;
@@ -608,11 +673,15 @@ void m4a_sequencer_frame(M4ASequencer *s)
         M4ASeqTrack *t = &s->tracks[i];
         if (!(t->flags & MPT_FLG_EXIST) || !(t->flags & (MPT_FLG_VOLCHG | MPT_FLG_PITCHG)))
             continue;
+        for (int h = 0; h < CHAN_COUNT; h++)
+            if (chan_in_chain(s->engine, h, i))
+                s->frameCycles += M4A_CYC_TRACK_APPLY;
         m4a_engine_track_apply(s->engine, i,
                                (t->flags & MPT_FLG_VOLCHG) != 0,
                                (t->flags & MPT_FLG_PITCHG) != 0);
         t->flags &= 0xF0;
     }
+    s->engine->cgbEntryCycles = s->frameCycles - M4A_CYC_SOUNDMAIN_ENTRY;
 }
 
 /* ------------------------------------------------------------------------
@@ -665,6 +734,7 @@ void m4a_sequencer_start(M4ASequencer *s, const M4ASong *song)
     s->noteCount = 0;
     s->seqCounter = 0;
     memset(s->chanSeq, 0, sizeof(s->chanSeq));
+    memset(s->chainOwner, 0, sizeof(s->chainOwner));
 
     int i = 0;
     for (; i < s->trackCount; i++) {

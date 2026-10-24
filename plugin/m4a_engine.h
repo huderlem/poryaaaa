@@ -461,7 +461,49 @@ struct M4AEngine {
     M4AFrameHook frameHook;
     void *frameHookUser;
     bool externalSequencer;
+
+    /* SoundMain timing model: CPU cycles from the SoundMain entry to the
+     * CgbSound entry this frame.  The sequencer's frame hook sets it from
+     * the work MPlayMain did (M4A_CYC_* below); without a sequencer the
+     * steady one-track value applies.  See docs/ACCURACY_PLAN.md,
+     * "SoundMain timing probe". */
+    int32_t cgbEntryCycles;
+    /* ply_note's DirectSound channel search: busy channels examined before
+     * a free one (maxPcmChannels when none was free), for the timing model. */
+    int lastNoteScan;
 };
+
+/*
+ * SoundMain timing model, measured in mgba 0.10.5 on the accuracy test ROM
+ * (test/accuracy/ref/mgba_probe.c; docs/ACCURACY_PLAN.md, "SoundMain timing
+ * probe").  Cycles relative to the start of VBlank line 160 unless noted.
+ */
+#define M4A_CYC_SOUNDMAIN_ENTRY    197   /* SoundMain entered (m4aSoundMain +185) */
+#define M4A_CYC_CGB_ENTRY_PAUSED   1007  /* CgbSound entry, BGM player paused */
+#define M4A_CYC_CGB_ENTRY_BASE     1396  /* CgbSound entry, playing, no tempo tick ... */
+#define M4A_CYC_PER_TRACK          6     /* ... + 6 per existing track */
+#define M4A_CYC_TICK_BASE          404   /* a tempo tick with no commands ... */
+#define M4A_CYC_TICK_PER_TRACK     84    /* ... + 84 per existing track after the first ... */
+#define M4A_CYC_TICK_FIRST_TRACK   60    /* ... which costs 60 (464 for one track) */
+#define M4A_CYC_CLEAR_CHAIN        87    /* a dead channel dropped from a track's chain */
+#define M4A_CYC_LFO_STEP           120   /* per track with an active LFO per tick */
+#define M4A_CYC_TRACK_APPLY        376   /* VOLCHG/PITCHG pass, per channel in a flagged track's chain */
+#define M4A_CYC_TRACK_START        264   /* MPT_FLG_START init (Clear64byte, defaults) */
+#define M4A_CYC_NOTE_CMD_BYTE      6     /* a note with an explicit command byte (not running status) */
+#define M4A_CYC_WAIT_CMD           0     /* a W## command (inside the note/command costs) */
+#define M4A_CYC_CMD_DEFAULT        180   /* an unmeasured ply_* handler + dispatch */
+#define M4A_CYC_NOTE_CGB           924   /* ply_note starting a square or wave */
+#define M4A_CYC_NOTE_NOISE         832   /* ply_note starting a noise channel */
+#define M4A_CYC_NOTE_PCM           810   /* ply_note starting a DirectSound channel on the first free one ... */
+#define M4A_CYC_NOTE_PCM_SCAN      130   /* ... + per busy channel examined before it (806-1423 measured) */
+#define M4A_CYC_NOTE_NONE          600   /* ply_note that starts nothing */
+#define M4A_CYC_NOTE_CGB_BUSY      50    /* ... taking over a CGB channel still sounding */
+/* Inside CgbSound: prologue before channel 1, an inactive channel, an active
+ * channel without register writes, and the tail after a channel's last write. */
+#define M4A_CYC_CGB_PROLOGUE       120
+#define M4A_CYC_CGB_INACTIVE       41
+#define M4A_CYC_CGB_ACTIVE_QUIET   244
+#define M4A_CYC_CGB_CHANNEL_TAIL   93
 
 /* Engine lifecycle */
 void m4a_engine_init(M4AEngine *engine, float sampleRate);
