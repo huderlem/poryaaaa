@@ -486,6 +486,89 @@ first two):
   write happens while the DMA is already enabled, so mgba does not
   transfer; only the source address reloads.  FIFO contents are kept.
 
+### SoundMain timing probe (2026-10-24, step 1 of the timing model)
+
+`test/accuracy/ref/mgba_probe.c` was extended (per-frame summary in
+`<out>.frames`, scheduler-lateness hooks in `<out>.events`) and run for 70
+frames on sq1, wave, noise, psg_mix, lfo_psg, mus_weather_groudon (id 444)
+and mus_littleroot (id 405); `test/accuracy/tools/probe_costs.py` tabulates
+the raw logs.  All cycles below are relative to the start of VBlank line
+160 of the engine's frame k (frame k >= 1 starts at 124773 + (k-1) x
+280896).  Measured facts:
+
+- **Fixed entries**: m4aSoundMain +185, SoundMain +197, first MPlayMain
+  +291 (six players are chained; the five idle ones cost 55 cycles each),
+  m4aSoundVSync at line 150 + 164 (its DMA restart write +250, as modeled).
+- **CgbSound entry depends on MPlayMain's work**, not on a constant:
+  - BGM player paused (before MPlayStart): **1007**.
+  - Playing, no tempo tick this frame: **1396 + 6 x E** (E = tracks with
+    MPT_FLG_EXIST): 1402 / 1414 / 1420 / 1450 for E = 1 / 3 / 4 / 9, exact.
+  - A tempo tick (tempoC + tempoI >= 150) with no commands adds **464** for
+    E = 1 and, per song, 588-656 (E = 3), 728-760 (E = 4), 1006-1171 (E =
+    9): about 404 + 60 x E, the spread being per-track state (channels in
+    the chain, LFO).  An active LFO (lfo_psg, mod != 0) with its PITCHG
+    pass costs 496 on top (2362 vs 1866).
+  - Commands, measured as the delta from one ply_* entry to the next
+    (handler plus dispatch): keysh 182, tempo 184, voice 277, vol 182,
+    pan 184, bend 168, bendr 182, lfos 162, mod 146-202, modt 184, xcmd
+    61 + xiecv 142; the track-start path (Clear64byte, SoundMainBTM) about
+    260 (244-327 solved from the start frames of psg_mix, groudon,
+    littleroot).
+  - **A CGB note start costs 924** (square and wave; noise 832): sq1/wave
+    frame 48 = 2790 vs the 1866 steady tick frame; groudon's two-note
+    frames 27/50 = +1848/+1882.  A PCM note start costs 1005-1423
+    (channel allocation varies; littleroot frames 20/37/62).
+  - Start frames: sq1 4069 (tempo, keysh, voice, vol, pan, note), noise
+    3977, lfo_psg 5075, psg_mix 10304 (4 tracks), groudon 10703 (3 tracks,
+    35 commands), littleroot 22695 (9 tracks, 84 commands).  These are the
+    "~2700 per note" of finding 2: the actual composition is the command
+    list above.
+- **Register writes inside CgbSound are deterministic** (offsets from the
+  CgbSound entry for channel 1 as the first active channel; the channel
+  prologue is ~120 cycles and an inactive channel ~24, an active channel
+  without writes 203, a channel ends ~99 after its last write):
+  - square start: NR10 +351, NR11 +361, NR13 +563, NR14 +595, NR51 +628,
+    NR12 +656, NR14 +666; the next channel's first write 330 later.
+  - wave start (ch 3 first active, so +48 for ch 1-2): NR30=40 +431..463,
+    WAVE RAM +26/+41/+56/+71 after it, NR30=00 +77, NR31 +81, NR33 +239,
+    NR34 +271, NR51 +304, NR32 +336, NR30=80 +352, NR34 +358.
+  - noise start (ch 4 first active): NR41 +489, NR43 +8, NR43 +170, NR44
+    +194, NR51 +227, NR42 +255, NR44 +265 after it.
+  - steady MO_PIT: NRx3 +283, NRx4 +32 after; steady MO_VOL: NR51 +327
+    (or 33 after the NRx4 of a MO_PIT), NRx2 +28, NRx4 +10 after; wave
+    MO_VOL: NR51 then NR32 +32; CgbOscOff: NRx2=08 +323, NRx4=80 +14 (sq)
+    / +6 (noise); wave off NR30=00.
+  - psg_mix start frame, all four channels: NR10 +351 ... NR14 +666, NR21
+    +996, ..., NR24 +1301, NR30 +1649, ..., NR34 +2007, NR41 +2349, ...,
+    NR44 +2614; SoundMainRAM entry +2729.
+- **The engine's single stamp (+1740) is therefore 340 early on a 1-track
+  no-tick frame's first write, 120 late on a tick frame, 1000-2700 early
+  on note-start frames and up to 21000 early on a song's first frame.**
+- **1b: there is no frame-1 SoundMain.**  DISPSTAT (VBlank/VCOUNT IRQ
+  enables, 0x9628) is written at cycle 323278, IE at 323293 and IME at
+  323299, all *after* frame 1's VBlank (321893), so no IRQ was pending;
+  the first VCountIntr is frame 2's (590621) and the first VBlankIntr
+  frame 2's (602962).  The first CgbSound the ROM runs is frame 2's, with
+  **c15 0 -> 14**; MPlayStart follows at 604892 (after that SoundMain) and
+  the song's first MPlayMain is frame 3's, which runs CgbSound with **c15
+  14 -> 13**.  The envelope double-step (prevC15 == 0) therefore falls on
+  frames 17, 32, 47, ... (lfo_psg: frames 16/31/46 in the micro-test's
+  own numbering shift by its note start).  The engine starts c15 at 14
+  and decrements on its frame-2 tick, so its channels see 13 on frame 2
+  and 12 on frame 3: **one c15 step ahead of mgba**.  The earlier rejection
+  of "c15 should start at 0" was a measurement on the pre-output-stage
+  build; step 2 re-tests it with the write timing in place.
+- **1c: mgba scheduler lateness** (70 frames each): timer-0 overflows
+  15238, max cyclesLate 6 (micro-tests) / 7 (littleroot) / 10 (groudon);
+  the FIFO sample landed one 65536 Hz slot late (`until` computed at the
+  processing time) **0 times in every micro-test, 5 times in littleroot,
+  6 in groudon** (groudon: every fourth frame at line 161 + 65, during
+  SoundMainRAM).  The sample event's time is corrected (`now -
+  cyclesLate`); the PSG frame event (593) was never late across a slot
+  boundary.  Bound: 5-6 one-slot sample-and-hold errors per 1.17 s, each
+  256 cycles wide, puts this floor around -50 dB on songs and nowhere on
+  the micro-tests; not worth modeling before the mixer.
+
 ### Reference: milestone 1 decisions as agreed
 
 Goal restated: `poryaaaa_render` and the harness play the **compiled** song

@@ -11,8 +11,28 @@
  *   ./mgba_probe build/accuracy/rom/accuracy_test.gba out.txt <frames> <type> <id> \
  *       build/accuracy/rom/accuracy_test.map
  *
- * type/id as in mgba_render (2 = micro, id = line in micro.cfg from 0).
- * Filter FIFO writes (040000A0/A4) out of the log to see the rest.
+ * type/id as in mgba_render (0 = song, 2 = micro, id = line in micro.cfg
+ * from 0 or the song id).  Filter FIFO writes (040000A0/A4) out of the log to
+ * see the rest.
+ *
+ * Besides the raw log, `<out>.frames` gets one line per engine frame k
+ * (frame k >= 1 starts at cycle 124773 + (k - 1) * 280896; cycles are given
+ * relative to the start of VBlank line 160 of that frame):
+ *
+ *   entry cycles of m4aSoundMain, SoundMain, MPlayMain, CgbSound and
+ *   SoundMainRAM_Buffer; MPlayMain calls; ply_note calls; all ply_* handler
+ *   calls; tracks with MPT_FLG_EXIST and MPT_FLG_START in gMPlayInfo_BGM at
+ *   MPlayMain entry; tempoC at entry; SoundInfo.c15 before and after
+ *   CgbSound; the m4aSoundVSync entry relative to line 150; and every PSG
+ *   register write (address low byte = value @ cycle), in order.
+ *
+ * `<out>.events` summarizes mgba's own scheduler lateness: for the timer-0
+ * overflow, the audio sample event and the PSG frame-sequencer event, the
+ * histogram of cyclesLate and the number of times a 65536 Hz DAC slot
+ * boundary fell between the event's due time and the time it was processed
+ * (the "deferred PCM floor" from the output-stage review).  Those hooks
+ * replace the mTimingEvent callbacks in place after reset and forward to the
+ * originals; the emulation is unaffected.
  */
 #include <mgba/core/blip_buf.h>
 #include <mgba/core/config.h>
@@ -21,34 +41,218 @@
 #include <mgba/core/timing.h>
 #include <mgba/debugger/debugger.h>
 #include <mgba/internal/gba/gba.h>
+#include <mgba/internal/gba/audio.h>
+#include <mgba/internal/gba/timer.h>
 #include <mgba/internal/gba/video.h>
 #include <mgba-util/vfs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#define FRAME1_START 124773
+#define CYCLES_PER_FRAME 280896
+#define CYCLES_PER_LINE 1232
+#define LINE160 (160 * CYCLES_PER_LINE)
+#define LINE150 (150 * CYCLES_PER_LINE)
+
+/* ROM symbols read at breakpoints (from the map; fixed IWRAM layout) */
+#define ADDR_gSoundInfo    0x03000f70
+#define ADDR_gMPlayInfo_BGM 0x03002008
+#define O_SoundInfo_c15    10
+#define O_MPlayInfo_trackCount 8
+#define O_MPlayInfo_tempoC 0x22
+#define O_MPlayInfo_tracks 0x2C
+#define SIZEOF_MusicPlayerTrack 0x50
+#define MPT_FLG_START 0x40
+#define MPT_FLG_EXIST 0x80
+
 static struct GBA* gGba;
+static struct mCore* gCore;
 static FILE* gOut;
 static long gFrames;
 struct Sym { uint32_t addr; const char* name; };
-static struct Sym gSyms[64]; static int gNumSyms;
+static struct Sym gSyms[128]; static int gNumSyms;
+
+#define MAX_FRAMES 4096
+#define MAX_WRITES 96
+struct FrameRec {
+	int used;
+	int32_t m4aSoundMain, soundMain, mplayMain, cgbSound, soundMainRAM, vsync;
+	int mplayMainCalls, plyNote, plyAll, tracksExist, tracksStart, trackCount, tempoC;
+	int c15Before, c15After, cgbSoundCalls;
+	int numWrites;
+	struct { uint8_t reg; uint8_t value; int32_t cycle; } writes[MAX_WRITES];
+	int plyCount[64];
+};
+static struct FrameRec* gFrameRecs;
+
+/* ---- mgba scheduler lateness hooks ---- */
+struct LateStats {
+	const char* name;
+	long events;
+	long late[8];        /* histogram: 0, 1-7, 8-15, 16-31, 32-63, 64-127, 128-255, 256+ */
+	long slotCrossed;    /* a 256-cycle DAC slot boundary between due and processing time */
+	long maxLate;
+	long slotCrossedFirst; /* cycle of the first crossing, -1 if none */
+};
+static struct LateStats gTimer0 = { "timer0", 0, {0}, 0, 0, -1 };
+static struct LateStats gSample = { "sample", 0, {0}, 0, 0, -1 };
+static struct LateStats gPsgFrame = { "psgframe", 0, {0}, 0, 0, -1 };
+static void (*gOrigTimer0)(struct mTiming*, void*, uint32_t);
+static void (*gOrigSample)(struct mTiming*, void*, uint32_t);
+static void (*gOrigPsgFrame)(struct mTiming*, void*, uint32_t);
+
+static void lateRecord(struct LateStats* s, uint32_t late, int crossed) {
+	s->events++;
+	int bin = 0;
+	if (late >= 256) bin = 7; else if (late >= 128) bin = 6; else if (late >= 64) bin = 5; else if (late >= 32) bin = 4;
+	else if (late >= 16) bin = 3; else if (late >= 8) bin = 2; else if (late >= 1) bin = 1;
+	s->late[bin]++;
+	if (late > (uint32_t) s->maxLate) s->maxLate = late;
+	if (crossed) {
+		s->slotCrossed++;
+		if (s->slotCrossedFirst < 0) s->slotCrossedFirst = mTimingCurrentTime(&gGba->timing);
+	}
+}
+
+/* Does a DAC slot boundary (lastSample + k * sampleInterval) fall in (due, now]? */
+static int slotCrossed(int32_t now, uint32_t late) {
+	struct GBAAudio* audio = &gGba->audio;
+	int32_t interval = audio->sampleInterval;
+	if (interval <= 0) return 0;
+	int32_t due = now - (int32_t) late;
+	int32_t a = due - audio->lastSample, b = now - audio->lastSample;
+	if (a < 0) a -= interval - 1; /* floor for negatives */
+	if (b < 0) b -= interval - 1;
+	return (a / interval) != (b / interval);
+}
+
+/* mgba's slot choice in GBAAudioSampleFIFO uses mTimingUntil at the processing
+ * time; this reproduces that arithmetic with and without the lateness. */
+static int fifoSlotShifted(uint32_t late) {
+	struct GBAAudio* audio = &gGba->audio;
+	int res = GBARegisterSOUNDBIASGetResolution(audio->soundbias);
+	int32_t untilNow = mTimingUntil(&gGba->timing, &audio->sampleEvent) - 1;
+	int32_t untilDue = untilNow + (int32_t) late;
+	int bits = 2 << res;
+	int32_t u1 = (untilNow + (1 << (9 - res))) >> (9 - res);
+	int32_t u2 = (untilDue + (1 << (9 - res))) >> (9 - res);
+	if (u1 > bits) u1 = bits;
+	if (u2 > bits) u2 = bits;
+	return u1 != u2;
+}
+
+static void hookTimer0(struct mTiming* timing, void* context, uint32_t cyclesLate) {
+	int32_t now = mTimingCurrentTime(timing);
+	int crossed = fifoSlotShifted(cyclesLate);
+	lateRecord(&gTimer0, cyclesLate, crossed);
+	if (crossed && gOut) fprintf(gOut, "%10d f%u v%3d L timer0 late=%u due=%d (FIFO sample lands one DAC slot later)\n", now, gGba->video.frameCounter, gGba->video.vcount, cyclesLate, now - (int32_t) cyclesLate);
+	gOrigTimer0(timing, context, cyclesLate);
+}
+static void hookSample(struct mTiming* timing, void* context, uint32_t cyclesLate) {
+	/* _sample passes the corrected time to GBAAudioSample; lateness only
+	 * matters for the FIFO/PSG events that interleave with it. */
+	lateRecord(&gSample, cyclesLate, slotCrossed(mTimingCurrentTime(timing), cyclesLate));
+	gOrigSample(timing, context, cyclesLate);
+}
+static void hookPsgFrame(struct mTiming* timing, void* context, uint32_t cyclesLate) {
+	int32_t now = mTimingCurrentTime(timing);
+	int crossed = slotCrossed(now, cyclesLate);
+	lateRecord(&gPsgFrame, cyclesLate, crossed);
+	if (crossed && gOut) fprintf(gOut, "%10d f%u v%3d L psgframe late=%u due=%d (slot sampled before the frame step)\n", now, gGba->video.frameCounter, gGba->video.vcount, cyclesLate, now - (int32_t) cyclesLate);
+	gOrigPsgFrame(timing, context, cyclesLate);
+}
+static void installHooks(void) {
+	if (gGba->timers[0].event.callback != hookTimer0) {
+		gOrigTimer0 = gGba->timers[0].event.callback;
+		gGba->timers[0].event.callback = hookTimer0;
+	}
+	if (gGba->audio.sampleEvent.callback != hookSample) {
+		gOrigSample = gGba->audio.sampleEvent.callback;
+		gGba->audio.sampleEvent.callback = hookSample;
+	}
+	if (gGba->audio.psg.frameEvent.callback != hookPsgFrame) {
+		gOrigPsgFrame = gGba->audio.psg.frameEvent.callback;
+		gGba->audio.psg.frameEvent.callback = hookPsgFrame;
+	}
+}
 
 static void quietLog(struct mLogger* l, int c, enum mLogLevel lv, const char* f, va_list a) { (void)l;(void)c;(void)lv;(void)f;(void)a; }
 static struct mLogger sLogger = { .log = quietLog };
 
-static const char* symName(uint32_t a) {
-	for (int i = 0; i < gNumSyms; ++i) if ((gSyms[i].addr & ~1u) == (a & ~1u)) return gSyms[i].name;
-	return "?";
+static int symIndex(uint32_t a) {
+	for (int i = 0; i < gNumSyms; ++i) if ((gSyms[i].addr & ~1u) == (a & ~1u)) return i;
+	return -1;
 }
+static const char* symName(uint32_t a) { int i = symIndex(a); return i < 0 ? "?" : gSyms[i].name; }
+
+static struct FrameRec* frameFor(int32_t t, int32_t* rel) {
+	if (t < FRAME1_START) { *rel = t; return NULL; }
+	int k = (t - FRAME1_START) / CYCLES_PER_FRAME + 1;
+	*rel = (t - FRAME1_START) % CYCLES_PER_FRAME - LINE160;
+	if (k >= MAX_FRAMES) return NULL;
+	struct FrameRec* fr = &gFrameRecs[k];
+	if (!fr->used) {
+		fr->used = 1;
+		fr->m4aSoundMain = fr->soundMain = fr->mplayMain = fr->cgbSound = fr->soundMainRAM = fr->vsync = -999999;
+		fr->c15Before = fr->c15After = -1;
+		fr->tempoC = -1;
+	}
+	return fr;
+}
+
+static uint8_t rd8(uint32_t a) { return (uint8_t) gCore->busRead8(gCore, a); }
+static uint16_t rd16(uint32_t a) { return (uint16_t) gCore->busRead16(gCore, a); }
+static uint32_t rd32(uint32_t a) { return gCore->busRead32(gCore, a); }
 
 static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struct mDebuggerEntryInfo* info) {
 	int32_t t = mTimingCurrentTime(&gGba->timing);
 	unsigned fc = gGba->video.frameCounter;
 	int vc = gGba->video.vcount;
+	int32_t rel;
+	struct FrameRec* fr = frameFor(t, &rel);
 	if (reason == DEBUGGER_ENTER_WATCHPOINT) {
 		fprintf(gOut, "%10d f%u v%3d W %08X <- %08X (old %08X)\n", t, fc, vc, info->address, info->type.wp.newValue, info->type.wp.oldValue);
+		if (fr && info->address >= 0x04000060 && info->address < 0x040000A0 && fr->numWrites < MAX_WRITES) {
+			fr->writes[fr->numWrites].reg = (uint8_t) (info->address & 0xFF);
+			fr->writes[fr->numWrites].value = (uint8_t) info->type.wp.newValue;
+			fr->writes[fr->numWrites].cycle = rel;
+			fr->numWrites++;
+		}
 	} else if (reason == DEBUGGER_ENTER_BREAKPOINT) {
-		fprintf(gOut, "%10d f%u v%3d B %08X %s\n", t, fc, vc, info->address, symName(info->address));
+		int si = symIndex(info->address);
+		const char* name = si < 0 ? "?" : gSyms[si].name;
+		fprintf(gOut, "%10d f%u v%3d B %08X %s", t, fc, vc, info->address, name);
+		if (!strcmp(name, "CgbSound")) {
+			int c15 = rd8(ADDR_gSoundInfo + O_SoundInfo_c15);
+			fprintf(gOut, " c15=%d", c15);
+			if (fr) { fr->cgbSound = rel; fr->c15Before = c15; fr->cgbSoundCalls++; }
+		} else if (!strcmp(name, "SoundMainRAM_Buffer")) {
+			int c15 = rd8(ADDR_gSoundInfo + O_SoundInfo_c15);
+			fprintf(gOut, " c15=%d", c15);
+			if (fr) { fr->soundMainRAM = rel; fr->c15After = c15; }
+		} else if (!strcmp(name, "MPlayMain")) {
+			int n = rd8(ADDR_gMPlayInfo_BGM + O_MPlayInfo_trackCount);
+			int tempoC = rd16(ADDR_gMPlayInfo_BGM + O_MPlayInfo_tempoC);
+			uint32_t tracks = rd32(ADDR_gMPlayInfo_BGM + O_MPlayInfo_tracks);
+			int exist = 0, start = 0;
+			for (int i = 0; i < n && i < 16; ++i) {
+				int flags = rd8(tracks + i * SIZEOF_MusicPlayerTrack);
+				if (flags & MPT_FLG_EXIST) exist++;
+				if (flags & MPT_FLG_START) start++;
+			}
+			fprintf(gOut, " trackCount=%d exist=%d start=%d tempoC=%d", n, exist, start, tempoC);
+			if (fr) {
+				if (fr->mplayMainCalls == 0) { fr->mplayMain = rel; fr->trackCount = n; fr->tracksExist = exist; fr->tracksStart = start; fr->tempoC = tempoC; }
+				fr->mplayMainCalls++;
+			}
+		} else if (!strcmp(name, "m4aSoundMain")) { if (fr) fr->m4aSoundMain = rel; }
+		else if (!strcmp(name, "SoundMain")) { if (fr) fr->soundMain = rel; }
+		else if (!strcmp(name, "m4aSoundVSync")) { if (fr) fr->vsync = rel + LINE160 - LINE150; }
+		else if (!strncmp(name, "ply_", 4)) {
+			if (fr) { fr->plyAll++; if (si >= 0 && si < 64) fr->plyCount[si]++; if (!strcmp(name, "ply_note")) fr->plyNote++; }
+		}
+		fputc('\n', gOut);
 	}
 	d->state = DEBUGGER_RUNNING;
 }
@@ -65,21 +269,46 @@ static int patchParams(uint8_t* rom, size_t size, int type, int id) {
 	return 0;
 }
 
+static const char* regName(uint8_t lo) {
+	switch (lo) {
+	case 0x60: return "NR10"; case 0x62: return "NR11"; case 0x63: return "NR12"; case 0x64: return "NR13"; case 0x65: return "NR14";
+	case 0x68: return "NR21"; case 0x69: return "NR22"; case 0x6C: return "NR23"; case 0x6D: return "NR24";
+	case 0x70: return "NR30"; case 0x72: return "NR31"; case 0x73: return "NR32"; case 0x74: return "NR33"; case 0x75: return "NR34";
+	case 0x78: return "NR41"; case 0x79: return "NR42"; case 0x7C: return "NR43"; case 0x7D: return "NR44";
+	case 0x80: return "NR50"; case 0x81: return "NR51"; case 0x84: return "NR52"; case 0x82: return "SNDH_L"; case 0x83: return "SNDH_H";
+	case 0x88: return "BIAS_L"; case 0x89: return "BIAS_H";
+	default: return NULL;
+	}
+}
+
+static void writeStats(FILE* f, struct LateStats* s) {
+	fprintf(f, "%-9s events=%ld max_late=%ld slot_crossed=%ld (first at cycle %ld)\n  late histogram: 0:%ld 1-7:%ld 8-15:%ld 16-31:%ld 32-63:%ld 64-127:%ld 128-255:%ld 256+:%ld\n",
+	        s->name, s->events, s->maxLate, s->slotCrossed, s->slotCrossedFirst,
+	        s->late[0], s->late[1], s->late[2], s->late[3], s->late[4], s->late[5], s->late[6], s->late[7]);
+}
+
 int main(int argc, char** argv) {
 	if (argc < 6) { fprintf(stderr, "probe rom out.txt frames type id [map]\n"); return 1; }
 	gFrames = atol(argv[3]);
 	int type = atoi(argv[4]), id = atoi(argv[5]);
 	FILE* f = fopen(argv[1], "rb"); fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-	uint8_t* rom = malloc(n); fread(rom, 1, n, f); fclose(f);
+	uint8_t* rom = malloc(n); if (fread(rom, 1, n, f) != (size_t) n) return 1; fclose(f);
 	patchParams(rom, n, type, id);
 	gOut = fopen(argv[2], "w");
+	gFrameRecs = calloc(MAX_FRAMES, sizeof *gFrameRecs);
 	if (argc > 6) {
 		FILE* m = fopen(argv[6], "r"); char line[512];
-		const char* want[] = { "VBlankIntr", "VCountIntr", "IntrMain", "m4aSoundMain", "m4aSoundVSync", "SoundMain", "MPlayMain", "CgbSound", "MPlayStart", "SampleFreqSet", "m4aSoundInit", "AgbMain", "SoundMainRAM_Buffer", "SoundMainBTM", "StartTest", NULL };
+		const char* want[] = { "VBlankIntr", "VCountIntr", "IntrMain", "m4aSoundMain", "m4aSoundVSync", "SoundMain", "MPlayMain", "CgbSound", "MPlayStart", "SampleFreqSet", "m4aSoundInit", "AgbMain", "SoundMainRAM_Buffer", "SoundMainBTM", "StartTest", "TrackStop", "CgbModVol", "CgbOscOff", "MidiKeyToCgbFreq", "ChnVolSetAsm", "ClearChain", NULL };
 		while (m && fgets(line, sizeof line, m)) {
 			unsigned long a; char name[128];
 			if (sscanf(line, " 0x%lx %127s", &a, name) == 2) {
-				for (int i = 0; want[i]; ++i) if (!strcmp(name, want[i]) && gNumSyms < 64) { gSyms[gNumSyms].addr = a; gSyms[gNumSyms].name = strdup(name); gNumSyms++; }
+				int take = !strncmp(name, "ply_", 4);
+				for (int i = 0; !take && want[i]; ++i) if (!strcmp(name, want[i])) take = 1;
+				if (take && gNumSyms < 128) {
+					int dup = 0;
+					for (int i = 0; i < gNumSyms; ++i) if (!strcmp(gSyms[i].name, name)) dup = 1;
+					if (!dup) { gSyms[gNumSyms].addr = a; gSyms[gNumSyms].name = strdup(name); gNumSyms++; }
+				}
 			}
 		}
 		if (m) fclose(m);
@@ -87,6 +316,7 @@ int main(int argc, char** argv) {
 	mLogSetDefaultLogger(&sLogger);
 	struct VFile* vf = VFileMemChunk(rom, n); free(rom);
 	struct mCore* core = mCoreFindVF(vf);
+	gCore = core;
 	core->init(core);
 	mCoreConfigInit(&core->config, NULL);
 	mCoreConfigSetDefaultValue(&core->config, "idleOptimization", "ignore");
@@ -104,6 +334,7 @@ int main(int argc, char** argv) {
 	dbg.entered = entered; dbg.paused = paused; dbg.type = DEBUGGER_CUSTOM;
 	mDebuggerAttach(&dbg, core);
 	core->reset(core);
+	installHooks();
 	dbg.state = DEBUGGER_RUNNING;
 	for (uint32_t a = 0x04000060; a < 0x040000A8; a += 1) {
 		struct mWatchpoint wp = { .id = -1, .address = a, .segment = -1, .type = WATCHPOINT_WRITE, .condition = NULL };
@@ -122,8 +353,44 @@ int main(int argc, char** argv) {
 	for (long fr = 0; fr < gFrames; ++fr) {
 		int32_t t0 = mTimingCurrentTime(&gGba->timing);
 		mDebuggerRunFrame(&dbg);
+		installHooks();
 		fprintf(gOut, "---- runFrame %ld done: t=%d (frame start t=%d) vcount=%d\n", fr, mTimingCurrentTime(&gGba->timing), t0, gGba->video.vcount);
 	}
 	fclose(gOut);
+
+	char path[1024];
+	snprintf(path, sizeof path, "%s.frames", argv[2]);
+	FILE* ff = fopen(path, "w");
+	fprintf(ff, "# frame | m4aSoundMain SoundMain MPlayMain CgbSound SoundMainRAM (cycles from line 160 start) | vsync (from line 150) | mplay calls, ply_note, ply_all, tracks exist/start/count, tempoC | c15 before->after | writes\n");
+	for (int k = 1; k < MAX_FRAMES; ++k) {
+		struct FrameRec* r = &gFrameRecs[k];
+		if (!r->used) continue;
+		fprintf(ff, "frame %4d | sm %6d SM %6d MP %6d CGB %6d RAM %6d | vs %5d | mp %d note %2d ply %3d trk %2d/%2d/%2d tempoC %3d | c15 %2d->%2d |",
+		        k, r->m4aSoundMain, r->soundMain, r->mplayMain, r->cgbSound, r->soundMainRAM, r->vsync,
+		        r->mplayMainCalls, r->plyNote, r->plyAll, r->tracksExist, r->tracksStart, r->trackCount, r->tempoC, r->c15Before, r->c15After);
+		for (int i = 0; i < r->numWrites; ++i) {
+			const char* nm = regName(r->writes[i].reg);
+			if (nm) fprintf(ff, " %s=%02X@%d", nm, r->writes[i].value, r->writes[i].cycle);
+			else fprintf(ff, " %02X=%02X@%d", r->writes[i].reg, r->writes[i].value, r->writes[i].cycle);
+		}
+		fputc('\n', ff);
+		/* per-handler counts, when any */
+		int any = 0;
+		for (int i = 0; i < gNumSyms && i < 64; ++i) if (r->plyCount[i]) any = 1;
+		if (any) {
+			fprintf(ff, "           ply:");
+			for (int i = 0; i < gNumSyms && i < 64; ++i) if (r->plyCount[i]) fprintf(ff, " %s=%d", gSyms[i].name, r->plyCount[i]);
+			fputc('\n', ff);
+		}
+	}
+	fclose(ff);
+
+	snprintf(path, sizeof path, "%s.events", argv[2]);
+	FILE* fe = fopen(path, "w");
+	fprintf(fe, "# mgba scheduler lateness over %ld frames (slot = %d-cycle DAC slot)\n", gFrames, gGba->audio.sampleInterval);
+	writeStats(fe, &gTimer0);
+	writeStats(fe, &gSample);
+	writeStats(fe, &gPsgFrame);
+	fclose(fe);
 	return 0;
 }
