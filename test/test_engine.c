@@ -850,9 +850,9 @@ static void test_portamento(void)
     M4ACGBChannel *cgb = &engine.cgbChannels[0];
     ASSERT(cgb->status & CHN_ON, "cgb portamento: first note started");
     uint32_t cgbFreqStart = cgb->frequency;
+    advance_frames(&engine, 1, outL, outR);   /* CgbSound starts the note */
     uint8_t cgbEnvBefore = cgb->envelopeVolume;
     ASSERT(cgbEnvBefore != 0, "cgb portamento: first note envelope is audible");
-    m4a_engine_process(&engine, outL, outR, 256);
     m4a_engine_note_off(&engine, 0, 60);
     m4a_engine_note_on(&engine, 0, 67, 100);
     ASSERT_EQ(cgb->status, CHN_ENV_SUSTAIN, "cgb portamento: legato note sustains, no retrigger");
@@ -1201,93 +1201,762 @@ static void test_cgb_fixed_freq(void)
     m4a_engine_destroy(&engine);
 }
 
-/* Square-1 hardware frequency sweep (NR10): a square-1 voice whose pan_sweep
- * byte holds a sweep value glides its frequency in "hardware" at 128 Hz,
- * f' = f +/- (f >> shift) every `time` clocks; an upward sweep that overflows
- * the 11-bit register silences the channel.  Matches ply_note/CgbSound in
- * pokeemerald and the sweep unit in mGBA's gb/audio.c. */
-static void test_sweep(void)
-{
-    printf("Testing square-1 frequency sweep...\n");
+/* ---- PSG model (plugin/m4a_psg.c) against hand-computed mgba behavior ----
+ *
+ * Each expectation below is worked out from mgba 0.10.5 src/gb/audio.c in its
+ * GB_AUDIO_GBA style (timing factor 4), not from running the model. */
 
+/* Register-write semantics (GBAIOWrite8 / GBAIOWrite), the frame sequencer
+ * restart on NR52, and the square channel's duty index catch-up. */
+static void test_psg_square(void)
+{
+    printf("Testing PSG square channel vs mgba...\n");
+    M4APsg p;
+    memset(&p, 0, sizeof(p));
+    m4a_psg_reset(&p);
+    int64_t t = 0;
+
+    /* Unit off: NR10 goes through the merged 16-bit path, which ignores
+     * writes to 0x60..0x80 while NR52 is off; NR12 is a byte register and
+     * lands anyway.  Reads of 0x60..0x80 return 0 while off. */
+    m4a_psg_write8(&p, PSG_REG_NR10, 0x1B, t);
+    ASSERT_EQ(p.ch1.sweep.shift, 0, "psg: NR10 write ignored while the unit is off");
+    m4a_psg_write8(&p, PSG_REG_NR12, 0xF3, t);
+    ASSERT_EQ(p.ch1.envelope.initialVolume, 15, "psg: byte NR12 write lands while off");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR12), 0, "psg: channel registers read 0 while off");
+
+    m4a_psg_write8(&p, PSG_REG_NR52, 0x8F, t);
+    ASSERT(p.enable, "psg: NR52 bit 7 enables the unit");
+    ASSERT_EQ(p.frame, 7, "psg: enabling restarts the frame sequencer at frame 7");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR52), 0x80, "psg: NR52 image = enable bit, no channel playing");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR12), 0xF3, "psg: NRx2 reads back whole");
+
+    m4a_psg_write8(&p, PSG_REG_NR50, 0x77, t);
+    m4a_psg_write8(&p, PSG_REG_NR51, 0x11, t);
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR51), 0x11, "psg: NR51 reads back");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR50), 0x77, "psg: NR50 reads back (stored & 0x77)");
+    m4a_psg_write8(&p, PSG_REG_NR11, 0x80 | 5, t);          /* duty 2, length 5 */
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR11), 0x80, "psg: NRx1 image keeps only the duty bits");
+    ASSERT_EQ(p.ch1.length, 59, "psg: length counter = 64 - length");
+    m4a_psg_write8(&p, PSG_REG_NR13, 0x00, t);
+    m4a_psg_write8(&p, PSG_REG_NR14, 0x87, t);              /* freq 0x700, trigger */
+    ASSERT_EQ(p.ch1.frequency, 0x700, "psg: NR13/NR14 assemble the 11-bit frequency");
+    ASSERT(p.playingCh1, "psg: trigger with a nonzero volume starts the channel");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR13), 0, "psg: NRx3 is write-only");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR14), 0, "psg: NRx4 image keeps only the length-enable bit");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR52), 0x81, "psg: NR52 playing bit set by the trigger");
+    ASSERT_EQ(p.ch1.length, 59, "psg: trigger leaves a nonzero length counter alone");
+
+    /* Duty index: period 4 * (2048 - 0x700) * 4 = 4096 cycles per step,
+     * lastUpdate 0 from reset.  Duty 2 = {1,0,0,0,0,1,1,1}. */
+    ASSERT_EQ(p.ch1.sample, 15, "psg: sample = duty bit x volume at the trigger (index 0)");
+    m4a_psg_run(&p, 4095, 0xF);
+    ASSERT_EQ(p.ch1.index, 0, "psg: no step before one period has elapsed");
+    m4a_psg_run(&p, 4096, 0xF);
+    ASSERT_EQ(p.ch1.index, 1, "psg: index steps once per period");
+    ASSERT_EQ(p.ch1.sample, 0, "psg: duty 2 is low at index 1");
+    m4a_psg_run(&p, 5 * 4096 + 100, 0xF);
+    ASSERT_EQ(p.ch1.index, 5, "psg: catch-up by whole periods");
+    ASSERT_EQ(p.ch1.lastUpdate, 5 * 4096, "psg: lastUpdate stays on the period grid");
+    ASSERT_EQ(p.ch1.sample, 15, "psg: duty 2 is high at index 5");
+
+    /* GBAudioSamplePSG scale: 15 << 3, x (1 + 7) per side, both sides on. */
+    int l = 0, r = 0;
+    m4a_psg_sample(&p, 0xF, &l, &r);
+    ASSERT_EQ(l, 960, "psg: left = (15 << 3) * (1 + NR50 left volume)");
+    ASSERT_EQ(r, 960, "psg: right likewise");
+    m4a_psg_sample(&p, 0xE, &l, &r);
+    ASSERT_EQ(l, 0, "psg: channel mask excludes ch1");
+
+    /* 64 Hz envelope: NR12 = 0xF3 (15, decrease, step 3) steps at every third
+     * frame 7; the frame sequencer is at 7, so 8 steps bring it back to 7. */
+    int64_t ft = 32768;
+    for (int i = 0; i < 8; i++, ft += 32768)
+        m4a_psg_frame(&p, ft);
+    ASSERT_EQ(p.frame, 7, "psg: eight frame steps wrap to frame 7");
+    ASSERT_EQ(p.ch1.envelope.nextStep, 2, "psg: envelope counter ticks at frame 7");
+    ASSERT_EQ(p.ch1.envelope.currentVolume, 15, "psg: no volume step before the counter expires");
+    for (int i = 0; i < 16; i++, ft += 32768)
+        m4a_psg_frame(&p, ft);
+    ASSERT_EQ(p.ch1.envelope.currentVolume, 14, "psg: volume steps down after 3 x 64 Hz clocks");
+    ASSERT_EQ(p.ch1.envelope.nextStep, 3, "psg: step counter reloads");
+    ASSERT_EQ(p.ch1.length, 59, "psg: length counter idle without the length-enable bit");
+
+    /* Catch-up cases while the channel is not sounding.  NR12 = 0 (volume 0,
+     * decrease) stops the channel; run(0xF) then leaves the index alone, but
+     * channels == 0x1 (a register write to this channel) catches it up. */
+    int64_t now = ft;
+    m4a_psg_run(&p, now, 0xF);
+    m4a_psg_write8(&p, PSG_REG_NR12, 0x00, now);
+    ASSERT(!p.playingCh1, "psg: NRx2 = 0 (volume 0, decreasing) stops the channel");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR52) & 1, 0, "psg: NR52 playing bit cleared");
+    uint8_t idx = p.ch1.index;
+    int64_t lu = p.ch1.lastUpdate;
+    m4a_psg_run(&p, now + 3 * 4096, 0xF);
+    ASSERT_EQ(p.ch1.index, idx, "psg: a stopped channel does not step on run(0xF)");
+    m4a_psg_run(&p, now + 3 * 4096, 0x1);
+    ASSERT_EQ(p.ch1.index, (idx + 3) & 7, "psg: channels == 0x1 catches a stopped channel up");
+    ASSERT_EQ(p.ch1.lastUpdate, lu + 3 * 4096, "psg: and advances lastUpdate");
+    m4a_psg_run(&p, p.ch1.lastUpdate + 0x40000000 + 4096 * 3, 0xF);
+    ASSERT_EQ(p.ch1.lastUpdate, lu + 3 * 4096 + 0x40000000 + 4096 * 3 - ((0x40000000 + 4096 * 3) % 4096),
+              "psg: a lastUpdate over 0x40000000 behind is caught up by run(0xF)");
+
+    /* Dead envelope: NR12 = 8 (volume 0, increase, step 0) keeps the channel
+     * "playing" with dead = 2 and a zero sample -- the MPlayExtender state. */
+    m4a_psg_write8(&p, PSG_REG_NR12, 0x08, now);
+    m4a_psg_write8(&p, PSG_REG_NR14, 0x80, now);
+    ASSERT(p.playingCh1, "psg: trigger with increase direction counts as playing");
+    ASSERT_EQ(p.ch1.envelope.dead, 2, "psg: step 0 with volume 0 is dead = 2");
+    ASSERT_EQ(p.ch1.sample, 0, "psg: dead channel outputs 0");
+    ASSERT_EQ(p.ch1.frequency, 0, "psg: NRx4 = 0x80 clears the frequency high bits");
+
+    /* NR52 off: merged-path registers are zeroed; byte image of NR11 too. */
+    m4a_psg_write8(&p, PSG_REG_NR52, 0x00, now);
+    ASSERT(!p.enable && !p.playingCh1, "psg: NR52 off stops everything");
+    ASSERT_EQ(p.io[(PSG_REG_NR11 - 0x60) >> 1], 0, "psg: NR52 off clears the register images");
+}
+
+/* Square-1 sweep unit: shadow register, 128 Hz steps, overflow, and the
+ * `occurred` direction-change quirk. */
+static void test_psg_sweep(void)
+{
+    printf("Testing PSG sweep unit vs mgba...\n");
+    M4APsg p;
+    memset(&p, 0, sizeof(p));
+    m4a_psg_reset(&p);
+    int64_t t = 0;
+    m4a_psg_write8(&p, PSG_REG_NR52, 0x8F, t);
+    m4a_psg_write8(&p, PSG_REG_NR10, 0x1B, t);  /* time 1, down, shift 3 */
+    ASSERT_EQ(p.ch1.sweep.time, 1, "sweep: NR10 time");
+    ASSERT(p.ch1.sweep.direction, "sweep: NR10 direction = down");
+    ASSERT_EQ(p.ch1.sweep.shift, 3, "sweep: NR10 shift");
+    m4a_psg_write8(&p, PSG_REG_NR12, 0xF0, t);
+    m4a_psg_write8(&p, PSG_REG_NR13, 0x00, t);
+    m4a_psg_write8(&p, PSG_REG_NR14, 0x86, t);  /* 0x600 = 1536, trigger */
+    ASSERT(p.playingCh1, "sweep: downward trigger passes the initial check");
+    ASSERT_EQ(p.ch1.sweep.realFrequency, 1536, "sweep: shadow loaded at the trigger");
+    ASSERT_EQ(p.ch1.frequency, 1536, "sweep: the initial calculation never writes the frequency");
+    ASSERT(p.ch1.sweep.occurred, "sweep: initial calculation sets `occurred`");
+    ASSERT(p.ch1.sweep.enable, "sweep: time != 8 enables the unit");
+
+    /* Frames 0, 1 do nothing for the sweep; frame 2 decrements step 1 -> 0
+     * and recalculates: 1536 - (1536 >> 3) = 1344. */
+    int64_t ft = 32768;
+    for (int i = 0; i < 2; i++, ft += 32768)
+        m4a_psg_frame(&p, ft);
+    ASSERT_EQ(p.ch1.frequency, 1536, "sweep: no change before frame 2");
+    m4a_psg_frame(&p, ft); ft += 32768;
+    ASSERT_EQ(p.frame, 2, "sweep: at frame 2");
+    ASSERT_EQ(p.ch1.frequency, 1344, "sweep: f' = f - (f >> 3) at frame 2");
+    ASSERT_EQ(p.ch1.sweep.realFrequency, 1344, "sweep: shadow follows");
+    for (int i = 0; i < 4; i++, ft += 32768)
+        m4a_psg_frame(&p, ft);
+    ASSERT_EQ(p.frame, 6, "sweep: at frame 6");
+    ASSERT_EQ(p.ch1.frequency, 1344 - (1344 >> 3), "sweep: second step at frame 6 compounds");
+    ASSERT(p.playingCh1, "sweep: a downward sweep keeps sounding");
+
+    /* Direction change down -> up after a calculation occurred turns the
+     * channel off (mgba _writeSweep). */
+    m4a_psg_write8(&p, PSG_REG_NR10, 0x11, ft);
+    ASSERT(!p.playingCh1, "sweep: down->up NR10 write after `occurred` disables the channel");
+
+    /* Upward overflow at the trigger: 1792 + (1792 >> 1) >= 2048. */
+    m4a_psg_write8(&p, PSG_REG_NR13, 0x00, ft);
+    m4a_psg_write8(&p, PSG_REG_NR14, 0x87, ft);
+    ASSERT(!p.playingCh1, "sweep: upward overflow at the trigger silences the channel");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR52) & 1, 0, "sweep: NR52 bit cleared on overflow");
+
+    /* Inert NR10 (time 0 -> 8, shift 0): the unit stays disabled. */
+    m4a_psg_write8(&p, PSG_REG_NR10, 0x08, ft);
+    m4a_psg_write8(&p, PSG_REG_NR14, 0x86, ft);
+    ASSERT(p.playingCh1, "sweep: inert NR10 lets the trigger start the channel");
+    ASSERT(!p.ch1.sweep.enable, "sweep: time 8 with shift 0 disables the unit");
+    ASSERT_EQ(p.ch1.sweep.time, 8, "sweep: time 0 reads as 8");
+    for (int i = 0; i < 16; i++, ft += 32768)
+        m4a_psg_frame(&p, ft);
+    ASSERT_EQ(p.ch1.frequency, 1536, "sweep: no sweeping with the inert value");
+}
+
+/* Wave channel: banked rotating wave RAM, step timing, volume shifts. */
+static void test_psg_wave(void)
+{
+    printf("Testing PSG wave channel vs mgba...\n");
+    M4APsg p;
+    memset(&p, 0, sizeof(p));
+    m4a_psg_reset(&p);
+    int64_t t = 0;
+    m4a_psg_write8(&p, PSG_REG_NR52, 0x8F, t);
+    m4a_psg_write8(&p, PSG_REG_NR51, 0x44, t);
+    m4a_psg_write8(&p, PSG_REG_NR50, 0x77, t);
+
+    /* CgbSound's upload: select bank 1 (NR30 = 0x40) so the words land in
+     * bank 0 (writes go to the bank not selected for playback). */
+    m4a_psg_write8(&p, PSG_REG_NR30, 0x40, t);
+    ASSERT(p.ch3.bank, "wave: NR30 bit 6 selects bank 1");
+    m4a_psg_write_wave_ram(&p, 0, 0x01234567, t);
+    m4a_psg_write_wave_ram(&p, 1, 0x89ABCDEF, t);
+    m4a_psg_write_wave_ram(&p, 2, 0, t);
+    m4a_psg_write_wave_ram(&p, 3, 0, t);
+    ASSERT_EQ(p.ch3.wavedata32[0], 0x01234567u, "wave: upload lands in the other bank (words 0..3)");
+    ASSERT_EQ(p.ch3.wavedata32[4], 0u, "wave: playing bank untouched");
+    m4a_psg_write8(&p, PSG_REG_NR30, 0x00, t);
+    ASSERT(!p.ch3.enable && !p.playingCh3, "wave: NR30 = 0 disables the DAC");
+    m4a_psg_write8(&p, PSG_REG_NR31, 0x00, t);
+    m4a_psg_write8(&p, PSG_REG_NR32, 0x20, t);      /* volume field 1 = 100% */
+    ASSERT_EQ(p.ch3.volume, 1, "wave: NR32 bits 5-7");
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR32), 0x20, "wave: NR32 image keeps bits 5-7");
+    m4a_psg_write8(&p, PSG_REG_NR33, 0xF8, t);      /* rate 0x7F8 = 2040 */
+    m4a_psg_write8(&p, PSG_REG_NR34, 0x87, t);      /* trigger while disabled */
+    ASSERT(!p.playingCh3, "wave: a trigger with NR30 bit 7 clear does not start the channel");
+    m4a_psg_write8(&p, PSG_REG_NR30, 0x80, t);
+    m4a_psg_write8(&p, PSG_REG_NR34, 0x87, t);
+    ASSERT(p.playingCh3, "wave: trigger after NR30 = 0x80 starts the channel");
+    ASSERT_EQ(p.ch3.length, 256, "wave: zero length reloads to 256");
+    /* First step after (6 + 2 * (2048 - 2040)) * 4 = 88 cycles, then every
+     * 2 * 8 * 4 = 64.  Nibble order: byte 0 high nibble first. */
+    ASSERT_EQ(p.ch3.nextUpdate, 88, "wave: first step delay (6 + 2 * (2048 - rate)) * 4");
+    m4a_psg_run(&p, 87, 0xF);
+    ASSERT_EQ(p.ch3.sample, 0, "wave: no sample before the first step");
+    m4a_psg_run(&p, 88, 0xF);
+    ASSERT_EQ(p.ch3.sample, 6, "wave: first nibble = high nibble of byte 0 (0x67 -> 6)");
+    m4a_psg_run(&p, 88 + 64, 0xF);
+    ASSERT_EQ(p.ch3.sample, 7, "wave: second nibble = low nibble of byte 0");
+    m4a_psg_run(&p, 88 + 2 * 64, 0xF);
+    ASSERT_EQ(p.ch3.sample, 4, "wave: third nibble = high nibble of byte 1");
+    m4a_psg_run(&p, 88 + 7 * 64, 0xF);
+    ASSERT_EQ(p.ch3.sample, 1, "wave: eighth nibble = low nibble of byte 3");
+    m4a_psg_run(&p, 88 + 8 * 64, 0xF);
+    ASSERT_EQ(p.ch3.sample, 0xE, "wave: ninth nibble comes from word 1 (0xEF -> E)");
+    int l = 0, r = 0;
+    m4a_psg_sample(&p, 0xF, &l, &r);
+    ASSERT_EQ(l, (0xE << 3) * 8, "wave: output scale like the squares");
+    m4a_psg_run(&p, 88 + 31 * 64, 0xF);
+    m4a_psg_run(&p, 88 + 32 * 64, 0xF);
+    ASSERT_EQ(p.ch3.sample, 6, "wave: 32 steps rotate the 4-word bank back to the start");
+
+    /* Volume shifts: field 3 = 25% (>> 2), field 4 = 75% (x3 >> 2). */
+    m4a_psg_write8(&p, PSG_REG_NR32, 0x60, 88 + 32 * 64);
+    m4a_psg_run(&p, 88 + 33 * 64, 0xF);
+    ASSERT_EQ(p.ch3.sample, 7 >> 2, "wave: 25% volume = nibble >> 2");
+    m4a_psg_write8(&p, PSG_REG_NR32, 0x80, 88 + 33 * 64);
+    m4a_psg_run(&p, 88 + 34 * 64, 0xF);
+    ASSERT_EQ(p.ch3.sample, (4 * 3) >> 2, "wave: GBA 75% volume = (nibble * 3) >> 2");
+    m4a_psg_write8(&p, PSG_REG_NR32, 0x00, 88 + 34 * 64);
+    m4a_psg_run(&p, 88 + 35 * 64, 0xF);
+    ASSERT_EQ(p.ch3.sample, 0, "wave: volume field 0 mutes");
+
+    /* CgbOscOff(3): NR30 = 0 stops it. */
+    m4a_psg_write8(&p, PSG_REG_NR30, 0x00, 88 + 35 * 64);
+    ASSERT(!p.playingCh3, "wave: NR30 = 0 stops the channel");
+}
+
+/* Noise channel: LFSR period, 15/7-bit taps, point sampling, envelope step. */
+static void test_psg_noise(void)
+{
+    printf("Testing PSG noise channel vs mgba...\n");
+    M4APsg p;
+    memset(&p, 0, sizeof(p));
+    m4a_psg_reset(&p);
+    int64_t t = 1000;
+    m4a_psg_write8(&p, PSG_REG_NR52, 0x8F, t);
+    m4a_psg_write8(&p, PSG_REG_NR51, 0x88, t);
+    m4a_psg_write8(&p, PSG_REG_NR50, 0x77, t);
+    m4a_psg_write8(&p, PSG_REG_NR41, 0x00, t);
+    m4a_psg_write8(&p, PSG_REG_NR42, 0xF0, t);
+    m4a_psg_write8(&p, PSG_REG_NR43, 0x00, t);      /* ratio 0, 15-bit, shift 0 */
+    ASSERT_EQ(m4a_psg_read8(&p, PSG_REG_NR43), 0x00, "noise: NR43 reads back");
+    m4a_psg_write8(&p, PSG_REG_NR44, 0x80, t);
+    ASSERT(p.playingCh4, "noise: trigger starts the channel");
+    ASSERT_EQ(p.ch4.lfsr, 0x7FFFu, "noise: 15-bit LFSR seeded at the trigger");
+    ASSERT_EQ(p.ch4.lastEvent, t, "noise: LFSR clock starts at the trigger");
+    /* Period: (ratio ? 2 * ratio : 1) << shift, x 8 x 4 = 32 cycles.  Each
+     * step: lsb out, lfsr >>= 1, lfsr ^= lsb * 0x6000. */
+    m4a_psg_run(&p, t + 31, 0xF);
+    ASSERT_EQ(p.ch4.sample, 0, "noise: no output before the first LFSR step");
+    m4a_psg_run(&p, t + 32, 0xF);
+    ASSERT_EQ(p.ch4.lfsr, 0x5FFFu, "noise: first step 0x7FFF -> 0x5FFF");
+    ASSERT_EQ(p.ch4.sample, 15, "noise: sample = lsb x volume (point-sampled)");
+    m4a_psg_run(&p, t + 3 * 32 + 5, 0xF);
+    ASSERT_EQ(p.ch4.lfsr, 0x47FFu, "noise: three steps 0x7FFF -> 0x47FF");
+    ASSERT_EQ(p.ch4.lastEvent, t + 3 * 32, "noise: lastEvent stays on the LFSR grid");
+    int l = 0, r = 0;
+    m4a_psg_sample(&p, 0xF, &l, &r);
+    ASSERT_EQ(l, (15 << 3) * 8, "noise: output = (sample << 3) x (1 + NR50)");
+    /* 14 ones shift out before the first zero: step 15 outputs 0. */
+    m4a_psg_run(&p, t + 14 * 32, 0xF);
+    ASSERT_EQ(p.ch4.lfsr, 0x4000u, "noise: after 14 steps only bit 14 is set");
+    m4a_psg_run(&p, t + 15 * 32, 0xF);
+    ASSERT_EQ(p.ch4.lfsr, 0x2000u, "noise: step 15 shifts a 0 out");
+    ASSERT_EQ(p.ch4.sample, 0, "noise: a 0 bit outputs 0");
+
+    /* Envelope step at frame 7 rescales the held sample. */
+    m4a_psg_run(&p, t + 16 * 32, 0xF);
+    ASSERT_EQ(p.ch4.sample, 0, "noise: step 16 (lfsr 0x1000) outputs 0");
+    m4a_psg_run(&p, t + 28 * 32, 0xF);
+    ASSERT_EQ(p.ch4.lfsr, 0x0001u, "noise: bit 14 walks down to bit 0 in 13 more steps");
+    m4a_psg_run(&p, t + 29 * 32, 0xF);
+    ASSERT_EQ(p.ch4.lfsr, 0x6000u, "noise: a 1 shifts out and taps bits 13-14");
+    ASSERT_EQ(p.ch4.sample, 15, "noise: output follows the shifted-out bit");
+
+    /* 7-bit mode and a slow ratio/shift. */
+    m4a_psg_write8(&p, PSG_REG_NR43, 0x2B, t + 30 * 32);   /* ratio 3, 7-bit, shift 2 */
+    m4a_psg_write8(&p, PSG_REG_NR44, 0x80, t + 30 * 32);
+    ASSERT_EQ(p.ch4.lfsr, 0x7Fu, "noise: 7-bit LFSR seed");
+    int64_t t2 = t + 30 * 32;
+    int period = (2 * 3) << 2;
+    period *= 32;   /* 768 cycles */
+    m4a_psg_run(&p, t2 + period - 1, 0xF);
+    ASSERT_EQ(p.ch4.lfsr, 0x7Fu, "noise: no step before (2 x ratio) << shift x 32 cycles");
+    m4a_psg_run(&p, t2 + period, 0xF);
+    ASSERT_EQ(p.ch4.lfsr, 0x5Fu, "noise: 7-bit taps bits 5-6 (0x7F -> 0x5F)");
+
+    /* Envelope: NR42 = 0xF1 (step 1): the frame-7 step drops the volume and
+     * rescales the held sample. */
+    m4a_psg_write8(&p, PSG_REG_NR42, 0xF1, t2 + period);
+    m4a_psg_write8(&p, PSG_REG_NR44, 0x80, t2 + period);
+    m4a_psg_run(&p, t2 + 2 * period, 0xF);
+    ASSERT_EQ(p.ch4.sample, 15, "noise: fresh trigger at volume 15");
+    for (int i = 0; i < 8; i++)
+        m4a_psg_frame(&p, t2 + 2 * period);
+    ASSERT_EQ(p.frame, 7, "noise: frame sequencer at 7");
+    ASSERT_EQ(p.ch4.envelope.currentVolume, 14, "noise: envelope step at frame 7");
+    ASSERT_EQ(p.ch4.sample, 14, "noise: held sample rescaled to the new volume");
+}
+
+/* ---- CgbSound driver (plugin/m4a_channel.c): register sequences ---- */
+
+typedef struct {
+    uint32_t reg[64];
+    uint32_t val[64];
+    int64_t when[64];
+    int n;
+    const M4AEngine *engine;
+} WriteLog;
+
+static void write_log_cb(void *user, uint32_t reg, uint32_t value)
+{
+    WriteLog *log = (WriteLog *)user;
+    if (log->n < 64) {
+        log->reg[log->n] = reg;
+        log->val[log->n] = value;
+        log->when[log->n] = log->engine->gba.now;
+        log->n++;
+    }
+}
+
+static int log_matches(const WriteLog *log, const uint32_t *expect, int n)
+{
+    if (log->n != n)
+        return 0;
+    for (int i = 0; i < n; i++)
+        if (log->reg[i] != expect[2 * i] || log->val[i] != expect[2 * i + 1])
+            return 0;
+    return 1;
+}
+
+static void log_dump(const WriteLog *log)
+{
+    for (int i = 0; i < log->n; i++)
+        fprintf(stderr, "    [%d] reg 0x%02X = 0x%02X\n", i, log->reg[i], log->val[i]);
+}
+
+#define EXPECT_LOG(log, msg, ...) do { \
+    const uint32_t _e[] = { __VA_ARGS__ }; \
+    int _ok = log_matches((log), _e, (int)(sizeof(_e) / sizeof(_e[0]) / 2)); \
+    if (!_ok) log_dump(log); \
+    ASSERT(_ok, msg); \
+} while (0)
+
+/* Boot: the SoundInit/MPlayExtender register writes reach both PSGs. */
+static void test_cgb_driver_boot(void)
+{
+    printf("Testing CgbSound driver: boot writes...\n");
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    WriteLog log = { .n = 0, .engine = &engine };
+    engine.psg[0].writeLog = write_log_cb;
+    engine.psg[0].writeLogUser = &log;
+    m4a_engine_boot(&engine, false);
+    EXPECT_LOG(&log, "boot: SoundInit NR52, then MPlayExtender's PSG setup, in order",
+               PSG_REG_NR52, 0x8F,
+               PSG_REG_NR52, 0x8F, PSG_REG_NR50, 0x00, PSG_REG_NR51, 0x00,
+               PSG_REG_NR12, 0x08, PSG_REG_NR22, 0x08, PSG_REG_NR42, 0x08,
+               PSG_REG_NR14, 0x80, PSG_REG_NR24, 0x80, PSG_REG_NR44, 0x80,
+               PSG_REG_NR30, 0x00, PSG_REG_NR50, 0x77);
+    ASSERT_EQ(log.when[0], 5720, "boot: SOUNDCNT_X at cycle 5720");
+    ASSERT_EQ(log.when[1], 39875, "boot: MPlayExtender starts at cycle 39875");
+    ASSERT(log.when[11] <= 39935, "boot: MPlayExtender ends by cycle 39935");
+    for (int i = 0; i < 2; i++) {
+        M4APsg *p = &engine.psg[i];
+        ASSERT(p->enable, "boot: PSG enabled");
+        ASSERT(p->playingCh1 && p->playingCh2 && p->playingCh4, "boot: squares/noise triggered at volume 0");
+        ASSERT_EQ(p->ch1.envelope.dead, 2, "boot: dead envelopes");
+        ASSERT_EQ(p->volumeLeft, 7, "boot: NR50 = 0x77");
+        ASSERT_EQ(m4a_psg_read8(p, PSG_REG_NR12), 0x08, "boot: NR12 image = 8");
+    }
+    m4a_engine_destroy(&engine);
+}
+
+/* Square 1 note: the CgbSound start-frame sequence, the MO_PIT update, the
+ * instant-release CgbOscOff, and the write timestamp. */
+static void test_cgb_driver_square(void)
+{
+    printf("Testing CgbSound driver: square register sequences...\n");
     ToneData voices[128];
     memset(voices, 0, sizeof(voices));
-    /* voice 0: sweep down -- time=1, dir=down, shift=3 (NR10 = 0x1B) */
+    /* voice 0: sq1, 50% duty, attack 0, decay 0, sustain 15, release 0, no sweep */
     voices[0].type = VOICE_SQUARE_1;
     voices[0].key = 60;
-    voices[0].wavePointer = (uint32_t *)(uintptr_t)2;  /* 50% duty */
+    voices[0].wavePointer = (uint32_t *)(uintptr_t)2;
     voices[0].sustain = 15;
-    voices[0].release = 3;
-    voices[0].panSweep = 0x1B;
-    /* voice 1: sweep up -- time=1, dir=up, shift=1 (NR10 = 0x11) */
+    /* voice 1: sq1 with an upward sweep (NR10 bit 3 clear -> double NR14) and a real envelope */
     voices[1] = voices[0];
     voices[1].panSweep = 0x11;
-    /* voice 2: pan bit set -- pan_sweep is a pan, not a sweep */
-    voices[2] = voices[0];
-    voices[2].panSweep = 0xC0;
+    voices[1].attack = 2;
+    voices[1].decay = 3;
+    voices[1].sustain = 8;
+    voices[1].release = 1;
+    /* voice 2: sq2, 25% duty */
+    voices[2].type = VOICE_SQUARE_2;
+    voices[2].key = 60;
+    voices[2].wavePointer = (uint32_t *)(uintptr_t)1;
+    voices[2].sustain = 15;
 
     M4AEngine engine;
     float outL[1024], outR[1024];
+    engine_init_booted(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    WriteLog log = { .n = 0, .engine = &engine };
+    engine.psg[0].writeLog = write_log_cb;
+    engine.psg[0].writeLogUser = &log;
+    M4ACGBChannel *sq = &engine.cgbChannels[0];
 
+    /* --- voice 0: attack 0 / decay 0 -> straight to sustain --- */
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    ASSERT_EQ(sq->status, CHN_START, "driver: note-on only flags CHN_START");
+    ASSERT_EQ(log.n, 0, "driver: no register writes until the next SoundMain");
+    int64_t soundMain = engine.nextSoundMain;
+    advance_frames(&engine, 1, outL, outR);
+    uint32_t f = sq->frequency;
+    uint8_t nr51 = 0x11 & sq->pan;      /* pan 0xFF & panMask 0x11 */
+    uint8_t vol = sq->envelopeVolume;
+    ASSERT_EQ(sq->status, CHN_ENV_SUSTAIN, "driver: attack 0, decay 0 -> sustain in the start frame");
+    EXPECT_LOG(&log, "driver: square-1 start frame: NR10, NR11, NR13, NR14 (no trigger), NR51, NR12, NR14 | 0x80",
+               PSG_REG_NR10, 0x08,
+               PSG_REG_NR11, (2u << 6),
+               PSG_REG_NR13, f & 0xFF,
+               PSG_REG_NR14, (f >> 8) & 0x07,
+               PSG_REG_NR51, nr51,
+               PSG_REG_NR12, 0x08 | (vol << 4),
+               PSG_REG_NR14, 0x80 | ((f >> 8) & 0x07));
+    ASSERT_EQ(log.when[0], soundMain, "driver: writes are stamped at the SoundMain cycle");
+    ASSERT_EQ((soundMain - engine.nextSoundMain + GBA_CYCLES_PER_FRAME) % GBA_CYCLES_PER_FRAME, 0,
+              "driver: one SoundMain per frame");
+    ASSERT_EQ(engine.psg[0].ch1.frequency, (int)f, "driver: PSG frequency follows NR13/NR14");
+    ASSERT(engine.psg[0].playingCh1 && engine.psg[0].ch1.envelope.currentVolume == (vol & 0xF),
+           "driver: PSG channel 1 sounding at the software envelope volume");
+    ASSERT(!engine.psg[1].playingCh1 || engine.psg[1].ch1.envelope.currentVolume == 0,
+           "driver: the shadow PSG hears nothing for a real note");
+
+    /* Steady frame: no writes (sustain holds, no modify flags). */
+    log.n = 0;
+    advance_frames(&engine, 1, outL, outR);
+    ASSERT_EQ(log.n, 0, "driver: a sustaining channel writes nothing");
+
+    /* Pitch bend -> MO_PIT: NRx3 then NRx4 without the trigger bit. */
+    m4a_engine_pitch_bend(&engine, 0, 4096);
+    log.n = 0;
+    advance_frames(&engine, 1, outL, outR);
+    uint32_t f2 = sq->frequency;
+    ASSERT(f2 != f, "driver: bend changed the frequency");
+    EXPECT_LOG(&log, "driver: MO_PIT writes NR13, NR14 = n4 (no trigger)",
+               PSG_REG_NR13, f2 & 0xFF,
+               PSG_REG_NR14, (f2 >> 8) & 0x07);
+
+    /* Note-off with release 0: pseudo-echo volume 0 -> CgbOscOff in the next frame. */
+    m4a_engine_note_off(&engine, 0, 60);
+    log.n = 0;
+    advance_frames(&engine, 1, outL, outR);
+    EXPECT_LOG(&log, "driver: release 0 -> CgbOscOff(1): NR12 = 8, NR14 = 0x80",
+               PSG_REG_NR12, 0x08, PSG_REG_NR14, 0x80);
+    ASSERT_EQ(sq->status, 0, "driver: channel freed");
+    ASSERT_EQ(engine.psg[0].ch1.envelope.currentVolume, 0, "driver: PSG silenced by the trigger at volume 0");
+
+    /* --- voice 1: sweep + attack: envelopeStepTimeAndDir and the double NR14 --- */
+    m4a_engine_pitch_bend(&engine, 0, 0);
+    m4a_engine_program_change(&engine, 0, 1);
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    log.n = 0;
+    advance_frames(&engine, 1, outL, outR);
+    f = sq->frequency;
+    ASSERT_EQ(sq->status, CHN_ENV_ATTACK, "driver: attack 2 starts in the attack phase");
+    ASSERT_EQ(sq->envelopeVolume, 0, "driver: attack starts from volume 0");
+    EXPECT_LOG(&log, "driver: sweep voice: NR10 = sweep, NR12 = attack | inc, two NR14 trigger writes",
+               PSG_REG_NR10, 0x11,
+               PSG_REG_NR11, (2u << 6),
+               PSG_REG_NR13, f & 0xFF,
+               PSG_REG_NR14, (f >> 8) & 0x07,
+               PSG_REG_NR51, nr51,
+               PSG_REG_NR12, (0x08 | 2) | (0u << 4),
+               PSG_REG_NR14, 0x80 | ((f >> 8) & 0x07),
+               PSG_REG_NR14, 0x80 | ((f >> 8) & 0x07));
+    ASSERT_EQ(engine.psg[0].ch1.sweep.time, 1, "driver: PSG sweep programmed from the voice");
+    /* Software attack: one step per frame (two on c15 frames) until the goal,
+     * then decay: NR12 = decay | dec with the goal volume. */
+    int frames = 0;
+    log.n = 0;
+    while (sq->status == CHN_ENV_ATTACK && frames < 40) {
+        log.n = 0;
+        advance_frames(&engine, 1, outL, outR);
+        frames++;
+    }
+    ASSERT_EQ(sq->status, CHN_ENV_DECAY, "driver: attack reaches the goal and enters decay");
+    ASSERT(frames >= 1 && frames <= 32, "driver: attack 2 takes a plausible number of frames");
+    /* NR10 bit 3 is clear for this voice, so every MO_VOL ends with two NR14 writes. */
+    ASSERT(log.n >= 4, "driver: the decay transition writes registers");
+    ASSERT_EQ(log.reg[log.n - 4], PSG_REG_NR51, "driver: MO_VOL starts with NR51");
+    ASSERT_EQ(log.val[log.n - 3], (uint32_t)((3 | 0x00) | (sq->envelopeGoal << 4)),
+              "driver: decay start writes NR12 = decay | dec, goal volume");
+    ASSERT_EQ(log.reg[log.n - 2], PSG_REG_NR14, "driver: followed by the NR14 trigger");
+    ASSERT_EQ(log.reg[log.n - 1], PSG_REG_NR14, "driver: written twice when NR10 bit 3 is clear");
+
+    /* The envelopeStepTimeAndDir fallback: a frame with MO_VOL but no new
+     * step/dir (track volume change) reads the NR12 image back. */
+    while (sq->status == CHN_ENV_DECAY) advance_frames(&engine, 1, outL, outR);
+    ASSERT_EQ(sq->status, CHN_ENV_SUSTAIN, "driver: decay settles into sustain");
+    m4a_engine_cc(&engine, 0, 7, 100);
+    log.n = 0;
+    advance_frames(&engine, 1, outL, outR);
+    ASSERT(log.n >= 4, "driver: a volume change writes MO_VOL registers");
+    ASSERT_EQ(log.reg[log.n - 4], PSG_REG_NR51, "driver: NR51 first");
+    ASSERT_EQ(log.val[log.n - 3] & 0x0F, 0x08u, "driver: NR12 low nibble read back from the register image (sustain: 8)");
+    ASSERT_EQ(log.val[log.n - 3] >> 4, (uint32_t)(sq->envelopeVolume & 0xF), "driver: NR12 high nibble = software volume");
+
+    /* --- square 2 start: no NR10, single trigger --- */
+    m4a_engine_all_sound_off(&engine);
+    m4a_engine_program_change(&engine, 1, 2);
+    m4a_engine_note_on(&engine, 1, 60, 127);
+    log.n = 0;
+    uint8_t nr51Before = m4a_psg_read8(&engine.psg[0], PSG_REG_NR51);
+    advance_frames(&engine, 1, outL, outR);
+    M4ACGBChannel *sq2 = &engine.cgbChannels[1];
+    f = sq2->frequency;
+    EXPECT_LOG(&log, "driver: square-2 start frame: NR21, NR23, NR24, NR51, NR22, NR24 | 0x80",
+               PSG_REG_NR21, (1u << 6),
+               PSG_REG_NR23, f & 0xFF,
+               PSG_REG_NR24, (f >> 8) & 0x07,
+               PSG_REG_NR51, (nr51Before & ~0x22u) | (0x22 & sq2->pan),
+               PSG_REG_NR22, 0x08 | (sq2->envelopeVolume << 4),
+               PSG_REG_NR24, 0x80 | ((f >> 8) & 0x07));
+
+    /* TrackStop / all-sound-off: CgbOscOff immediately. */
+    log.n = 0;
+    m4a_engine_all_sound_off(&engine);
+    EXPECT_LOG(&log, "driver: all-sound-off -> CgbOscOff(2)", PSG_REG_NR22, 0x08, PSG_REG_NR24, 0x80);
+    ASSERT_EQ(sq2->status, 0, "driver: channel freed by all-sound-off");
+
+    m4a_engine_destroy(&engine);
+}
+
+/* Wave and noise notes: the upload-once wave RAM sequence with the n4
+ * trigger handling, and the noise period/frequency writes. */
+static void test_cgb_driver_wave_noise(void)
+{
+    printf("Testing CgbSound driver: wave and noise register sequences...\n");
+    static uint32_t tableA[4] = { 0x01234567, 0x89ABCDEF, 0xFEDCBA98, 0x76543210 };
+    static uint32_t tableB[4] = { 0x00000000, 0xFFFFFFFF, 0x00000000, 0xFFFFFFFF };
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_PROGRAMMABLE_WAVE;
+    voices[0].key = 60;
+    voices[0].wavePointer = tableA;
+    voices[0].sustain = 15;
+    voices[1] = voices[0];
+    voices[1].wavePointer = tableB;
+    voices[2].type = VOICE_NOISE;
+    voices[2].key = 60;
+    voices[2].wavePointer = (uint32_t *)(uintptr_t)1;   /* 7-bit */
+    voices[2].sustain = 15;
+    voices[2].release = 2;
+
+    M4AEngine engine;
+    float outL[1024], outR[1024];
+    engine_init_booted(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    WriteLog log = { .n = 0, .engine = &engine };
+    engine.psg[0].writeLog = write_log_cb;
+    engine.psg[0].writeLogUser = &log;
+    M4ACGBChannel *wv = &engine.cgbChannels[2];
+    M4ACGBChannel *nz = &engine.cgbChannels[3];
+
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    advance_frames(&engine, 1, outL, outR);
+    uint32_t f = wv->frequency;
+    uint8_t nr32 = wv->envelopeVolume < 16 ? gCgb3Vol[wv->envelopeVolume] : 0;
+    EXPECT_LOG(&log, "driver: wave start: NR30 = 0x40, wave RAM x4, NR30 = 0, NR31, NR33, NR34 = 0x80 | hi, NR51, NR32, NR30 = 0x80, NR34 = n4",
+               PSG_REG_NR30, 0x40,
+               PSG_REG_WAVE_RAM + 0, 0x01234567, PSG_REG_WAVE_RAM + 4, 0x89ABCDEF,
+               PSG_REG_WAVE_RAM + 8, 0xFEDCBA98, PSG_REG_WAVE_RAM + 12, 0x76543210,
+               PSG_REG_NR30, 0x00,
+               PSG_REG_NR31, 0x00,
+               PSG_REG_NR33, f & 0xFF,
+               PSG_REG_NR34, 0x80 | ((f >> 8) & 0x07),
+               PSG_REG_NR51, 0x44 & wv->pan,
+               PSG_REG_NR32, nr32,
+               PSG_REG_NR30, 0x80,
+               PSG_REG_NR34, 0x80 | ((f >> 8) & 0x07));
+    ASSERT_EQ(wv->n4, (uint8_t)((f >> 8) & 0x07), "driver: n4 trigger bit cleared after the first MO_VOL");
+    ASSERT(engine.psg[0].playingCh3, "driver: PSG wave channel sounding");
+    ASSERT(wv->currentWavePointer == tableA, "driver: currentPointer = uploaded table");
+
+    /* Same table again: no upload, no NR30 = 0x40. */
+    m4a_engine_note_off(&engine, 0, 60);
+    advance_frames(&engine, 1, outL, outR);
+    m4a_engine_note_on(&engine, 0, 72, 127);
+    log.n = 0;
+    advance_frames(&engine, 1, outL, outR);
+    f = wv->frequency;
+    EXPECT_LOG(&log, "driver: same-table wave note skips the wave RAM upload",
+               PSG_REG_NR30, 0x00,
+               PSG_REG_NR31, 0x00,
+               PSG_REG_NR33, f & 0xFF,
+               PSG_REG_NR34, 0x80 | ((f >> 8) & 0x07),
+               PSG_REG_NR51, 0x44 & wv->pan,
+               PSG_REG_NR32, nr32,
+               PSG_REG_NR30, 0x80,
+               PSG_REG_NR34, 0x80 | ((f >> 8) & 0x07));
+
+    /* Different table: uploaded. Note-off with release 0 -> NR30 = 0 first. */
+    m4a_engine_note_off(&engine, 0, 72);
+    log.n = 0;
+    advance_frames(&engine, 1, outL, outR);
+    EXPECT_LOG(&log, "driver: wave CgbOscOff is NR30 = 0", PSG_REG_NR30, 0x00);
+    m4a_engine_program_change(&engine, 0, 1);
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    log.n = 0;
+    advance_frames(&engine, 1, outL, outR);
+    ASSERT(log.n == 13 && log.reg[0] == PSG_REG_NR30 && log.val[0] == 0x40
+           && log.reg[1] == PSG_REG_WAVE_RAM && log.val[1] == 0x00000000
+           && log.reg[2] == PSG_REG_WAVE_RAM + 4 && log.val[2] == 0xFFFFFFFF,
+           "driver: a new table is uploaded");
+
+    /* Noise: NR41, NR43 = period << 3, NR43 = (old & 8) | freq, NR44 = n4, NR51, NR42, NR44 | 0x80. */
+    m4a_engine_all_sound_off(&engine);
+    m4a_engine_program_change(&engine, 1, 2);
+    m4a_engine_note_on(&engine, 1, 60, 127);
+    log.n = 0;
+    uint8_t nr51Before = m4a_psg_read8(&engine.psg[0], PSG_REG_NR51);
+    advance_frames(&engine, 1, outL, outR);
+    f = nz->frequency;
+    ASSERT_EQ(f & 0x08, 0x08u, "driver: noise period bit kept in the frequency word");
+    uint8_t nr51Noise = (uint8_t)((nr51Before & ~0x88u) | (0x88 & nz->pan));
+    EXPECT_LOG(&log, "driver: noise start sequence",
+               PSG_REG_NR41, 0x00,
+               PSG_REG_NR43, 0x08,
+               PSG_REG_NR43, f & 0xFF,
+               PSG_REG_NR44, 0x00,
+               PSG_REG_NR51, nr51Noise,
+               PSG_REG_NR42, 0x08 | (nz->envelopeVolume << 4),
+               PSG_REG_NR44, 0x80);
+    ASSERT(engine.psg[0].playingCh4 && engine.psg[0].ch4.power, "driver: PSG noise in 7-bit mode");
+    ASSERT_EQ(engine.psg[0].ch4.ratio, (int)(f & 7), "driver: NR43 ratio from gNoiseTable");
+
+    /* Release 2: MO_VOL with NR42 = release | dec at the software volume, then
+     * the software envelope counts down and CgbOscOff ends it. */
+    m4a_engine_note_off(&engine, 1, 60);
+    log.n = 0;
+    advance_frames(&engine, 1, outL, outR);
+    EXPECT_LOG(&log, "driver: release start writes NR51, NR42 = release | dec, NR44 trigger",
+               PSG_REG_NR51, nr51Noise,
+               PSG_REG_NR42, 0x02 | (nz->envelopeVolume << 4),
+               PSG_REG_NR44, 0x80);
+    int frames = 0;
+    while ((nz->status & CHN_ON) && frames < 200) {
+        advance_frames(&engine, 1, outL, outR);
+        frames++;
+    }
+    ASSERT(!(nz->status & CHN_ON), "driver: release completes");
+    ASSERT(log.n >= 2 && log.reg[log.n - 2] == PSG_REG_NR42 && log.val[log.n - 2] == 0x08
+           && log.reg[log.n - 1] == PSG_REG_NR44 && log.val[log.n - 1] == 0x80,
+           "driver: the release ends with CgbOscOff(4)");
+
+    m4a_engine_destroy(&engine);
+}
+
+/* Square-1 frequency sweep through the whole stack: a sweep voice's
+ * frequency glides in the PSG and the channel keeps sounding (the sq1_sweep
+ * micro-test used to render silence). */
+static void test_sweep(void)
+{
+    printf("Testing square-1 frequency sweep (driver + PSG)...\n");
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_SQUARE_1;
+    voices[0].key = 60;
+    voices[0].wavePointer = (uint32_t *)(uintptr_t)2;
+    voices[0].sustain = 15;
+    voices[0].panSweep = 0x3A;   /* time 3, down, shift 2 (the micro-test voice) */
+    voices[1] = voices[0];
+    voices[1].panSweep = 0x11;   /* time 1, up, shift 1 */
+    voices[2] = voices[0];
+    voices[2].panSweep = 0xC0;   /* a pan, not a sweep */
+
+    M4AEngine engine;
+    float outL[1024], outR[1024];
     engine_init_booted(&engine, 44100.0f);
     m4a_engine_set_voicegroup(&engine, voices);
-    M4ACGBChannel *sq = &engine.cgbChannels[0];  /* SQUARE_1 -> cgb ch 0 */
+    M4APsg *p = &engine.psg[0];
+    M4ACGBChannel *sq = &engine.cgbChannels[0];
 
-    /* --- Downward sweep: f' = f - (f >> 3) every 1/128 s --- */
     m4a_engine_program_change(&engine, 0, 0);
     m4a_engine_note_on(&engine, 0, 60, 100);
-    ASSERT_EQ(sq->sweep, 0x1B, "sweep: NR10 byte captured at note-on");
-    ASSERT(sq->sweepEnabled, "sweep: unit armed at note-on");
-    ASSERT(!sq->sweepMuted, "sweep: downward sweep never mutes");
-    uint32_t f0 = sq->frequency;
-    ASSERT_EQ(sq->sweepShadowFreq, f0, "sweep: shadow loaded from frequency register");
+    advance_frames(&engine, 1, outL, outR);
+    ASSERT_EQ(sq->sweep, 0x3A, "sweep: NR10 byte captured at note-on");
+    ASSERT_EQ(p->ch1.sweep.time, 3, "sweep: PSG sweep time");
+    ASSERT(p->ch1.sweep.direction, "sweep: PSG sweep down");
+    ASSERT_EQ(p->ch1.sweep.shift, 2, "sweep: PSG sweep shift");
+    ASSERT(p->playingCh1, "sweep: channel sounding");
+    int f0 = p->ch1.frequency;
+    ASSERT_EQ(f0, (int)sq->frequency, "sweep: PSG frequency from the driver");
+    /* 3 sweep clocks at 128 Hz = 15.6..23.4 ms after the trigger: exactly
+     * one step has happened two frames (33 ms) later. */
+    advance_frames(&engine, 2, outL, outR);
+    ASSERT_EQ(p->ch1.frequency, f0 - (f0 >> 2), "sweep: first step f - (f >> 2)");
+    for (int i = 0; i < 120; i++)
+        advance_frames(&engine, 1, outL, outR);
+    ASSERT(p->ch1.frequency < 16, "sweep: downward sweep decays toward register 0");
+    ASSERT(p->playingCh1, "sweep: downward sweep stays audible");
+    ASSERT(sq->status & CHN_ON, "sweep: software envelope unaffected");
+    float energy = 0.0f;
+    m4a_engine_process(&engine, outL, outR, 1024);
+    for (int i = 0; i < 1024; i++) energy += fabsf(outL[i]);
+    ASSERT(energy > 1.0f, "sweep: still producing sound (the sq1_sweep silence bug)");
 
-    /* The 128 Hz sweep clock first fires after 44100/128 = ~344.5 samples. */
-    m4a_engine_process(&engine, outL, outR, 300);
-    ASSERT_EQ(sq->frequency, f0, "sweep: no change before the first 128 Hz clock");
-    m4a_engine_process(&engine, outL, outR, 100);
-    uint32_t f1 = f0 - (f0 >> 3);
-    ASSERT_EQ(sq->frequency, f1, "sweep: first step lowers frequency by f>>3");
-    m4a_engine_process(&engine, outL, outR, 345);
-    ASSERT_EQ(sq->frequency, f1 - (f1 >> 3), "sweep: second step compounds");
-
-    /* A long downward sweep decays toward register 0 and keeps sounding. */
-    for (int i = 0; i < 44; i++)
-        m4a_engine_process(&engine, outL, outR, 1000);
-    ASSERT(sq->frequency < 16, "sweep: downward sweep decays toward register 0");
-    ASSERT(!sq->sweepMuted, "sweep: downward sweep stays audible");
-    ASSERT(sq->status & CHN_ON, "sweep: software envelope unaffected by sweeping");
-
-    /* --- Upward sweep: overflow past 2047 silences the channel --- */
+    /* Upward overflow silences the channel in the PSG. */
     m4a_engine_all_sound_off(&engine);
     m4a_engine_program_change(&engine, 0, 1);
-    m4a_engine_note_on(&engine, 0, 36, 100);  /* low key: passes the initial check */
-    ASSERT(!sq->sweepMuted, "sweep: low-key upward sweep passes initial overflow check");
-    uint32_t fu0 = sq->frequency;
-    for (int i = 0; i < 44 && !sq->sweepMuted; i++)
-        m4a_engine_process(&engine, outL, outR, 1000);
-    ASSERT(sq->sweepMuted, "sweep: upward overflow silences the channel");
-    ASSERT(sq->frequency > fu0, "sweep: frequency rose before the overflow");
-    ASSERT(sq->frequency < 2048, "sweep: register never exceeds 11 bits");
+    m4a_engine_note_on(&engine, 0, 36, 100);
+    advance_frames(&engine, 1, outL, outR);
+    ASSERT(p->playingCh1, "sweep: low-key upward sweep passes the initial check");
+    int fu0 = p->ch1.frequency;
+    for (int i = 0; i < 120 && p->playingCh1; i++)
+        advance_frames(&engine, 1, outL, outR);
+    ASSERT(!p->playingCh1, "sweep: upward overflow silences the channel");
+    ASSERT(p->ch1.frequency > fu0 && p->ch1.frequency < 2048, "sweep: frequency rose, stayed 11-bit");
     ASSERT(sq->status & CHN_ON, "sweep: software envelope keeps running while muted");
-    /* The output resampler's high-pass takes a few thousand samples to
-     * settle after a level step; then the muted channel must be silent. */
-    for (int i = 0; i < 8; i++)
-        m4a_engine_process(&engine, outL, outR, 1024);
-    float energy = 0.0f;
-    for (int i = 0; i < 1024; i++)
-        energy += fabsf(outL[i]) + fabsf(outR[i]);
-    ASSERT(energy == 0.0f, "sweep: overflowed channel renders silence");
 
-    /* --- pan_sweep with the pan bit (or zero time bits) is not a sweep --- */
+    /* pan_sweep with the pan bit is not a sweep. */
     m4a_engine_all_sound_off(&engine);
     m4a_engine_program_change(&engine, 0, 2);
     m4a_engine_note_on(&engine, 0, 60, 100);
+    advance_frames(&engine, 1, outL, outR);
     ASSERT_EQ(sq->sweep, 0x08, "sweep: pan-bearing pan_sweep maps to inert NR10 value 8");
-    ASSERT(!sq->sweepEnabled, "sweep: inert value disables the unit");
-    uint32_t fi = sq->frequency;
-    m4a_engine_process(&engine, outL, outR, 1000);
-    ASSERT_EQ(sq->frequency, fi, "sweep: no sweeping on a pan-bearing voice");
+    ASSERT(!p->ch1.sweep.enable, "sweep: inert value disables the unit");
+    int fi = p->ch1.frequency;
+    advance_frames(&engine, 20, outL, outR);
+    ASSERT_EQ(p->ch1.frequency, fi, "sweep: no sweeping on a pan-bearing voice");
 
     m4a_engine_destroy(&engine);
 }
@@ -1556,328 +2225,6 @@ static void test_golden_sun_synth_waveforms(void)
         ASSERT(minV < -30 && minV >= -56, "gs saw: negative range");
     }
 }
-
-/* The audible CGB volume is the hardware envelope unit (NRx2 low bits +
- * trigger), reloaded by CgbSound's MO_VOL writes and stepping on its own
- * free-running 64 Hz clock -- not the ~60 Hz software envelope, which during
- * decay/release is silent bookkeeping.  A percussive noise voice (attack 0,
- * decay 1, sustain 0) at envelope goal 2 must drop to level 1 at the first
- * 64 Hz clock (~15.6 ms) and be silent by ~31 ms; the software envelope alone
- * holds the goal for two engine frames and would still be sounding at 40 ms. */
-static void test_cgb_hw_envelope(void)
-{
-    printf("Testing CGB hardware envelope...\n");
-
-    M4AEngine engine;
-    engine_init_booted(&engine, 48000.0f);
-
-    ToneData voices[128];
-    memset(voices, 0, sizeof(voices));
-    voices[0].type = VOICE_NOISE;
-    voices[0].key = 60;
-    voices[0].attack = 0;
-    voices[0].decay = 1;
-    voices[0].sustain = 0;
-    voices[0].release = 1;
-    /* wavePointer NULL: NR43 period bit 0 = 15-bit LFSR */
-
-    m4a_engine_set_voicegroup(&engine, voices);
-    m4a_engine_program_change(&engine, 0, 0);
-    m4a_engine_cc(&engine, 0, 7, 127);
-
-    /* Velocity 20 at full track volume: left+right = 38 -> envelope goal 2 */
-    m4a_engine_note_on(&engine, 0, 80, 20);
-
-    /* Render 60 ms and record the peak level of three windows:
-     * W0 = 0-14 ms (goal level 2), W1 = 17-30 ms (level 1 after the first
-     * 64 Hz step), W2 = 35-45 ms (hardware envelope dead at 31.25 ms). */
-    float peakW0 = 0, peakW1 = 0, peakW2 = 0;
-    float outL[480], outR[480];
-    for (int block = 0; block < 6; block++) {
-        m4a_engine_process(&engine, outL, outR, 480);
-        for (int i = 0; i < 480; i++) {
-            int s = block * 480 + i;
-            float v = fabsf(outL[i]);
-            if (fabsf(outR[i]) > v) v = fabsf(outR[i]);
-            if (s < 672) {
-                if (v > peakW0) peakW0 = v;
-            } else if (s >= 816 && s < 1440) {
-                if (v > peakW1) peakW1 = v;
-            } else if (s >= 1680 && s < 2160) {
-                if (v > peakW2) peakW2 = v;
-            }
-        }
-    }
-
-    ASSERT(peakW0 > 0.01f, "hw env: goal level audible at note start");
-    ASSERT(peakW1 > 0.005f, "hw env: level 1 audible after first 64 Hz step");
-    ASSERT(peakW1 < peakW0 * 0.75f, "hw env: level dropped at ~15.6 ms");
-    /* Only the output resampler's decaying high-pass tail may remain. */
-    ASSERT(peakW2 < peakW0 * 0.05f, "hw env: silent once the unit reaches zero (~31 ms)");
-
-    m4a_engine_destroy(&engine);
-}
-
-/* The square channels' duty position is never reset by an NRx4 trigger (mGBA
- * GBAudioWriteNR14/NR24 leave the duty index and its timer alone; the counter
- * only advances with time, and keeps advancing while the channel is silent).
- * So retriggering a square -- back-to-back notes, or a note after a rest --
- * must continue the free-running waveform exactly where a single long note
- * would be, with no phase restart, and two squares that share a frequency
- * must keep their relative phase across one of them being retriggered. */
-static void test_cgb_square_phase_continuity(void)
-{
-    printf("Testing CGB square phase continuity across retriggers...\n");
-
-    ToneData voices[128];
-    memset(voices, 0, sizeof(voices));
-    for (int i = 0; i < 2; i++) {
-        voices[i].type = i == 0 ? VOICE_SQUARE_1 : VOICE_SQUARE_2;
-        voices[i].key = 60;
-        voices[i].attack = 0;
-        voices[i].decay = 0;
-        voices[i].sustain = 15;
-        voices[i].release = 0;   /* note-off silences the channel at once */
-        voices[i].wavePointer = (uint32_t *)(uintptr_t)2;  /* 50% duty */
-    }
-
-    enum { BLOCK = 512, BLOCKS = 6, REST = 300 };
-    static float refL[BLOCK * BLOCKS], refR[BLOCK * BLOCKS];
-    static float outL[BLOCK], outR[BLOCK];
-
-    /* Reference: one long square-1 note. */
-    M4AEngine ref;
-    engine_init_booted(&ref, 44100.0f);
-    m4a_engine_set_voicegroup(&ref, voices);
-    m4a_engine_program_change(&ref, 0, 0);
-    m4a_engine_note_on(&ref, 0, 69, 100);
-    for (int b = 0; b < BLOCKS; b++)
-        m4a_engine_process(&ref, refL + b * BLOCK, refR + b * BLOCK, BLOCK);
-
-    /* Same key retriggered back-to-back after one block, then again after a
-     * 300-sample rest.  The oscillator phase of every sounding stretch must
-     * equal the long note's phase at the same absolute position (a second
-     * reference engine runs in lockstep; the host-rate output itself is not
-     * compared sample for sample because the output resampler's high-pass
-     * carries history across the rest). */
-    M4AEngine refStep;
-    float stepL[BLOCK], stepR[BLOCK];
-    engine_init_booted(&refStep, 44100.0f);
-    m4a_engine_set_voicegroup(&refStep, voices);
-    m4a_engine_program_change(&refStep, 0, 0);
-    m4a_engine_note_on(&refStep, 0, 69, 100);
-    M4AEngine eng;
-    engine_init_booted(&eng, 44100.0f);
-    m4a_engine_set_voicegroup(&eng, voices);
-    m4a_engine_program_change(&eng, 0, 0);
-    m4a_engine_note_on(&eng, 0, 69, 100);
-    m4a_engine_process(&eng, outL, outR, BLOCK);
-    m4a_engine_process(&refStep, stepL, stepR, BLOCK);
-    ASSERT(memcmp(outL, stepL, sizeof(outL)) == 0, "sq phase: first note matches reference");
-
-    /* Back-to-back retrigger. */
-    m4a_engine_note_off(&eng, 0, 69);
-    m4a_engine_note_on(&eng, 0, 69, 100);
-    m4a_engine_process(&eng, outL, outR, BLOCK);
-    m4a_engine_process(&refStep, stepL, stepR, BLOCK);
-    ASSERT_EQ(eng.cgbChannels[0].phase, refStep.cgbChannels[0].phase,
-              "sq phase: back-to-back retrigger continues the waveform sample-exactly");
-    /* Guard against a vacuous pass: the reference stretch is not silence. */
-    float energy = 0;
-    for (int i = 0; i < BLOCK; i++) energy += fabsf(stepL[i]);
-    ASSERT(energy > 1.0f, "sq phase: reference note is audible");
-
-    /* Rest, then retrigger: the phase kept running through the silence.
-     * Note-off takes effect at the next engine tick (CgbSound runs once per
-     * VBlank), so render one block for it to land, then a REST of silence. */
-    m4a_engine_note_off(&eng, 0, 69);
-    m4a_engine_process(&eng, outL, outR, BLOCK);
-    m4a_engine_process(&refStep, stepL, stepR, BLOCK);
-    ASSERT(!(eng.cgbChannels[0].status & CHN_ON), "sq phase: note-off landed within a block");
-    m4a_engine_process(&eng, outL, outR, REST);
-    m4a_engine_process(&refStep, stepL, stepR, REST);
-    energy = 0;
-    for (int i = REST / 2; i < REST; i++) energy += fabsf(outL[i]) + fabsf(outR[i]);
-    /* Only the resampler's decaying high-pass tail may remain. */
-    ASSERT(energy < 0.02f * (REST / 2), "sq phase: silent during the rest");
-    m4a_engine_note_on(&eng, 0, 69, 100);
-    m4a_engine_process(&eng, outL, outR, BLOCK);
-    m4a_engine_process(&refStep, stepL, stepR, BLOCK);
-    ASSERT_EQ(eng.cgbChannels[0].phase, refStep.cgbChannels[0].phase,
-              "sq phase: retrigger after a rest resumes at the free-running phase");
-    m4a_engine_destroy(&refStep);
-
-    /* And a retrigger must not simply happen to land on phase 0: the
-     * reference itself is not periodic in BLOCK samples at this key. */
-    int mism = 0;
-    for (int i = 0; i < BLOCK; i++)
-        if (refL[i] != refL[BLOCK + i]) mism++;
-    ASSERT(mism > 0, "sq phase: reference waveform is not BLOCK-periodic (test is not vacuous)");
-
-    /* Two squares in unison: identical from engine reset, and still identical
-     * after square 2 alone is released, rests, and retriggers. */
-    M4AEngine duo;
-    engine_init_booted(&duo, 44100.0f);
-    m4a_engine_set_voicegroup(&duo, voices);
-    m4a_engine_program_change(&duo, 0, 0);
-    m4a_engine_program_change(&duo, 1, 1);
-    m4a_engine_note_on(&duo, 0, 69, 100);
-    m4a_engine_note_on(&duo, 1, 69, 100);
-    m4a_engine_process(&duo, outL, outR, BLOCK);
-    ASSERT_EQ(duo.cgbChannels[0].frequency, duo.cgbChannels[1].frequency, "sq phase: unison squares share a frequency");
-    ASSERT_EQ(duo.cgbChannels[0].phase, duo.cgbChannels[1].phase, "sq phase: unison squares are phase-locked");
-    m4a_engine_note_off(&duo, 1, 69);
-    m4a_engine_process(&duo, outL, outR, BLOCK);
-    m4a_engine_process(&duo, outL, outR, REST);
-    ASSERT(!(duo.cgbChannels[1].status & CHN_ON), "sq phase: square 2 went silent");
-    m4a_engine_note_on(&duo, 1, 69, 100);
-    m4a_engine_process(&duo, outL, outR, BLOCK);
-    ASSERT_EQ(duo.cgbChannels[0].phase, duo.cgbChannels[1].phase, "sq phase: unison holds across a rest and retrigger of one square");
-    ASSERT(duo.cgbChannels[1].status & CHN_ON, "sq phase: retriggered square 2 is sounding");
-
-    m4a_engine_destroy(&ref);
-    m4a_engine_destroy(&eng);
-    m4a_engine_destroy(&duo);
-}
-
-/* The wave channel's position also survives a retrigger: on the GBA the wave
- * RAM is a rotating shift register (mGBA rotates it a nibble per step and the
- * trigger's window reset is DMG-only), and CgbSound rewrites the RAM at note
- * start only when the voice's table differs from the loaded one.  So a
- * repeated note on the same wave voice keeps its position (the trigger only
- * re-arms the step timer, restarting the current step), while a note on a
- * voice with a different table starts from position 0 -- as recorded
- * in-game. */
-static void test_cgb_wave_phase_continuity(void)
-{
-    printf("Testing CGB wave position continuity across retriggers...\n");
-
-    static uint32_t tableA[4] = { 0x89ABCDEF, 0x01234567, 0xFEDCBA98, 0x76543210 };
-    static uint32_t tableB[4] = { 0x00112233, 0x44556677, 0x8899AABB, 0xCCDDEEFF };
-    ToneData voices[128];
-    memset(voices, 0, sizeof(voices));
-    for (int i = 0; i < 2; i++) {
-        voices[i].type = VOICE_PROGRAMMABLE_WAVE;
-        voices[i].key = 60;
-        voices[i].attack = 0;
-        voices[i].decay = 0;
-        voices[i].sustain = 15;
-        voices[i].release = 0;
-        voices[i].wavePointer = i == 0 ? tableA : tableB;
-    }
-
-    M4AEngine eng;
-    float outL[64], outR[64];
-    engine_init_booted(&eng, 44100.0f);
-    m4a_engine_set_voicegroup(&eng, voices);
-    M4ACGBChannel *ch = &eng.cgbChannels[2];
-
-    m4a_engine_program_change(&eng, 0, 0);
-    m4a_engine_note_on(&eng, 0, 60, 100);
-    ASSERT_EQ(ch->phase, 0u, "wave phase: first note on a fresh table starts at position 0");
-    ASSERT(ch->currentWavePointer == tableA, "wave phase: table A loaded");
-
-    /* Run into the note, stopping at a sample where the position is mid-step
-     * and not 0, so a reset to 0 and a kept position are distinguishable. */
-    for (int i = 0; i < 700; i++)
-        m4a_engine_process(&eng, outL, outR, 1);
-    while (((ch->phase >> 27) & 0x1F) == 0 || (ch->phase & 0x07FFFFFFu) == 0)
-        m4a_engine_process(&eng, outL, outR, 1);
-    uint32_t posBefore = (ch->phase >> 27) & 0x1F;
-
-    /* Same voice, back-to-back: position kept, current step restarted. */
-    m4a_engine_note_off(&eng, 0, 60);
-    m4a_engine_note_on(&eng, 0, 60, 100);
-    ASSERT_EQ((ch->phase >> 27) & 0x1F, posBefore, "wave phase: same-table retrigger keeps the wave position");
-    ASSERT_EQ(ch->phase & 0x07FFFFFFu, 0u, "wave phase: retrigger re-arms the step timer (step restarts)");
-    ASSERT(ch->currentWavePointer == tableA, "wave phase: same table not re-uploaded");
-
-    /* Position keeps advancing through the retriggered note. */
-    for (int i = 0; i < 300; i++)
-        m4a_engine_process(&eng, outL, outR, 1);
-    ASSERT(((ch->phase >> 27) & 0x1F) != posBefore, "wave phase: wave keeps running after the retrigger");
-
-    /* A different table is uploaded fresh: playback restarts at position 0. */
-    m4a_engine_program_change(&eng, 0, 1);
-    m4a_engine_note_off(&eng, 0, 60);
-    m4a_engine_note_on(&eng, 0, 60, 100);
-    ASSERT_EQ(ch->phase, 0u, "wave phase: new table starts at position 0");
-    ASSERT(ch->currentWavePointer == tableB, "wave phase: table B loaded");
-
-    /* And that table's position now persists across its own retriggers. */
-    for (int i = 0; i < 500; i++)
-        m4a_engine_process(&eng, outL, outR, 1);
-    while (((ch->phase >> 27) & 0x1F) == 0)
-        m4a_engine_process(&eng, outL, outR, 1);
-    posBefore = (ch->phase >> 27) & 0x1F;
-    m4a_engine_note_off(&eng, 0, 60);
-    m4a_engine_note_on(&eng, 0, 60, 100);
-    ASSERT_EQ((ch->phase >> 27) & 0x1F, posBefore, "wave phase: table B retrigger keeps position");
-
-    m4a_engine_destroy(&eng);
-}
-
-/* The noise LFSR clocks at up to 524288 Hz -- ~11 steps per 48 kHz output
- * sample at the highest keys -- so each output sample must be the
- * time-weighted average of every LFSR level inside its window (mGBA's
- * _coalesceNoiseChannel).  Point-sampling the LFSR instead aliases the fast
- * clock into a rail-to-rail two-level square: every sample sits at +/-peak.
- * A sustained key-80 noise note (NR43 0x00, 524288 Hz) must therefore
- * produce mostly INTERMEDIATE values, well inside the rails. */
-static void test_cgb_noise_band_limiting(void)
-{
-    printf("Testing CGB noise band-limiting...\n");
-
-    M4AEngine engine;
-    m4a_engine_init(&engine, 48000.0f);
-
-    ToneData voices[128];
-    memset(voices, 0, sizeof(voices));
-    voices[0].type = VOICE_NOISE;
-    voices[0].key = 60;
-    voices[0].attack = 0;
-    voices[0].decay = 0;
-    voices[0].sustain = 15;  /* hold at full level: isolate the LFSR shape */
-    voices[0].release = 0;
-    /* wavePointer NULL: NR43 period bit 0 = 15-bit LFSR */
-
-    m4a_engine_set_voicegroup(&engine, voices);
-    m4a_engine_program_change(&engine, 0, 0);
-    m4a_engine_cc(&engine, 0, 7, 127);
-
-    /* Key 80 = gNoiseTable[59] = 0x00: the fastest LFSR clock (524288 Hz). */
-    m4a_engine_note_on(&engine, 0, 80, 127);
-
-    float outL[480], outR[480];
-    /* Skip the first block (note-start ramp), then gather statistics. */
-    m4a_engine_process(&engine, outL, outR, 480);
-    float peak = 0;
-    int total = 0, interior = 0, positive = 0, negative = 0;
-    float samples[1920];
-    for (int block = 0; block < 4; block++) {
-        m4a_engine_process(&engine, outL, outR, 480);
-        for (int i = 0; i < 480; i++)
-            samples[total++] = outL[i];
-    }
-    for (int i = 0; i < total; i++)
-        if (fabsf(samples[i]) > peak) peak = fabsf(samples[i]);
-    for (int i = 0; i < total; i++) {
-        if (fabsf(samples[i]) < peak * 0.7f) interior++;
-        if (samples[i] > 0) positive++;
-        if (samples[i] < 0) negative++;
-    }
-
-    ASSERT(peak > 0.001f, "noise blimit: note is audible");
-    ASSERT(positive > total / 10 && negative > total / 10,
-           "noise blimit: both polarities present");
-    /* Averaging ~11 random LFSR levels leaves nearly every sample far from
-     * the rails; the aliasing point-sampler leaves interior == 0. */
-    ASSERT(interior > total / 2,
-           "noise blimit: fast-clock noise is mostly intermediate values");
-
-    m4a_engine_destroy(&engine);
-}
-
 
 /* Reverse (TONEDATA_TYPE_REV / voice_directsound_alt) samples play from the
  * last sample to the first, interpolating toward the earlier sample, ignore
@@ -3044,15 +3391,18 @@ int main(void)
     test_portamento_prev_key_tracking();
     test_pwm();
     test_cgb_fixed_freq();
+    test_psg_square();
+    test_psg_sweep();
+    test_psg_wave();
+    test_psg_noise();
+    test_cgb_driver_boot();
+    test_cgb_driver_square();
+    test_cgb_driver_wave_noise();
     test_sweep();
     test_lfo_tempo_scaling();
     test_lfos_keeps_phase();
     test_golden_sun_synth();
     test_golden_sun_synth_waveforms();
-    test_cgb_hw_envelope();
-    test_cgb_square_phase_continuity();
-    test_cgb_wave_phase_continuity();
-    test_cgb_noise_band_limiting();
     test_pcm_reverse();
     test_pcm_reverse_legato_inherit();
     test_pcm_dpcm();

@@ -2,10 +2,6 @@
 #include "m4a_tables.h"
 #include <string.h>
 
-/* Number of samples over which the wave channel (type 3) fades to zero on
- * note-off, preventing a DC-offset pop. ~5.8 ms at 44100 Hz. */
-#define DECLICK_SAMPLES 256
-
 /*
  * PCM Channel Implementation
  * Matches the SoundMainRAM mixer in m4a_1.s
@@ -419,234 +415,103 @@ void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
 }
 
 /*
- * CGB Channel Implementation
- * Matches CgbSound() in m4a.c
+ * CGB Channel Implementation: CgbSound() from m4a.c as a register driver.
+ *
+ * The four PSG channels are synthesized by the mgba-derived model in
+ * m4a_psg.c; this file is the driver side, the per-frame CgbSound pass that
+ * runs the software envelope and writes the sound registers.  It is a
+ * transliteration of CgbSound/CgbOscOff/CgbModVol (pokeemerald src/m4a.c)
+ * one channel at a time, keeping the labels of the original so the two can be
+ * read side by side, with the register accesses going to the PSG instance the
+ * channel belongs to (the real pool or the polyphony-debug shadow pool).
+ *
+ * Every write is stamped at the scheduler's current cycle, which the engine
+ * sets to the CgbSound entry point of the VBlank frame, and is preceded by
+ * the DAC catch-up mgba performs in GBAAudioSample (m4a_gba_catch_up), so a
+ * level change lands on the same 65536 Hz slot it does in mgba.
  */
 
-/*
- * Square-1 frequency sweep (NR10).
- *
- * The m4a engine programs the sweep once per note: ply_note stores the
- * voice's pan_sweep byte in the channel (forced to the inert value 8 when the
- * byte holds a pan or its time bits are zero) and CgbSound writes it to NR10
- * at note start.  From then on the Game Boy hardware sweeps on its own, so
- * this emulation follows mGBA's sweep unit (_writeSweep / _resetSweep /
- * _updateSweep in src/gb/audio.c) rather than anything in m4a.c:
- *
- *  - a 128 Hz clock (frame-sequencer steps 2 and 6) decrements sweepStep;
- *    when it hits 0 the unit computes f' = f +/- (f >> shift) from its
- *    internal shadow register and writes the result to both the shadow and
- *    the frequency register (downward only when f' >= 0, upward only when
- *    shift != 0 and f' < 2048; an upward result >= 2048 disables the channel)
- *  - a trigger (NRx4 bit 7) re-enables the channel, reloads the shadow from
- *    the frequency register, resets the timer, and -- when shift != 0 --
- *    immediately runs one overflow check that never writes the frequency.
- *
- * Because CgbSound sets the trigger bit on every MO_VOL register update, the
- * unit is retriggered at every envelope phase transition and track volume
- * change; MO_PIT frequency writes do NOT touch the shadow, so vibrato/bend on
- * a sweeping note is overridden at the unit's next calculation.
- * Likewise the sweep's own frequency writes are deliberately NOT quantized
- * for fixedFreq voices -- see m4a_cgb_fix_freq() in m4a_engine.c.
- */
+#define MO_VOL 0x01
+#define MO_PIT 0x02
+#define MO_DUTY 0x04   /* engine-side: pulse-width modulation changed dutyCycle */
 
-static inline int cgb_sweep_time(const M4ACGBChannel *ch)
+typedef struct {
+    M4APsg *psg;
+    M4AGbaAudio *gba;
+} CgbIo;
+
+static void cgb_write(CgbIo *io, uint32_t reg, uint8_t value)
 {
-    int time = (ch->sweep >> 4) & 7;
-    return time ? time : 8;
+    m4a_gba_catch_up(io->gba, io->gba->now);
+    m4a_psg_write8(io->psg, reg, value, io->gba->now);
 }
 
-/* One sweep calculation.  `initial` is the trigger-time overflow check, which
- * computes but never writes.  Returns false when an upward sweep overflows
- * past 2047 (the hardware then clears the channel's NR52 enable bit). */
-static bool cgb_sweep_calc(M4ACGBChannel *ch, bool initial)
+static uint8_t cgb_read(CgbIo *io, uint32_t reg)
 {
-    int shift = ch->sweep & 7;
+    return m4a_psg_read8(io->psg, reg);
+}
 
-    if (initial || cgb_sweep_time(ch) != 8) {
-        int32_t freq = ch->sweepShadowFreq;
-        if (ch->sweep & 0x08) {
-            freq -= freq >> shift;
-            if (!initial && freq >= 0) {
-                ch->sweepShadowFreq = (uint16_t)freq;
-                ch->frequency = (uint32_t)freq;
-            }
-        } else {
-            freq += freq >> shift;
-            if (freq >= 2048)
-                return false;
-            if (!initial && shift) {
-                ch->sweepShadowFreq = (uint16_t)freq;
-                ch->frequency = (uint32_t)freq;
-                /* Writing a new frequency immediately re-runs the overflow
-                 * check against the next step's value. */
-                if (!cgb_sweep_calc(ch, true))
-                    return false;
-            }
-        }
+/* REG_WAVE_RAMn = word: a 32-bit store, which mgba routes straight to the
+ * wave RAM (GBAIOWrite32 -> GBAAudioWriteWaveRAM) without a DAC catch-up. */
+static void cgb_write_wave_ram(CgbIo *io, int index, uint32_t value)
+{
+    m4a_psg_write_wave_ram(io->psg, index, value, io->gba->now);
+}
+
+/* The register set of hardware channel `chn` (1..4), as CgbSound picks it. */
+static void cgb_regs(int chn, uint32_t *nrx0, uint32_t *nrx1, uint32_t *nrx2,
+                     uint32_t *nrx3, uint32_t *nrx4)
+{
+    switch (chn) {
+    case 1:
+        *nrx0 = PSG_REG_NR10; *nrx1 = PSG_REG_NR11; *nrx2 = PSG_REG_NR12;
+        *nrx3 = PSG_REG_NR13; *nrx4 = PSG_REG_NR14;
+        break;
+    case 2:
+        *nrx0 = PSG_REG_NR10 + 1; *nrx1 = PSG_REG_NR21; *nrx2 = PSG_REG_NR22;
+        *nrx3 = PSG_REG_NR23; *nrx4 = PSG_REG_NR24;
+        break;
+    case 3:
+        *nrx0 = PSG_REG_NR30; *nrx1 = PSG_REG_NR31; *nrx2 = PSG_REG_NR32;
+        *nrx3 = PSG_REG_NR33; *nrx4 = PSG_REG_NR34;
+        break;
+    default:
+        *nrx0 = PSG_REG_NR30 + 1; *nrx1 = PSG_REG_NR41; *nrx2 = PSG_REG_NR42;
+        *nrx3 = PSG_REG_NR43; *nrx4 = PSG_REG_NR44;
+        break;
     }
-
-    ch->sweepStep = (uint8_t)cgb_sweep_time(ch);
-    return true;
 }
 
-/* NRx4 trigger-bit write as seen by the sweep unit. */
-static void cgb_sweep_retrigger(M4ACGBChannel *ch)
+/* CgbOscOff */
+void m4a_cgb_osc_off(M4ACGBChannel *ch, M4APsg *psg, M4AGbaAudio *gba)
 {
-    int time = cgb_sweep_time(ch);
-    int shift = ch->sweep & 7;
-
-    ch->sweepMuted = false;
-    ch->sweepShadowFreq = (uint16_t)(ch->frequency & 0x7FF);
-    ch->sweepStep = (uint8_t)time;
-    ch->sweepEnabled = (time != 8) || shift != 0;
-    if (shift && !cgb_sweep_calc(ch, true))
-        ch->sweepMuted = true;
+    CgbIo io = { psg, gba };
+    switch (ch->type) {
+    case 1:
+        cgb_write(&io, PSG_REG_NR12, 8);
+        cgb_write(&io, PSG_REG_NR14, 0x80);
+        break;
+    case 2:
+        cgb_write(&io, PSG_REG_NR22, 8);
+        cgb_write(&io, PSG_REG_NR24, 0x80);
+        break;
+    case 3:
+        cgb_write(&io, PSG_REG_NR30, 0);
+        break;
+    default:
+        cgb_write(&io, PSG_REG_NR42, 8);
+        cgb_write(&io, PSG_REG_NR44, 0x80);
+        break;
+    }
 }
 
-/* One 128 Hz frame-sequencer sweep clock. */
-static void cgb_sweep_clock(M4ACGBChannel *ch)
-{
-    if (!ch->sweepEnabled || ch->sweepMuted)
-        return;
-    if (--ch->sweepStep != 0)
-        return;
-    if (!cgb_sweep_calc(ch, false))
-        ch->sweepMuted = true;
-}
-
-/* CgbSound's MO_VOL register write as seen by the hardware envelope unit:
- * NRx2 = (envelopeVolume << 4) | hwEnvStepDir plus the NRx4 trigger bit.
- * The trigger reloads the unit's volume and step counter (mGBA
- * _resetEnvelope) and resets the noise LFSR.  The 64 Hz clock accumulator is
- * deliberately NOT reset: the frame sequencer free-runs on hardware, which is
- * what gives identical percussion hits their audible level variation. */
-static void cgb_hw_env_write(M4ACGBChannel *ch)
-{
-    uint8_t stepTime = ch->hwEnvStepDir & 0x07;
-    bool dirInc = (ch->hwEnvStepDir & 0x08) != 0;
-
-    ch->hwEnvVolume = ch->envelopeVolume & 0x0F;
-    ch->hwEnvNextStep = stepTime;
-    if (stepTime == 0)
-        ch->hwEnvDead = 1;
-    else if (!dirInc && ch->hwEnvVolume == 0)
-        ch->hwEnvDead = 1;
-    else if (dirInc && ch->hwEnvVolume == 15)
-        ch->hwEnvDead = 1;
-    else
-        ch->hwEnvDead = 0;
-
-    if (ch->type == 4)
-        ch->lfsr = (ch->frequency & 0x08) ? 0x7F : 0x7FFF;
-}
-
+/* ply_note's share of a CGB note start: the channel is flagged to start at
+ * the next CgbSound pass, which performs the register setup (the caller has
+ * already stored the voice parameters, frequency and wave table). */
 void m4a_cgb_channel_start(M4ACGBChannel *ch)
 {
-    ch->status = CHN_ENV_ATTACK;
-    ch->modify = 0x03; /* pitch + vol */
-
-    /* Waveform position at note start, per channel type, modeled on what the
-     * NRx4 trigger CgbSound writes here actually does in mGBA's gb/audio.c
-     * (GB_AUDIO_GBA style) -- verified against in-game recordings:
-     *
-     * - Squares: NOT touched.  The 8-step duty counter only ever advances
-     *   with time (GBAudioWriteNR14/NR24 leave ch->index and its timer
-     *   alone), so a retrigger -- a new note, or the trigger CgbSound writes
-     *   on every volume change -- continues the running waveform.  Restarting
-     *   from phase 0 here put a hard edge at every note boundary (an audible
-     *   click on back-to-back notes the console plays seamlessly) and
-     *   re-aligned the two squares' relative phase at every note.  Squares
-     *   keep free-running even while off, see cgb_square_advance().
-     *
-     * - Wave: on the GBA the wave RAM is a rotating shift register (mGBA
-     *   rotates wavedata32 a nibble per step; the trigger's window reset is
-     *   DMG-only), so the position persists across triggers too.  It restarts
-     *   only when CgbSound rewrites the wave RAM, which it does at note start
-     *   only if the voice's table differs from the one already loaded
-     *   (wavePointer != currentPointer): fresh RAM plays from position 0.
-     *   Otherwise the trigger merely re-arms the step timer
-     *   (nextUpdate = now + one full step), so the current step restarts from
-     *   its beginning: a slip of up to one step, the faint tick audible at
-     *   each repeated wave note in-game.
-     *
-     * - Noise: the LFSR and its timer are reset (below). */
-    if (ch->type == 3) {
-        if (ch->wavePointer != ch->currentWavePointer) {
-            ch->phase = 0;
-            ch->currentWavePointer = ch->wavePointer;
-        } else {
-            ch->phase &= 0xF8000000u; /* keep the step (top 5 bits), restart it */
-        }
-    } else if (ch->type == 4) {
-        ch->phase = 0;
-    }
-
-    /* Invalidate the cached phase increment / wave DC sum so the first
-     * rendered sample of this note recomputes them from the current
-     * frequency and wave table. */
-    ch->phaseIncFreq = 0xFFFFFFFFu;
-    ch->waveSumPointer = NULL;
-    ch->envelopeCounter = ch->attack;
-    if (ch->attack == 0) {
-        /* Skip attack if instantaneous */
-        ch->envelopeVolume = ch->envelopeGoal;
-        ch->status = CHN_ENV_DECAY;
-        ch->envelopeCounter = ch->decay;
-        ch->hwEnvStepDir = ch->decay & 0x07;
-        if (ch->decay == 0) {
-            /* Skip decay too */
-            if (ch->sustain == 0) {
-                ch->status = CHN_ENV_RELEASE;
-                ch->hwEnvStepDir = ch->release & 0x07;
-            } else {
-                ch->envelopeVolume = ch->sustainGoal;
-                ch->status = CHN_ENV_SUSTAIN;
-                ch->hwEnvStepDir = 0x08; /* step 0: frozen at sustain */
-            }
-        }
-    } else {
-        ch->envelopeVolume = 0;
-        ch->hwEnvStepDir = (ch->attack & 0x07) | 0x08;
-    }
-
-    /* Cancel any in-progress declick so the new note starts cleanly. */
-    ch->declickSample = 0;
-    ch->declickSamplesRemaining = 0;
-
-    /* Square 1: note start writes NR10 and sets the NRx4 trigger bit,
-     * (re)arming the hardware frequency sweep unit.  The caller has already
-     * set ch->sweep and ch->frequency. */
-    if (ch->type == 1) {
-        ch->sweepClockAccum = 0.0f;
-        cgb_sweep_retrigger(ch);
-    }
-
-    /* Initialize LFSR for noise channel.
-     * Bit 3 of frequency is the period/mode bit (NR43 bit 3):
-     * 0 = 15-bit LFSR, 1 = 7-bit short-period LFSR. */
-    if (ch->type == 4) {
-        if (ch->frequency & 0x08)
-            ch->lfsr = 0x7F;    /* 7-bit */
-        else
-            ch->lfsr = 0x7FFF;  /* 15-bit */
-    }
-
-    /* Note start is CgbSound's first MO_VOL write: arm the hardware envelope
-     * from the initial software value (goal, or 0 for a real attack).  m4a
-     * performs the start-frame register writes and clears `modify` in the same
-     * CgbSound pass; this start path runs outside the tick, so clear it here
-     * or the next tick would re-apply the write and re-arm the step timer. */
-    if (ch->type != 3)
-        cgb_hw_env_write(ch);
-    ch->modify = 0;
-}
-
-void m4a_cgb_channel_stop(M4ACGBChannel *ch)
-{
-    if (ch->type == 3)
-        ch->declickSamplesRemaining = DECLICK_SAMPLES;
-    ch->status = 0;
+    ch->status = CHN_START;
+    ch->hwResync = false;
 }
 
 /*
@@ -695,425 +560,250 @@ void m4a_cgb_mod_vol(M4ACGBChannel *ch)
     ch->pan &= ch->panMask;
 }
 
+/* NR32 value for a software envelope volume.  gCgb3Vol has 16 entries, but
+ * the center-pan envelopeGoal is unclamped (up to 31) and the GBA reads past
+ * the table into gClockTable, whose first entries are 0x00..0x18: values
+ * below 0x20, whose NR32 volume field (bits 5-7) is 0 = mute.  So an
+ * over-range volume is silence on the GBA, and here. */
+static uint8_t cgb3_vol(uint8_t envelopeVolume)
+{
+    return envelopeVolume < 16 ? gCgb3Vol[envelopeVolume] : 0;
+}
+
+/* The start-frame register setup CgbSound performs for a channel: sweep,
+ * duty/length, the wave RAM upload, the noise period; sets n4 and the
+ * initial envelopeStepTimeAndDir. */
+static void cgb_start_registers(M4ACGBChannel *ch, CgbIo *io, int chn,
+                                uint32_t nrx0, uint32_t nrx1, uint32_t nrx3,
+                                int *envelopeStepTimeAndDir)
+{
+    switch (chn) {
+    case 1:
+        cgb_write(io, nrx0, ch->sweep);
+        /* fallthrough */
+    case 2:
+        cgb_write(io, nrx1, (uint8_t)(((uint32_t)ch->dutyCycle << 6) + ch->length));
+        goto init_env_step_time_dir;
+    case 3:
+        if (ch->wavePointer != ch->currentWavePointer) {
+            cgb_write(io, nrx0, 0x40);
+            cgb_write_wave_ram(io, 0, ch->wavePointer[0]);
+            cgb_write_wave_ram(io, 1, ch->wavePointer[1]);
+            cgb_write_wave_ram(io, 2, ch->wavePointer[2]);
+            cgb_write_wave_ram(io, 3, ch->wavePointer[3]);
+            ch->currentWavePointer = ch->wavePointer;
+        }
+        cgb_write(io, nrx0, 0);
+        cgb_write(io, nrx1, ch->length);
+        if (ch->length)
+            ch->n4 = 0xC0;
+        else
+            ch->n4 = 0x80;
+        break;
+    default:
+        cgb_write(io, nrx1, ch->length);
+        /* (u32)wavePointer << 3: the noise voice's period bit, which the
+         * engine keeps in bit 3 of ch->frequency. */
+        cgb_write(io, nrx3, (uint8_t)(ch->frequency & 0x08));
+    init_env_step_time_dir:
+        *envelopeStepTimeAndDir = ch->attack + 0x08; /* CGB_NRx2_ENV_DIR_INC */
+        if (ch->length)
+            ch->n4 = 0x40;
+        else
+            ch->n4 = 0x00;
+        break;
+    }
+}
+
 /*
- * CGB envelope tick - matches CgbSound() envelope logic in m4a.c
- * Called at ~60Hz, with double-step every 15 frames (when c15==0)
+ * CgbSound() for one channel.  `c15` is SoundInfo.c15 after this frame's
+ * decrement (the engine does that once per frame for all channels).
  */
-void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15)
+void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAudio *gba)
 {
     if (!(ch->status & CHN_ON))
         return;
 
-    /* Declared before the goto targets below: the start and release-start
-     * paths jump into the envelope block, and must see initialized values so
-     * they still honor the every-15th-frame double step (CgbSound initializes
-     * prevC15 before any of the equivalent branches). */
-    int doubleStep = (c15 == 0) ? 1 : 0;
-    int steps = 0;
+    CgbIo io = { psg, gba };
+    int chn = ch->type;
+    uint32_t nrx0, nrx1, nrx2, nrx3, nrx4;
+    cgb_regs(chn, &nrx0, &nrx1, &nrx2, &nrx3, &nrx4);
 
-    if (ch->status & CHN_START) {
-        if (ch->status & CHN_STOP) {
-            if (ch->type == 3)
-                ch->declickSamplesRemaining = DECLICK_SAMPLES;
-            ch->status = 0;
-            return;
-        }
-        ch->status = CHN_ENV_ATTACK;
-        ch->modify = 0x03;
-        m4a_cgb_mod_vol(ch);
-        ch->envelopeCounter = ch->attack;
-        if (ch->attack != 0) {
-            ch->envelopeVolume = 0;
-            ch->hwEnvStepDir = (ch->attack & 0x07) | 0x08;
-        } else {
-            /* skip attack */
-            ch->envelopeVolume = ch->envelopeGoal;
-            ch->status = CHN_ENV_DECAY;
-            ch->envelopeCounter = ch->decay;
-            ch->hwEnvStepDir = ch->decay & 0x07;
-            if (ch->decay == 0) {
-                if (ch->sustain == 0) {
-                    goto pseudo_echo;
-                }
-                ch->status = CHN_ENV_SUSTAIN;
-                ch->envelopeVolume = ch->sustainGoal;
-                ch->hwEnvStepDir = 0x08;
-            }
-        }
-        goto step_complete;
+    /* Most comparison operations that cast to s8 perform 'and' by 0xFF. */
+    const int mask = 0xff;
+    int prevC15 = c15;
+    int envelopeStepTimeAndDir = cgb_read(&io, nrx2);
+    int envelopeVolume, sustainGoal;
+
+    /* A sound moved to the polyphony-debug shadow pool mid-note: give its
+     * PSG the start-frame registers it never saw, then re-apply pitch and
+     * volume this frame (a trigger with the current envelope volume). */
+    if (ch->hwResync && !(ch->status & CHN_START)) {
+        int unused;
+        ch->hwResync = false;
+        cgb_start_registers(ch, &io, chn, nrx0, nrx1, nrx3, &unused);
+        if (chn == 3)
+            ch->n4 |= 0x80;
+        ch->modify |= MO_PIT | MO_VOL;
     }
 
-    if (ch->status & CHN_IEC) {
+    /* 2. calculate envelope volume */
+    if (ch->status & CHN_START) {
+        if (!(ch->status & CHN_STOP)) {
+            ch->status = CHN_ENV_ATTACK;
+            ch->modify = MO_PIT | MO_VOL;
+            m4a_cgb_mod_vol(ch);
+            cgb_start_registers(ch, &io, chn, nrx0, nrx1, nrx3, &envelopeStepTimeAndDir);
+            ch->envelopeCounter = ch->attack;
+            if ((int8_t)(ch->attack & mask)) {
+                ch->envelopeVolume = 0;
+                goto envelope_step_complete;
+            } else {
+                /* skip attack phase if attack is instantaneous (=0) */
+                goto envelope_decay_start;
+            }
+        } else {
+            goto oscillator_off;
+        }
+    } else if (ch->status & CHN_IEC) {
         ch->pseudoEchoLength--;
-        if ((int8_t)ch->pseudoEchoLength <= 0) {
-            if (ch->type == 3)
-                ch->declickSamplesRemaining = DECLICK_SAMPLES;
+        if ((int8_t)(ch->pseudoEchoLength & mask) <= 0) {
+        oscillator_off:
+            m4a_cgb_osc_off(ch, psg, gba);
             ch->status = 0;
-            return;
+            goto channel_complete;
         }
         goto envelope_complete;
-    }
-
-    if ((ch->status & CHN_STOP) && (ch->status & CHN_ENV_MASK)) {
+    } else if ((ch->status & CHN_STOP) && (ch->status & CHN_ENV_MASK)) {
         ch->status &= ~CHN_ENV_MASK;
         ch->envelopeCounter = ch->release;
-        if (ch->release != 0) {
-            ch->modify |= 0x01;
-            ch->hwEnvStepDir = ch->release & 0x07;
-            goto step_complete;
+        if ((int8_t)(ch->release & mask)) {
+            ch->modify |= MO_VOL;
+            if (chn != 3)
+                envelopeStepTimeAndDir = ch->release | 0x00; /* CGB_NRx2_ENV_DIR_DEC */
+            goto envelope_step_complete;
         } else {
-            goto pseudo_echo;
+            goto envelope_pseudoecho_start;
+        }
+    } else {
+    envelope_step_repeat:
+        if (ch->envelopeCounter == 0) {
+            if (chn == 3)
+                ch->modify |= MO_VOL;
+
+            m4a_cgb_mod_vol(ch);
+            if ((ch->status & CHN_ENV_MASK) == CHN_ENV_RELEASE) {
+                ch->envelopeVolume--;
+                if ((int8_t)(ch->envelopeVolume & mask) <= 0) {
+                envelope_pseudoecho_start:
+                    ch->envelopeVolume = (uint8_t)(((ch->envelopeGoal * ch->pseudoEchoVolume) + 0xFF) >> 8);
+                    if (ch->envelopeVolume) {
+                        ch->status |= CHN_IEC;
+                        ch->modify |= MO_VOL;
+                        if (chn != 3)
+                            envelopeStepTimeAndDir = 0 | 0x08;
+                        goto envelope_complete;
+                    } else {
+                        goto oscillator_off;
+                    }
+                } else {
+                    ch->envelopeCounter = ch->release;
+                }
+            } else if ((ch->status & CHN_ENV_MASK) == CHN_ENV_SUSTAIN) {
+            envelope_sustain:
+                ch->envelopeVolume = ch->sustainGoal;
+                ch->envelopeCounter = 7;
+            } else if ((ch->status & CHN_ENV_MASK) == CHN_ENV_DECAY) {
+                ch->envelopeVolume--;
+                envelopeVolume = (int8_t)(ch->envelopeVolume & mask);
+                sustainGoal = (int8_t)(ch->sustainGoal);
+                if (envelopeVolume <= sustainGoal) {
+                envelope_sustain_start:
+                    if (ch->sustain == 0) {
+                        ch->status &= ~CHN_ENV_MASK;
+                        goto envelope_pseudoecho_start;
+                    } else {
+                        ch->status--;
+                        ch->modify |= MO_VOL;
+                        if (chn != 3)
+                            envelopeStepTimeAndDir = 0 | 0x08;
+                        goto envelope_sustain;
+                    }
+                } else {
+                    ch->envelopeCounter = ch->decay;
+                }
+            } else {
+                ch->envelopeVolume++;
+                if ((uint8_t)(ch->envelopeVolume & mask) >= ch->envelopeGoal) {
+                envelope_decay_start:
+                    ch->status--;
+                    ch->envelopeCounter = ch->decay;
+                    if ((uint8_t)(ch->envelopeCounter & mask)) {
+                        ch->modify |= MO_VOL;
+                        ch->envelopeVolume = ch->envelopeGoal;
+                        if (chn != 3)
+                            envelopeStepTimeAndDir = ch->decay | 0x00;
+                    } else {
+                        goto envelope_sustain_start;
+                    }
+                } else {
+                    ch->envelopeCounter = ch->attack;
+                }
+            }
         }
     }
 
-    {
-step_repeat:
-        if (ch->envelopeCounter == 0) {
-            m4a_cgb_mod_vol(ch);
-            uint8_t envState = ch->status & CHN_ENV_MASK;
-
-            if (envState == CHN_ENV_RELEASE) {
-                ch->envelopeVolume--;
-                if ((int8_t)ch->envelopeVolume <= 0) {
-                pseudo_echo:
-                    ch->envelopeVolume = ((ch->envelopeGoal * ch->pseudoEchoVolume) + 0xFF) >> 8;
-                    if (ch->envelopeVolume) {
-                        ch->status |= CHN_IEC;
-                        ch->modify |= 0x01;
-                        ch->hwEnvStepDir = 0x08; /* step 0: frozen at echo volume */
-                        goto envelope_complete;
-                    } else {
-                        if (ch->type == 3)
-                            ch->declickSamplesRemaining = DECLICK_SAMPLES;
-                        ch->status = 0;
-                        return;
-                    }
-                }
-                ch->envelopeCounter = ch->release;
-            } else if (envState == CHN_ENV_SUSTAIN) {
-                ch->envelopeVolume = ch->sustainGoal;
-                ch->envelopeCounter = 7;
-            } else if (envState == CHN_ENV_DECAY) {
-                ch->envelopeVolume--;
-                if ((int8_t)ch->envelopeVolume <= (int8_t)ch->sustainGoal) {
-                    if (ch->sustain == 0) {
-                        ch->status &= ~CHN_ENV_MASK;
-                        goto pseudo_echo;
-                    }
-                    ch->status--;  /* decay -> sustain */
-                    ch->modify |= 0x01;
-                    ch->hwEnvStepDir = 0x08; /* step 0: frozen at sustain */
-                    ch->envelopeVolume = ch->sustainGoal;
-                    ch->envelopeCounter = 7;
-                    goto step_complete;
-                }
-                ch->envelopeCounter = ch->decay;
-            } else {
-                /* Attack */
-                ch->envelopeVolume++;
-                if (ch->envelopeVolume >= ch->envelopeGoal) {
-                    ch->status--;  /* attack -> decay */
-                    ch->envelopeCounter = ch->decay;
-                    if (ch->decay != 0) {
-                        ch->modify |= 0x01;
-                        ch->hwEnvStepDir = ch->decay & 0x07;
-                        ch->envelopeVolume = ch->envelopeGoal;
-                    } else {
-                        if (ch->sustain == 0) {
-                            ch->status &= ~CHN_ENV_MASK;
-                            goto pseudo_echo;
-                        }
-                        ch->status--;
-                        ch->modify |= 0x01;
-                        ch->hwEnvStepDir = 0x08; /* step 0: frozen at sustain */
-                        ch->envelopeVolume = ch->sustainGoal;
-                        ch->envelopeCounter = 7;
-                    }
-                    goto step_complete;
-                }
-                ch->envelopeCounter = ch->attack;
-            }
-        }
-
-step_complete:
-        ch->envelopeCounter--;
-        /* Double step every 15 frames (when c15==0) to match hardware 1/64s rate */
-        if (doubleStep && steps == 0) {
-            steps = 1;
-            goto step_repeat;
-        }
+envelope_step_complete:
+    /* every 15 frames, envelope calculation has to be done twice
+     * to keep up with the hardware envelope rate (1/64 s) */
+    ch->envelopeCounter--;
+    if (prevC15 == 0) {
+        prevC15--;
+        goto envelope_step_repeat;
     }
 
 envelope_complete:
-    /* CgbSound applies MO_VOL by rewriting NRx2 and setting the NRx4 trigger
-     * bit, which retriggers the square-1 hardware sweep unit and reloads the
-     * hardware envelope from the software value. */
-    if (ch->modify & 0x01) {
-        if (ch->type == 1)
-            cgb_sweep_retrigger(ch);
-        if (ch->type != 3)
-            cgb_hw_env_write(ch);
-    }
-    ch->modify = 0;
-}
+    /* Opt-in pulse-width modulation (not stock CgbSound): a duty change on a
+     * sounding square is written to NRx1, which the PSG applies at once. */
+    if ((ch->modify & MO_DUTY) && (chn == 1 || chn == 2))
+        cgb_write(&io, nrx1, (uint8_t)(((uint32_t)ch->dutyCycle << 6) + ch->length));
 
-/* Advance a square channel's free-running duty phase by one output sample.
- *
- * The square oscillators run continuously on hardware -- an NRx4 trigger does
- * not reset the duty position, so a channel that has been silent resumes at
- * whatever phase the elapsed time puts it (mGBA GBAudioRun catches ch->index
- * up by wall-clock time on the next register write, even when the channel
- * is not playing).  So this runs every sample, on or off, muted or not, and
- * uses the frequency register's current value (0 = 64 Hz, the reset state)
- * for the catch-up.  Called before the sample level is read: `bit` is
- * therefore the phase this sample sits at, mirroring GBAudioRun's
- * advance-then-sample order (a one-sample shift either way is inaudible).
- *
- * The CGB frequency register value is 2048 - (131072 / freq_hz), so
- * freq_hz = 131072 / (2048 - reg_value); one full period is 2^32 in the
- * 32-bit accumulator whose top three bits index the 8-step duty pattern.
- * The increment is constant between (tick-rate) frequency changes, so it is
- * cached and only recomputed when ch->frequency changes. */
-static void cgb_square_advance(M4ACGBChannel *ch, float sampleRate)
-{
-    if (ch->frequency != ch->phaseIncFreq) {
-        int32_t freqReg = ch->frequency;
-        if (freqReg >= 2048) freqReg = 2047;
-        float freqHz = 131072.0f / (float)(2048 - freqReg);
-        ch->phaseInc = (uint32_t)(freqHz / sampleRate * 4294967296.0f);
-        ch->phaseIncFreq = ch->frequency;
-    }
-    ch->phase += ch->phaseInc;
-}
+    /* 3. apply pitch to HW registers */
+    if (ch->modify & MO_PIT) {
+        /* TONEDATA_TYPE_FIX rounding for the 65536 Hz DAC (SOUNDBIAS_H =
+         * 0x40); the engine already applies it when computing ch->frequency
+         * (m4a_cgb_fix_freq), and the rounding is idempotent. */
+        if (chn < 4 && ch->fixedFreq)
+            ch->frequency = (ch->frequency + 1) & 0x7fe;
 
-/*
- * CGB channel render - generates one output sample by software synthesis
- */
-void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
-                            float sampleRate)
-{
-    /* Squares free-run whether or not the channel is sounding. */
-    if (ch->type == 1 || ch->type == 2)
-        cgb_square_advance(ch, sampleRate);
-
-    if (!(ch->status & CHN_ON)) {
-        /* Wave channel declick: linearly fade the last sample to zero over
-         * DECLICK_SAMPLES frames to prevent a pop caused by the DC offset. */
-        if (ch->type == 3 && ch->declickSamplesRemaining > 0) {
-            ch->declickSamplesRemaining--;
-            int32_t faded = (ch->declickSample * (int32_t)ch->declickSamplesRemaining) / DECLICK_SAMPLES;
-            if (ch->pan & 0x0F) *mixR += faded;
-            if (ch->pan & 0xF0) *mixL += faded;
-        }
-        return;
-    }
-    if (ch->status & CHN_START)
-        return;
-
-    int32_t sample = 0;
-    uint8_t cgbType = ch->type;
-
-    /* Advance the hardware envelope's free-running 64 Hz clock (frame
-     * sequencer rate, independent of the engine tick).  One volume step per
-     * `stepTime` clocks; the unit stops at the 0/15 bound (mGBA
-     * _updateEnvelope) until the next MO_VOL write reloads it. */
-    if (cgbType != 3) {
-        ch->hwEnvClockAccum += 64.0f / sampleRate;
-        while (ch->hwEnvClockAccum >= 1.0f) {
-            ch->hwEnvClockAccum -= 1.0f;
-            if (ch->hwEnvDead || (ch->hwEnvStepDir & 0x07) == 0)
-                continue;
-            if (--ch->hwEnvNextStep != 0)
-                continue;
-            if (ch->hwEnvStepDir & 0x08) {
-                if (++ch->hwEnvVolume >= 15) {
-                    ch->hwEnvVolume = 15;
-                    ch->hwEnvDead = 1;
-                } else {
-                    ch->hwEnvNextStep = ch->hwEnvStepDir & 0x07;
-                }
-            } else {
-                if (--ch->hwEnvVolume == 0)
-                    ch->hwEnvDead = 1;
-                else
-                    ch->hwEnvNextStep = ch->hwEnvStepDir & 0x07;
-            }
-        }
+        if (chn != 4)
+            cgb_write(&io, nrx3, (uint8_t)ch->frequency);
+        else
+            cgb_write(&io, nrx3, (uint8_t)((cgb_read(&io, nrx3) & 0x08) | ch->frequency));
+        ch->n4 = (uint8_t)((ch->n4 & 0xC0) + ((ch->frequency >> 8) & 0xFF));
+        cgb_write(&io, nrx4, ch->n4);
     }
 
-    if (cgbType == 1) {
-        /* Advance the frequency sweep's 128 Hz clock (frame-sequencer rate,
-         * independent of the engine tick). */
-        if (ch->sweepEnabled) {
-            ch->sweepClockAccum += 128.0f / sampleRate;
-            while (ch->sweepClockAccum >= 1.0f) {
-                ch->sweepClockAccum -= 1.0f;
-                cgb_sweep_clock(ch);
+    /* 4. apply envelope & volume to HW registers */
+    if (ch->modify & MO_VOL) {
+        cgb_write(&io, PSG_REG_NR51,
+                  (uint8_t)((cgb_read(&io, PSG_REG_NR51) & ~ch->panMask) | ch->pan));
+        if (chn == 3) {
+            cgb_write(&io, nrx2, cgb3_vol(ch->envelopeVolume));
+            if (ch->n4 & 0x80) {
+                cgb_write(&io, nrx0, 0x80);
+                cgb_write(&io, nrx4, ch->n4);
+                ch->n4 &= 0x7f;
             }
-        }
-        /* An overflowed upward sweep has cleared the channel's NR52 enable
-         * bit: no output until a retrigger re-evaluates the overflow check
-         * (the software envelope keeps running, unaware). */
-        if (ch->sweepMuted)
-            return;
-    }
-
-    if (cgbType == 1 || cgbType == 2) {
-        /* Square wave synthesis: read the duty level at the phase
-         * cgb_square_advance() already moved us to for this sample. */
-        static const uint8_t dutyPatterns[4] = { 0x01, 0x81, 0xE1, 0x7E };
-        uint8_t pattern = dutyPatterns[ch->dutyCycle & 3];
-        int bit = (ch->phase >> 29) & 7;
-        sample = (pattern & (1 << bit)) ? 64 : -64;
-    } else if (cgbType == 3) {
-        /* Programmable wave channel */
-        if (ch->wavePointer) {
-            /* 32 4-bit samples packed into 16 bytes (4 uint32_t) */
-            uint8_t *waveData = (uint8_t *)ch->wavePointer;
-            int pos = (ch->phase >> 27) & 0x1F;  /* 5 bits = 0-31 */
-            uint8_t nibble;
-            if (pos & 1)
-                nibble = waveData[pos >> 1] & 0x0F;
-            else
-                nibble = (waveData[pos >> 1] >> 4) & 0x0F;
-            /* Sum of all 32 raw nibbles for DC offset removal.  The wave mean
-             * varies per waveform, so using a fixed midpoint of 8 leaves a DC
-             * offset that causes clicks at note start/end.  The sum depends
-             * only on the wave table contents, so it is cached and recomputed
-             * only when wavePointer changes. */
-            if (ch->wavePointer != ch->waveSumPointer) {
-                int32_t waveSum = 0;
-                for (int i = 0; i < 16; i++) {
-                    waveSum += (waveData[i] >> 4) & 0x0F;
-                    waveSum += waveData[i] & 0x0F;
-                }
-                ch->waveSum = waveSum;
-                ch->waveSumPointer = ch->wavePointer;
-            }
-            int32_t waveSum = ch->waveSum;
-
-            /* Volume control: apply shift to raw 4-bit nibble to match
-             * GBA hardware quantization (NR32 register).
-             * On real hardware, the right-shift is lossy on the small
-             * 4-bit value, creating quantized "plateaus" in the output.
-             * Apply the same volume logic to the mean for accurate DC removal. */
-            int32_t shifted = (int32_t)nibble;
-            /* envelopeVolume can exceed 15 (CgbModVol's center-pan goal is
-             * unclamped, up to 31); hardware truncates on the register write,
-             * so only the low 4 bits are audible. */
-            int nr32 = gCgb3Vol[ch->envelopeVolume & 0x0F];
-            int32_t meanShifted;
-            if (nr32 == 0) {
-                shifted = 0;
-                meanShifted = 0;
-            } else if (nr32 & 0x80) {
-                /* GBA 75% mode: (nibble * 3) >> 2; mean = (waveSum * 3) >> 7 */
-                shifted = (shifted + (shifted << 1)) >> 2;
-                meanShifted = (waveSum * 3) >> 7;
-            } else {
-                int shift = ((nr32 >> 5) & 3) - 1;
-                shifted >>= shift;
-                meanShifted = waveSum >> (5 + shift);
-            }
-            /* Center around the waveform's actual mean to remove DC offset */
-            sample = (shifted - meanShifted) * 8;
-
-            /* Advance phase (cached; recomputed only on frequency change). */
-            if (ch->frequency != ch->phaseIncFreq) {
-                int32_t freqReg = ch->frequency;
-                if (freqReg >= 2048) freqReg = 2047;
-                float freqHz = 2097152.0f / (float)(2048 - freqReg);
-                /* Wave channel plays 32 samples per period */
-                freqHz /= 32.0f;
-                ch->phaseInc = (uint32_t)(freqHz / sampleRate * 4294967296.0f);
-                ch->phaseIncFreq = ch->frequency;
-            }
-            ch->phase += ch->phaseInc;
-        }
-    } else if (cgbType == 4) {
-        /* Noise channel using LFSR.
-         *
-         * The LFSR clocks at up to 524288 Hz -- typically far above the
-         * output sample rate -- so a single output sample spans many LFSR
-         * steps.  Point-sampling the LFSR once per output sample aliases
-         * that fast clock into a full-scale two-level square ("rigid" noise);
-         * hardware recordings and mGBA (_coalesceNoiseChannel box-averages
-         * every LFSR step inside each output sample) show the band-limited
-         * mean instead.  Walk every LFSR step that falls inside this sample
-         * and output the time-weighted average of the two-level waveform.
-         *
-         * For noise, ch->phaseInc holds Q16.16 LFSR clocks per output sample
-         * and ch->phase holds the Q16 fraction (always < 0x10000) of the
-         * current LFSR period already elapsed. */
-        uint8_t noiseParams = ch->frequency & 0xFF;
-
-        /* Phase increment is constant between frequency changes; cache it. */
-        if (ch->frequency != ch->phaseIncFreq) {
-            uint8_t divRatio = noiseParams & 0x07;
-            uint8_t shiftFreq = (noiseParams >> 4) & 0x0F;
-            /* bool shortMode = (noiseParams >> 3) & 1; */
-
-            float baseFreq = 524288.0f;
-            float divisor = (divRatio == 0) ? 0.5f : (float)divRatio;
-            float noiseFreq = baseFreq / divisor / (float)(1 << (shiftFreq + 1));
-
-            ch->phaseInc = (uint32_t)(noiseFreq / sampleRate * 65536.0f);
-            ch->phaseIncFreq = ch->frequency;
-        }
-
-        uint32_t remaining = ch->phaseInc;
-        uint32_t untilClock = 0x10000u - ch->phase;
-        if (remaining < untilClock) {
-            /* No LFSR clock lands inside this sample: constant level. */
-            sample = (ch->lfsr & 1) ? 64 : -64;
-            ch->phase += remaining;
         } else {
-            /* One or more LFSR clocks inside this sample: accumulate each
-             * level weighted by the time it was held.
-             * Bit 3 of frequency = period mode: 0 = 15-bit, 1 = 7-bit LFSR. */
-            int32_t acc = (int32_t)untilClock * ((ch->lfsr & 1) ? 64 : -64);
-            remaining -= untilClock;
-            for (;;) {
-                uint16_t bit = ((ch->lfsr >> 1) ^ ch->lfsr) & 1;
-                if (noiseParams & 0x08)
-                    ch->lfsr = (ch->lfsr >> 1) | (bit << 6);   /* 7-bit */
-                else
-                    ch->lfsr = (ch->lfsr >> 1) | (bit << 14);  /* 15-bit */
-                if (remaining < 0x10000u)
-                    break;
-                acc += (int32_t)(0x10000u * ((ch->lfsr & 1) ? 64 : -64));
-                remaining -= 0x10000u;
-            }
-            acc += (int32_t)remaining * ((ch->lfsr & 1) ? 64 : -64);
-            ch->phase = remaining;
-            sample = acc / (int32_t)ch->phaseInc;
+            uint32_t envMask = 0xF;
+            cgb_write(&io, nrx2, (uint8_t)((envelopeStepTimeAndDir & envMask) + (ch->envelopeVolume << 4)));
+            cgb_write(&io, nrx4, ch->n4 | 0x80);
+            if (chn == 1 && !(cgb_read(&io, nrx0) & 0x08))
+                cgb_write(&io, nrx4, ch->n4 | 0x80);
         }
     }
 
-    /* Apply envelope volume (for non-wave channels).
-     * The audible level is the HARDWARE envelope unit's volume, reloaded from
-     * the software envelope at every MO_VOL write and stepping on its own
-     * 64 Hz clock in between (the software value alone would hold percussive
-     * envelopes too long -- see hwEnv* in the channel struct). */
-    if (cgbType != 3)
-        sample = (sample * ch->hwEnvVolume) >> 4;
-
-    /* Scale CGB to match the GBA hardware mixing ratio.
-     * SOUNDCNT_H is initialised with SOUND_ALL_MIX_FULL (volume bits = 2), so
-     * mGBA applies psgShift = 4 - 2 = 2 (CGB >> 2) while PCM is << 2.
-     * That is a 16:1 ratio; >> 2 here keeps us in the same integer domain as
-     * the PCM mixer which already incorporates the << 2 implicitly through its
-     * larger sample values (~±127 vs CGB's ~±60). */
-    sample >>= 1;
-
-    /* Track last sample for wave channel declick on note-off. */
-    if (cgbType == 3)
-        ch->declickSample = sample;
-
-    /* Route to left/right using NR51-style pan bits in ch->pan.
-     * Panning is binary on the GBA (NR51 enable bits), not a level multiplier. */
-    if (ch->pan & 0x0F)
-        *mixR += sample;
-    if (ch->pan & 0xF0)
-        *mixL += sample;
+channel_complete:
+    ch->modify = 0;
 }

@@ -13,6 +13,8 @@
  *     (sample-and-hold; mgba fills the sample slots the overflow lands in
  *     and after).  When the FIFO drops below 4 words the DMA fetches 4
  *     words from the m4a PCM ring buffer.
+ *   - The PSG frame sequencer steps every 32768 cycles from reset (the
+ *     callback belongs to the PSG model, m4a_psg.c).
  *   - The output DAC samples every 512 >> resolution cycles (SOUNDBIAS bits
  *     14-15; Emerald sets resolution 1 = 65536 Hz).  Every 1024 cycles the
  *     2 << resolution pending samples are produced: PSG (>> psgShift) plus
@@ -65,6 +67,10 @@ typedef struct {
  * `timestamp`, in mgba's PSG units (channel volume 0-15, << 3, times
  * 1 + NR50 volume), before the SOUNDCNT_H shift. */
 typedef void (*M4AGbaPsgSampleFn)(void *user, int64_t timestamp, int *left, int *right);
+/* Frame-sequencer callback: one 512 Hz PSG frame step at `timestamp` (mgba's
+ * _updateFrame, every 32768 cycles from reset, run after the DAC catch-up and
+ * before a sample event due at the same cycle). */
+typedef void (*M4AGbaPsgFrameFn)(void *user, int64_t timestamp);
 
 typedef struct {
     int64_t now;                /* CPU cycles since reset */
@@ -104,7 +110,9 @@ typedef struct {
     int timerRem;               /* Bresenham remainder */
 
     M4AGbaPsgSampleFn psgSample;
+    M4AGbaPsgFrameFn psgFrame;
     void *psgUser;
+    int64_t nextFrameEvent;     /* next PSG frame-sequencer step */
 } M4AGbaAudio;
 
 /* Reset to mgba's power-on state at cycle 0.  `ring` is the m4a PCM buffer
@@ -122,7 +130,7 @@ void m4a_gba_timer_enable(M4AGbaAudio *g);         /* TM0CNT_H enable: first ove
 void m4a_gba_timer_disable(M4AGbaAudio *g);
 void m4a_gba_set_pcm_rate(M4AGbaAudio *g, int pcmSamplesPerVBlank, const int16_t *ring, int ringSize);
 
-/* Next hardware event time (timer overflow or sample event). */
+/* Next hardware event time (PSG frame step, sample event or timer overflow). */
 int64_t m4a_gba_next_event(const M4AGbaAudio *g);
 
 /* Run the hardware up to `until` (inclusive of events at `until`): timer

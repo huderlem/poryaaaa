@@ -3,6 +3,7 @@
 #include <string.h>
 
 #define BLIP_SIZE 0x4000
+#define PSG_FRAME_EVENT 32768   /* PSG frame sequencer period (m4a_psg.h) */
 
 void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int16_t *ring, int ringSize,
                   int pcmSamplesPerVBlank)
@@ -17,6 +18,7 @@ void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int16_t *ring, int ring
     g->resolution = 0;
     g->sampleInterval = 512;
     g->nextSampleEvent = 0;
+    g->nextFrameEvent = 0;
     g->soundbias = 0x200;
     g->masterVolume = 0x100;
 
@@ -262,9 +264,21 @@ static void sample_event(M4AGbaAudio *g)
 int64_t m4a_gba_next_event(const M4AGbaAudio *g)
 {
     int64_t next = g->nextSampleEvent;
+    if (g->nextFrameEvent < next)
+        next = g->nextFrameEvent;
     if (g->timerEnabled && g->timerNext < next)
         next = g->timerNext;
     return next;
+}
+
+/* _updateFrame (gb/audio.c, M_CORE_GBA): catch the DAC up, then step the PSG
+ * frame sequencer. */
+static void frame_event(M4AGbaAudio *g)
+{
+    m4a_gba_catch_up(g, g->now);
+    if (g->psgFrame)
+        g->psgFrame(g->psgUser, g->now);
+    g->nextFrameEvent += PSG_FRAME_EVENT;
 }
 
 void m4a_gba_run(M4AGbaAudio *g, int64_t until)
@@ -274,9 +288,11 @@ void m4a_gba_run(M4AGbaAudio *g, int64_t until)
         if (next > until)
             break;
         g->now = next;
-        /* mgba orders ties by priority: the sample event (0x18) before the
-         * timer (0x20). */
-        if (g->nextSampleEvent == next) {
+        /* mgba orders ties by priority: the PSG frame sequencer (0x10), then
+         * the sample event (0x18), then the timer (0x20). */
+        if (g->nextFrameEvent == next) {
+            frame_event(g);
+        } else if (g->nextSampleEvent == next) {
             sample_event(g);
         } else {
             fifo_tick(g, 0);

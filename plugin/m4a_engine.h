@@ -273,23 +273,6 @@ typedef struct {
     uint8_t panMask;
     uint8_t modify;
 
-    /* Square-1 (NR10) hardware frequency-sweep unit, modeled on mGBA's
-     * gb/audio.c.  `sweep` above holds the NR10 byte captured at note-on
-     * (0x08 = inert): bits 6-4 = step time in 128 Hz clocks (0 -> 8),
-     * bit 3 = direction (1 = down), bits 2-0 = shift.  Every `time` clocks
-     * the unit recomputes the frequency from its internal shadow register,
-     * f' = f +/- (f >> shift); an upward sweep overflowing 2047 silences the
-     * channel (sweepMuted) until the next retrigger.  CgbSound rewrites NRx4
-     * with the trigger bit whenever a channel's volume changes (MO_VOL), so
-     * the unit is re-armed -- shadow reloaded from the frequency register,
-     * timer reset, overflow recheck -- at note start, every envelope phase
-     * transition, and every track volume change. */
-    uint16_t sweepShadowFreq;
-    uint8_t sweepStep;       /* countdown to the next sweep calculation */
-    bool sweepEnabled;
-    bool sweepMuted;
-    float sweepClockAccum;   /* fractional 128 Hz clock, advanced per sample */
-
     uint32_t frequency;
     /* Set from the voice's TONEDATA_TYPE_FIX bit (the `_alt` PSG voice macros:
      * voice_square_1_alt, voice_square_2_alt, voice_programmable_wave_alt).
@@ -297,55 +280,18 @@ typedef struct {
      * quantized -- see m4a_cgb_fix_freq() in m4a_engine.c for the rounding,
      * the sweep-unit exclusion and why it stays false for the noise channel. */
     bool fixedFreq;
-    uint32_t phase;         /* phase accumulator for synthesis; for the noise
-                             * channel, the Q16 fraction (< 0x10000) of the
-                             * current LFSR period already elapsed */
     uint32_t *wavePointer;  /* programmable wave data */
-    /* The wave table last uploaded to the (emulated) wave RAM: CgbSound's
+    /* The wave table last uploaded to the wave RAM: CgbSound's
      * currentPointer.  m4a rewrites wave RAM at note start only when the
-     * voice's table differs from what is already loaded, and on the GBA the
-     * wave RAM is a rotating shift register whose position an NRx4 trigger
-     * does not reset (mGBA gb/audio.c, GB_AUDIO_GBA style) -- so the wave
-     * position restarts only when the table is rewritten, and otherwise
-     * continues across retriggers.  See m4a_cgb_channel_start(). */
+     * voice's table differs from what is already loaded. */
     uint32_t *currentWavePointer;
-
-    /* Cached per-sample phase increment.  The increment derived from
-     * `frequency` is constant between tick-rate frequency updates, so it is
-     * recomputed (a couple of float divides) only when `frequency` changes
-     * rather than every rendered sample.  phaseIncFreq holds the `frequency`
-     * value phaseInc was computed for; a sentinel of 0xFFFFFFFF (set at note
-     * start) forces a recompute on the first sample of a note.  For the noise
-     * channel, phaseInc is Q16.16 LFSR clocks per output sample (the LFSR can
-     * clock up to ~11x faster than the output rate, so it needs an integer
-     * part). */
-    uint32_t phaseInc;
-    uint32_t phaseIncFreq;
-
-    /* Cached DC-offset sum of the programmable-wave table (sum of all 32 raw
-     * nibbles).  Depends only on wavePointer contents, so it is recomputed
-     * only when wavePointer changes rather than every sample. */
-    int32_t waveSum;
-    uint32_t *waveSumPointer;
-
-    uint16_t lfsr;          /* noise LFSR state */
-
-    /* GBA hardware envelope unit (NRx2 low bits + NRx4 trigger), modeled on
-     * mGBA's gb/audio.c.  CgbSound drives the AUDIBLE volume through this
-     * unit: every MO_VOL apply rewrites NRx2 as (envelopeVolume << 4) |
-     * hwEnvStepDir and sets the trigger bit, reloading the unit.  Between
-     * writes the unit steps on its own free-running 64 Hz clock (one volume
-     * step per `stepTime` clocks), while the software envelope is silent
-     * bookkeeping that only surfaces at phase transitions.  Percussive
-     * envelopes (sustain 0) therefore decay ~2x faster than the software
-     * envelope alone, with a per-note phase variation (the 64 Hz clock is not
-     * reset by the trigger).  Types 1, 2, 4 only; the wave channel has no
-     * hardware envelope (NR32 volume shift, driven per-frame by MO_VOL). */
-    uint8_t hwEnvStepDir;   /* NRx2 low nibble: step time 0-7, 0x08 = increase */
-    uint8_t hwEnvVolume;    /* current hardware volume 0-15: the audible level */
-    uint8_t hwEnvNextStep;  /* 64 Hz clocks until the next step */
-    uint8_t hwEnvDead;      /* nonzero = unit stopped (step time 0 or clamped) */
-    float hwEnvClockAccum;  /* fractional free-running 64 Hz clock */
+    /* CgbChannel.n4: the NRx4 value CgbSound builds (length-enable bit 6,
+     * trigger bit 7 for the wave channel's first MO_VOL, frequency high
+     * bits). */
+    uint8_t n4;
+    /* Polyphony-debug: this channel was copied to the shadow pool mid-note
+     * and its PSG still needs the start-frame registers (m4a_channel.c). */
+    bool hwResync;
 
     int trackIndex;
     /* Started by a host audition (engine->auditionNote at note-on): stays
@@ -355,11 +301,6 @@ typedef struct {
      * fields. */
     uint8_t auditionVolume;
     int8_t auditionPan;
-
-    /* Wave channel (type 3) declick: avoids a pop when the note ends by
-     * smoothly fading the last sample to zero over DECLICK_SAMPLES frames. */
-    int32_t declickSample;           /* last rendered sample, pre-pan, post-scale */
-    int32_t declickSamplesRemaining; /* countdown; 0 = no declick active */
 } M4ACGBChannel;
 
 /* Polyphony-overflow debug events.  One is recorded whenever a sound is lost
@@ -399,6 +340,7 @@ typedef void (*M4AFrameHook)(M4AEngine *engine, void *user);
 
 #include "m4a_reverb.h"
 #include "m4a_gba.h"
+#include "m4a_psg.h"
 
 /* Engine state */
 struct M4AEngine {
@@ -432,6 +374,9 @@ struct M4AEngine {
      * per-frame interrupts.  See m4a_gba.h and the scheduler notes in
      * m4a_engine.c. */
     M4AGbaAudio gba;
+    /* The PSG: [0] is the hardware the real CGB channels drive, [1] the
+     * shadow pool's (polyphony-overflow debug); both see the boot writes. */
+    M4APsg psg[2];
     int16_t *pcmRing;
     int pcmRingSize;
     int64_t nextVSync;           /* next m4aSoundVSync (VCOUNT 150 interrupt) */
@@ -574,6 +519,9 @@ void m4a_engine_xcmd(M4AEngine *engine, int trackIndex, uint8_t command, uint8_t
 void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend);
 void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex);
 void m4a_engine_all_sound_off(M4AEngine *engine);
+/* TrackStop's per-channel silence: PCM channels just stop; CGB channels also
+ * get CgbOscOff on their PSG.  `handle` is a note-on return value. */
+void m4a_engine_kill_channel(M4AEngine *engine, int handle);
 
 /* Forget every track's portamento note history (the "previous note" a glide
  * would start from).  Called automatically by all_notes_off/all_sound_off;

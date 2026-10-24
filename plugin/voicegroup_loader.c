@@ -2605,7 +2605,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         /* voice_square_1 */
         else if (strncmp(trimmed, "voice_square_1_alt ", 19) == 0) {
             int key, pan, sweep, duty, attack, decay, sustain, release;
-            if (sscanf(trimmed + 19, "%d, %d, %d, %d, %d, %d, %d, %d",
+            if (sscanf(trimmed + 19, "%i, %i, %i, %i, %i, %i, %i, %i",
                        &key, &pan, &sweep, &duty, &attack, &decay, &sustain, &release) == 8) {
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_SQUARE_1_ALT;
@@ -2621,7 +2621,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
             voicesParsedInSection++;
         } else if (strncmp(trimmed, "voice_square_1 ", 15) == 0) {
             int key, pan, sweep, duty, attack, decay, sustain, release;
-            if (sscanf(trimmed + 15, "%d, %d, %d, %d, %d, %d, %d, %d",
+            if (sscanf(trimmed + 15, "%i, %i, %i, %i, %i, %i, %i, %i",
                        &key, &pan, &sweep, &duty, &attack, &decay, &sustain, &release) == 8) {
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_SQUARE_1;
@@ -2639,7 +2639,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         /* voice_square_2 */
         else if (strncmp(trimmed, "voice_square_2_alt ", 19) == 0) {
             int key, pan, duty, attack, decay, sustain, release;
-            if (sscanf(trimmed + 19, "%d, %d, %d, %d, %d, %d, %d",
+            if (sscanf(trimmed + 19, "%i, %i, %i, %i, %i, %i, %i",
                        &key, &pan, &duty, &attack, &decay, &sustain, &release) == 7) {
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_SQUARE_2_ALT;
@@ -2655,7 +2655,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
             voicesParsedInSection++;
         } else if (strncmp(trimmed, "voice_square_2 ", 15) == 0) {
             int key, pan, duty, attack, decay, sustain, release;
-            if (sscanf(trimmed + 15, "%d, %d, %d, %d, %d, %d, %d",
+            if (sscanf(trimmed + 15, "%i, %i, %i, %i, %i, %i, %i",
                        &key, &pan, &duty, &attack, &decay, &sustain, &release) == 7) {
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_SQUARE_2;
@@ -2727,7 +2727,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
         /* voice_noise */
         else if (strncmp(trimmed, "voice_noise_alt ", 16) == 0) {
             int key, pan, period, attack, decay, sustain, release;
-            if (sscanf(trimmed + 16, "%d, %d, %d, %d, %d, %d, %d",
+            if (sscanf(trimmed + 16, "%i, %i, %i, %i, %i, %i, %i",
                        &key, &pan, &period, &attack, &decay, &sustain, &release) == 7) {
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_NOISE_ALT;
@@ -2742,7 +2742,7 @@ static int parse_voicegroup_file(const char *projectRoot, const char *filePath,
             voicesParsedInSection++;
         } else if (strncmp(trimmed, "voice_noise ", 12) == 0) {
             int key, pan, period, attack, decay, sustain, release;
-            if (sscanf(trimmed + 12, "%d, %d, %d, %d, %d, %d, %d",
+            if (sscanf(trimmed + 12, "%i, %i, %i, %i, %i, %i, %i",
                        &key, &pan, &period, &attack, &decay, &sustain, &release) == 7) {
                 ToneData *td = &vg->voices[voiceIndex];
                 td->type = VOICE_NOISE;

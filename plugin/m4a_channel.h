@@ -9,12 +9,11 @@ void m4a_pcm_channel_stop(M4APCMChannel *ch);
 void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume);
 void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR);
 
-/* CGB channel operations */
-void m4a_cgb_channel_start(M4ACGBChannel *ch);
-void m4a_cgb_channel_stop(M4ACGBChannel *ch);
-void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15);
-void m4a_cgb_channel_render(M4ACGBChannel *ch, int32_t *mixL, int32_t *mixR,
-                            float sampleRate);
+/* CGB channel operations: the CgbSound register driver (m4a_channel.c) on
+ * top of the PSG model (m4a_psg.c).  Writes are stamped at gba->now. */
+void m4a_cgb_channel_start(M4ACGBChannel *ch);                  /* flag CHN_START */
+void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAudio *gba);
+void m4a_cgb_osc_off(M4ACGBChannel *ch, M4APsg *psg, M4AGbaAudio *gba); /* CgbOscOff */
 
 /* Volume calculation for CGB channels (matches CgbModVol) */
 void m4a_cgb_mod_vol(M4ACGBChannel *ch);

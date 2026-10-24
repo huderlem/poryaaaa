@@ -100,7 +100,8 @@ static void track_stop(M4ASequencer *s, int i)
     for (int h = 0; h < CHAN_COUNT; h++) {
         if (!chan_is_real(h) || chan_track(e, h) != i)
             continue;
-        *chan_status(e, h) = 0;
+        if (*chan_status(e, h))
+            m4a_engine_kill_channel(e, h);   /* CgbOscOff for CGB channels */
     }
 }
 

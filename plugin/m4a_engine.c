@@ -152,6 +152,8 @@ static inline void cgb_set_pitch(M4ACGBChannel *ch, int32_t key, uint8_t fine)
     if (ch->type == 4)
         newFreq |= ch->frequency & 0x08;
     ch->frequency = newFreq;
+    /* MPlayMain's PITCHG pass: the next CgbSound writes NRx3/NRx4. */
+    ch->modify |= 0x02;
 }
 
 /*
@@ -325,12 +327,14 @@ static ToneData *resolve_voice(ToneData *voice, uint8_t key)
  *   VCOUNT 150 (line start + 250 cycles): m4aSoundVSync -- counts PCM DMA
  *     frames and every pcmDmaPeriod frames restarts the FIFO DMAs at the
  *     start of the ring buffer.
- *   VBLANK, line 160 (line start + 197 cycles): m4aSoundMain -- MPlayMain
- *     (the sequencer frame hook), the envelopes (SoundMainRAM / CgbSound),
- *     then the mix of pcmSamplesPerVBlank samples into the ring slot given
- *     by pcmDmaCounter.  The CGB register writes CgbSound makes land about
- *     1740 cycles after the line start in a steady-state frame (the
- *     song-start frame runs ~3000 cycles longer; not modeled).
+ *   VBLANK, line 160: m4aSoundMain -- MPlayMain (the sequencer frame hook),
+ *     the envelopes (SoundMainRAM / CgbSound), then the mix of
+ *     pcmSamplesPerVBlank samples into the ring slot given by pcmDmaCounter.
+ *     The handler is entered at line start + 197; the frame is stamped at
+ *     line start + 1740, where CgbSound's register writes land in a
+ *     steady-state frame (CgbSound entry + ~350; the song-start frame runs
+ *     ~3000 cycles longer and is not modeled).  The PCM mix only fills a
+ *     ring slot the DMA reads frames later, so its stamp does not matter.
  *
  * mgba's video starts a reset at line 126, so frame k >= 1 starts at
  * 124773 + (k - 1) * 280896 cycles.  m4aSoundInit's own register writes
@@ -340,13 +344,14 @@ static ToneData *resolve_voice(ToneData *voice, uint8_t key)
  */
 #define FRAME1_START        124773
 #define VSYNC_FRAME_OFFSET  (150 * GBA_CYCLES_PER_LINE + 250)
-#define SOUNDMAIN_FRAME_OFFSET (160 * GBA_CYCLES_PER_LINE + 197)
+#define SOUNDMAIN_FRAME_OFFSET (160 * GBA_CYCLES_PER_LINE + 1740)
 #define FIRST_IRQ_FRAME     2
 /* The frame boot ends in: right after its SoundMain. */
 #define BOOT_END_CYCLE      (FRAME1_START + (FIRST_IRQ_FRAME - 1) * GBA_CYCLES_PER_FRAME \
                              + SOUNDMAIN_FRAME_OFFSET)
 
 enum {
+    BOOT_PSG_WRITE,      /* a PSG register byte write (SoundInit, MPlayExtender) */
     BOOT_FIFO_RESET,     /* SoundInit: SOUNDCNT_H with both FIFO reset bits */
     BOOT_SOUNDBIAS,      /* SoundInit: SOUNDBIAS_H = 0x40 (65536 Hz DAC) */
     BOOT_DMA_ON,         /* m4aSoundVSyncOn from SoundInit's SampleFreqSet */
@@ -357,15 +362,30 @@ enum {
     BOOT_TIMER_ON_2,     /* second VCOUNT 159 wait, frame 1 */
     BOOT_DONE
 };
-static const struct { int64_t cycle; int action; } sBootTable[] = {
-    { 5737,   BOOT_FIFO_RESET },
-    { 5750,   BOOT_SOUNDBIAS },
-    { 15873,  BOOT_DMA_ON },
-    { 39794,  BOOT_TIMER_ON },
-    { 41238,  BOOT_DMA_OFF },
-    { 47452,  BOOT_TIMER_OFF },
-    { 47893,  BOOT_DMA_ON_2 },
-    { 320682, BOOT_TIMER_ON_2 },
+/* MPlayExtender's PSG setup (m4a.c) is ten register writes measured between
+ * cycles 39875 and 39935; they are spread evenly over that span.  Its
+ * 16-bit SOUNDCNT_L = 0 is two byte writes at one cycle. */
+static const struct { int64_t cycle; int action; uint32_t reg; uint8_t value; } sBootTable[] = {
+    { 5720,   BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F }, /* SoundInit: SOUNDCNT_X */
+    { 5737,   BOOT_FIFO_RESET, 0, 0 },
+    { 5750,   BOOT_SOUNDBIAS, 0, 0 },
+    { 15873,  BOOT_DMA_ON, 0, 0 },
+    { 39794,  BOOT_TIMER_ON, 0, 0 },
+    { 39875,  BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F }, /* MPlayExtender */
+    { 39881,  BOOT_PSG_WRITE, PSG_REG_NR50, 0x00 },
+    { 39881,  BOOT_PSG_WRITE, PSG_REG_NR51, 0x00 },
+    { 39887,  BOOT_PSG_WRITE, PSG_REG_NR12, 0x08 },
+    { 39893,  BOOT_PSG_WRITE, PSG_REG_NR22, 0x08 },
+    { 39899,  BOOT_PSG_WRITE, PSG_REG_NR42, 0x08 },
+    { 39905,  BOOT_PSG_WRITE, PSG_REG_NR14, 0x80 },
+    { 39911,  BOOT_PSG_WRITE, PSG_REG_NR24, 0x80 },
+    { 39917,  BOOT_PSG_WRITE, PSG_REG_NR44, 0x80 },
+    { 39923,  BOOT_PSG_WRITE, PSG_REG_NR30, 0x00 },
+    { 39929,  BOOT_PSG_WRITE, PSG_REG_NR50, 0x77 },
+    { 41238,  BOOT_DMA_OFF, 0, 0 },
+    { 47452,  BOOT_TIMER_OFF, 0, 0 },
+    { 47893,  BOOT_DMA_ON_2, 0, 0 },
+    { 320682, BOOT_TIMER_ON_2, 0, 0 },
 };
 #define BOOT_TABLE_LEN ((int)(sizeof(sBootTable) / sizeof(sBootTable[0])))
 
@@ -409,10 +429,23 @@ static void scheduler_reset(M4AEngine *engine)
     engine->nextSoundMain = frame_start(FIRST_IRQ_FRAME) + SOUNDMAIN_FRAME_OFFSET;
 }
 
-static void boot_action(M4AEngine *engine, int action)
+/* A CPU byte write to a PSG register, seen by both PSG instances (the
+ * shadow pool mirrors the hardware state). */
+static void psg_write_both(M4AEngine *engine, uint32_t reg, uint8_t value)
 {
     M4AGbaAudio *g = &engine->gba;
-    switch (action) {
+    m4a_gba_catch_up(g, g->now);
+    for (int i = 0; i < 2; i++)
+        m4a_psg_write8(&engine->psg[i], reg, value, g->now);
+}
+
+static void boot_action(M4AEngine *engine, int step)
+{
+    M4AGbaAudio *g = &engine->gba;
+    switch (sBootTable[step].action) {
+    case BOOT_PSG_WRITE:
+        psg_write_both(engine, sBootTable[step].reg, sBootTable[step].value);
+        break;
     case BOOT_FIFO_RESET: m4a_gba_fifo_reset(g); break;
     case BOOT_SOUNDBIAS:  m4a_gba_write_soundbias_resolution(g, 1); break;
     case BOOT_DMA_ON:
@@ -487,25 +520,38 @@ static void sound_main(M4AEngine *engine)
 }
 
 /* PSG level at one DAC slot, in mgba's PSG units before the SOUNDCNT_H
- * shift: the CGB oscillators stepped on the 65536 Hz sample grid. */
+ * shift (GBAAudioSample: GBAudioRun to the slot time, then
+ * GBAudioSamplePSG).  Both PSG instances advance; which one is heard depends
+ * on the polyphony-debug invert mode, where real-pool audition channels stay
+ * audible on top of the shadow pool. */
 static void psg_sample_cb(void *user, int64_t timestamp, int *left, int *right)
 {
     M4AEngine *engine = (M4AEngine *)user;
-    (void)timestamp;
-    bool invert = engine->polyDebugInvert;
-    int32_t mixL = 0, mixR = 0, mutedL = 0, mutedR = 0;
-    float rate = (float)GBA_CPU_HZ / (float)engine->gba.sampleInterval;
-    for (int ch = 0; ch < TOTAL_CGB_CHANNELS; ch++) {
-        bool audible = ((ch >= MAX_CGB_CHANNELS) == invert)
-                    || (ch < MAX_CGB_CHANNELS && engine->cgbChannels[ch].audition);
-        m4a_cgb_channel_render(&engine->cgbChannels[ch],
-                               audible ? &mixL : &mutedL,
-                               audible ? &mixR : &mutedR, rate);
+    m4a_psg_run(&engine->psg[0], timestamp, 0xF);
+    m4a_psg_run(&engine->psg[1], timestamp, 0xF);
+    if (!engine->polyDebugInvert) {
+        m4a_psg_sample(&engine->psg[0], 0xF, left, right);
+        return;
     }
-    /* The oscillators produce +-2 * volume in the mixer's int8 units; the
-     * PSG bus is 16 of those per unit before the >> 2. */
-    *left = mixL * 16;
-    *right = mixR * 16;
+    int auditionMask = 0;
+    for (int ch = 0; ch < MAX_CGB_CHANNELS; ch++) {
+        if ((engine->cgbChannels[ch].status & CHN_ON) && engine->cgbChannels[ch].audition)
+            auditionMask |= 1 << ch;
+    }
+    int l = 0, r = 0, al = 0, ar = 0;
+    m4a_psg_sample(&engine->psg[1], 0xF, &l, &r);
+    if (auditionMask)
+        m4a_psg_sample(&engine->psg[0], auditionMask, &al, &ar);
+    *left = l + al;
+    *right = r + ar;
+}
+
+/* The PSG frame sequencer (512 Hz), for both instances. */
+static void psg_frame_cb(void *user, int64_t timestamp)
+{
+    M4AEngine *engine = (M4AEngine *)user;
+    m4a_psg_frame(&engine->psg[0], timestamp);
+    m4a_psg_frame(&engine->psg[1], timestamp);
 }
 
 /* Advance the whole machine to `until` cycles, running hardware events and
@@ -524,8 +570,8 @@ static void run_until(M4AEngine *engine, int64_t until)
             return;
         }
         m4a_gba_run(g, next);
-        if (engine->bootStep < BOOT_TABLE_LEN && sBootTable[engine->bootStep].cycle == next) {
-            boot_action(engine, sBootTable[engine->bootStep].action);
+        while (engine->bootStep < BOOT_TABLE_LEN && sBootTable[engine->bootStep].cycle == next) {
+            boot_action(engine, engine->bootStep);
             engine->bootStep++;
         }
         if (engine->nextVSync == next) {
@@ -544,6 +590,7 @@ void m4a_engine_boot(M4AEngine *engine, bool emitAudio)
     if (engine->booted)
         return;
     engine->gba.psgSample = psg_sample_cb;
+    engine->gba.psgFrame = psg_frame_cb;
     engine->gba.psgUser = engine;
     run_until(engine, BOOT_END_CYCLE);
     if (!emitAudio)
@@ -618,6 +665,8 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     pcm_rate_setup(engine);
     m4a_gba_init(&engine->gba, sampleRate, engine->pcmRing, engine->pcmRingSize,
                  engine->pcmSamplesPerVBlank);
+    m4a_psg_reset(&engine->psg[0]);
+    m4a_psg_reset(&engine->psg[1]);
     scheduler_reset(engine);
     m4a_reverb_init(&engine->reverb, (float)engine->pcmFreq, 0);
 }
@@ -794,7 +843,17 @@ static void preserve_stolen_cgb(M4AEngine *engine, const M4ACGBChannel *victim, 
 {
     /* One shadow slot per CGB channel type; a newer lost sound replaces an
      * older one, mirroring the mono nature of the hardware channel. */
-    engine->cgbChannels[MAX_CGB_CHANNELS + cgbIdx] = *victim;
+    M4ACGBChannel *shadow = &engine->cgbChannels[MAX_CGB_CHANNELS + cgbIdx];
+    *shadow = *victim;
+    /* The shadow PSG never saw this note: hand it the real PSG's envelope
+     * register and have the driver redo the start-frame writes. */
+    static const uint32_t nrx2[4] = { PSG_REG_NR12, PSG_REG_NR22, PSG_REG_NR32, PSG_REG_NR42 };
+    M4AGbaAudio *g = &engine->gba;
+    m4a_gba_catch_up(g, g->now);
+    m4a_psg_write8(&engine->psg[1], nrx2[cgbIdx],
+                   m4a_psg_read8(&engine->psg[0], nrx2[cgbIdx]), g->now);
+    shadow->currentWavePointer = NULL;
+    shadow->hwResync = true;
 }
 
 /*
@@ -1079,8 +1138,9 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
             ch->status = CHN_ENV_SUSTAIN;
             /* A legato continuation must not re-arm the hardware envelope
              * and sweep (MO_VOL on the next tick); the volume refresh that
-             * an LFO-delay restart may have run above would otherwise do so. */
-            ch->modify = 0;
+             * an LFO-delay restart may have run above would otherwise do so.
+             * The new frequency still has to reach NRx3/NRx4. */
+            ch->modify = 0x02;
         } else {
             m4a_cgb_channel_start(ch);
         }
@@ -1444,8 +1504,10 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
             uint8_t voiceType = track->currentVoice.type & VOICE_TYPE_CGB_MASK;
             if (voiceType == 1 || voiceType == 2) {
                 M4ACGBChannel *ch = find_track_square_channel(engine, trackIndex);
-                if (ch != NULL)
+                if (ch != NULL) {
                     ch->dutyCycle = (uint8_t)(uintptr_t)track->currentVoice.wavePointer & 0x03;
+                    ch->modify |= 0x04;
+                }
             }
         }
         break;
@@ -1563,8 +1625,27 @@ void m4a_engine_all_sound_off(M4AEngine *engine)
     for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
         engine->pcmChannels[i].status = 0;
     for (int i = 0; i < TOTAL_CGB_CHANNELS; i++)
-        engine->cgbChannels[i].status = 0;
+        if (engine->cgbChannels[i].status)
+            m4a_engine_kill_channel(engine, TOTAL_PCM_CHANNELS + i);
     m4a_engine_reset_portamento(engine);
+}
+
+void m4a_engine_kill_channel(M4AEngine *engine, int handle)
+{
+    if (handle < 0)
+        return;
+    if (handle < TOTAL_PCM_CHANNELS) {
+        engine->pcmChannels[handle].status = 0;
+        return;
+    }
+    int i = handle - TOTAL_PCM_CHANNELS;
+    if (i >= TOTAL_CGB_CHANNELS)
+        return;
+    M4ACGBChannel *ch = &engine->cgbChannels[i];
+    /* TrackStop: CgbOscOff before clearing a CGB channel's status. */
+    if (ch->status)
+        m4a_cgb_osc_off(ch, &engine->psg[i >= MAX_CGB_CHANNELS], &engine->gba);
+    ch->status = 0;
 }
 
 void m4a_engine_reset_portamento(M4AEngine *engine)
@@ -1596,8 +1677,10 @@ void m4a_engine_set_pwm_enabled(M4AEngine *engine, bool enabled)
             uint8_t voiceType = track->currentVoice.type & VOICE_TYPE_CGB_MASK;
             if (track->pwmSpeed != 0 && (voiceType == 1 || voiceType == 2)) {
                 M4ACGBChannel *ch = find_track_square_channel(engine, i);
-                if (ch != NULL)
+                if (ch != NULL) {
                     ch->dutyCycle = (uint8_t)(uintptr_t)track->currentVoice.wavePointer & 0x03;
+                    ch->modify |= 0x04;
+                }
             }
             track->pwmPattern = 0;
             track->pwmSpeed = 0;
@@ -1615,10 +1698,8 @@ void m4a_engine_set_poly_debug_invert(M4AEngine *engine, bool enabled)
         /* Kill the shadow pool: lost sounds only exist for the invert mode. */
         for (int i = MAX_PCM_CHANNELS; i < TOTAL_PCM_CHANNELS; i++)
             engine->pcmChannels[i].status = 0;
-        for (int i = MAX_CGB_CHANNELS; i < TOTAL_CGB_CHANNELS; i++) {
-            engine->cgbChannels[i].status = 0;
-            engine->cgbChannels[i].declickSamplesRemaining = 0;
-        }
+        for (int i = MAX_CGB_CHANNELS; i < TOTAL_CGB_CHANNELS; i++)
+            m4a_engine_kill_channel(engine, TOTAL_PCM_CHANNELS + i);
     }
 }
 
@@ -1788,6 +1869,7 @@ static void m4a_pwm_tick(M4AEngine *engine)
             step = 0;
         track->pwmStep = step;
         ch->dutyCycle = pattern->duty[step];
+        ch->modify |= 0x04;   /* the driver rewrites NRx1 (eventide's MO_DUTY) */
     }
 
     engine->pwmActiveFlag = anyActive;
@@ -1835,7 +1917,8 @@ void m4a_engine_tick(M4AEngine *engine)
                 if (ch->gateTime == 0)
                     ch->status |= CHN_STOP;
             }
-            m4a_cgb_channel_tick(ch, engine->c15);
+            m4a_cgb_channel_tick(ch, engine->c15, &engine->psg[i >= MAX_CGB_CHANNELS],
+                                 &engine->gba);
         }
     }
 
