@@ -744,7 +744,9 @@ static void print_usage(const char *prog)
         "  --pwm                       Opt-in: enable pulse-width modulation on CGB square channels, CC 0x17/0x19 (default: off)\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
-        "  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate; 0 means same as sample-rate (default: 13379)\n"
+        "  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates\n"
+        "                              5734 7884 10512 13379 15768 18157 21024 26758 31536 36314\n"
+        "                              40137 42048 (nearest is used; default: 13379)\n"
         "  --tail <seconds>            Silence after last event, no loop markers (default: 3.0)\n"
         "\n"
         "Loop options (when MIDI contains '[' / ']' text events):\n"
@@ -773,7 +775,7 @@ typedef struct {
     bool respectBaseMidiKey, portamento, pwm;
     int maxChannels;
     double sampleRate;
-    float pcmMixRate;
+    int pcmFreqMode;
     double tailSeconds, fadeoutSeconds, totalDurSeconds;
     int loopCount;
     const char *psgLogPath;      /* --psg-log: every PSG register write with its CPU cycle */
@@ -846,7 +848,7 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
     engine.respectBaseMidiKey = o->respectBaseMidiKey;
     m4a_engine_set_portamento_enabled(&engine, o->portamento);
     m4a_engine_set_pwm_enabled(&engine, o->pwm);
-    m4a_engine_set_pcm_freq_mode(&engine, m4a_pcm_freq_mode_from_hz(o->pcmMixRate));
+    m4a_engine_set_pcm_freq_mode(&engine, o->pcmFreqMode);
 
     M4ASequencer seq;
     m4a_sequencer_init(&seq, &engine);
@@ -1043,7 +1045,7 @@ int main(int argc, char *argv[])
     bool        pwm           = false;
     int         maxChannels   = 5;
     int         sampleRateHz  = 44100;
-    float       pcmMixRate    = 13379.0f; /* GBA-accurate DirectSound mix rate; 0 = host rate */
+    int         pcmFreqMode   = M4A_PCM_FREQ_MODE_DEFAULT; /* SOUND_MODE_FREQ_13379 */
     double      tailSeconds   = 3.0;
     int         loopCount     = 2;
     bool        extendedClocks = false; /* mid2agb -X: 48 clocks/beat */
@@ -1084,8 +1086,11 @@ int main(int argc, char *argv[])
             sampleRateHz = atoi(argv[++i]);
             if (sampleRateHz < 8000) sampleRateHz = 8000;
         } else if (strcmp(argv[i], "--pcm-mix-rate") == 0 && i + 1 < argc) {
-            pcmMixRate = (float)atof(argv[++i]);
-            if (pcmMixRate < 0.0f) pcmMixRate = 0.0f;
+            double hz = atof(argv[++i]);
+            pcmFreqMode = m4a_pcm_freq_mode_from_hz(hz);
+            if ((int)hz != m4a_pcm_freq_mode_hz(pcmFreqMode))
+                fprintf(stderr, "Note: --pcm-mix-rate %g is not an m4a sound-mode rate; using %d Hz\n",
+                        hz, m4a_pcm_freq_mode_hz(pcmFreqMode));
         } else if (strcmp(argv[i], "--psg-log") == 0 && i + 1 < argc) {
             psgLogPath = argv[++i];
         } else if (strcmp(argv[i], "--tail") == 0 && i + 1 < argc) {
@@ -1135,7 +1140,7 @@ int main(int argc, char *argv[])
             .projectRoot = projectRoot, .voicegroup = vgName, .songPath = songPath,
             .respectBaseMidiKey = respectBaseMidiKey,
             .portamento = portamento, .pwm = pwm, .maxChannels = maxChannels,
-            .sampleRate = sampleRate, .pcmMixRate = pcmMixRate,
+            .sampleRate = sampleRate, .pcmFreqMode = pcmFreqMode,
             .tailSeconds = tailSeconds, .fadeoutSeconds = fadeoutSeconds,
             .totalDurSeconds = totalDurSeconds, .loopCount = loopCount,
             .psgLogPath = psgLogPath,
@@ -1480,7 +1485,7 @@ oom:
     engine.respectBaseMidiKey = respectBaseMidiKey;
     m4a_engine_set_portamento_enabled(&engine, portamento);
     m4a_engine_set_pwm_enabled(&engine, pwm);
-    m4a_engine_set_pcm_freq_mode(&engine, m4a_pcm_freq_mode_from_hz(pcmMixRate));
+    m4a_engine_set_pcm_freq_mode(&engine, pcmFreqMode);
     /* Keep the boot's output so MIDI and compiled-song renders of the same
      * material line up with each other and with an emulator recording. */
     m4a_engine_boot(&engine, true);

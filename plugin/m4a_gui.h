@@ -23,8 +23,9 @@ typedef struct {
     uint8_t masterVolume;
     uint8_t songMasterVolume;
     uint8_t maxPcmChannels;
-    /* DirectSound PCM mix rate in Hz (0 = follow host rate; 13379 = GBA). */
-    float pcmMixRate;
+    /* DirectSound PCM mix rate: the sound-mode frequency index (1..12;
+     * 4 = 13379 Hz, the game's). */
+    uint8_t pcmFreqMode;
     /* Opt-in effect feature toggles (Options menu) */
     bool respectBaseMidiKey;
     bool portamentoEnabled;

@@ -35,7 +35,9 @@ Audio options:
   --reverb <0-127>            Reverb amount (default: 0)
   --polyphony <1-15>          Max simultaneous PCM channels (default: 5)
   --sample-rate <hz>          Sample rate in Hz (default: 44100)
-  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate; 0 means same as sample-rate (default: 13379)
+  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates
+                              5734 7884 10512 13379 15768 18157 21024 26758 31536 36314
+                              40137 42048 (nearest is used; default: 13379)
   --tail <seconds>            Silence after last event, no loop markers (default: 3.0)
 
 Opt-in effect features (off by default; extend the stock m4a engine):
@@ -156,7 +158,7 @@ The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings ca
 | `master_volume` | `12` | M4A master volume (0–15; 12 matches Pokemon Emerald's `m4aSoundInit`) |
 | `song_master_volume` | `127` | Song-level volume multiplier (0–127) |
 | `max_channels` | `5` | Max simultaneous PCM (DirectSound) channels (1–15) |
-| `pcm_mix_rate` | `13379` | DirectSound (PCM) mix rate in Hz; `13379` = GBA-accurate aliasing, `0` = follow host rate (clean) |
+| `pcm_mix_rate` | `13379` | DirectSound (PCM) mix rate in Hz: one of the m4a sound-mode rates (5734, 7884, 10512, 13379, 15768, 18157, 21024, 26758, 31536, 36314, 40137, 42048; the nearest is used). `13379` is what the Pokemon games set |
 | `respect_base_midi_key` | `0` | Opt-in: treat a PCM voice's key as the sample's base MIDI note so pressed notes play at the intended pitch |
 | `portamento` | `0` | Opt-in: enable the portamento glide effect (CC 5 = glide time in ticks) |
 | `pwm` | `0` | Opt-in: enable pulse-width modulation on CGB square channels (CC 0x17 / 0x19) |

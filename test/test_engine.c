@@ -221,6 +221,28 @@ static void test_engine_init(void)
     ASSERT_EQ(engine.songMasterVolume, MAX_SONG_VOLUME, "song master volume");
     ASSERT_EQ(engine.maxPcmChannels, 5, "max pcm channels");
 
+    /* The sound-mode frequency table (SampleFreqSet): twelve rates, the
+     * game's 13379 Hz at index 4; any Hz maps to the nearest one, 0 and
+     * out-of-range indices to the default. */
+    static const int hz[12] = { 5734, 7884, 10512, 13379, 15768, 18157,
+                                21024, 26758, 31536, 36314, 40137, 42048 };
+    int tableOk = 1;
+    for (int m = 1; m <= 12; m++)
+        if (m4a_pcm_freq_mode_hz(m) != hz[m - 1] || m4a_pcm_freq_mode_from_hz(hz[m - 1]) != m)
+            tableOk = 0;
+    ASSERT(tableOk, "pcm freq modes: SampleFreqSet's pcmFreq for every table entry");
+    ASSERT_EQ(m4a_pcm_freq_mode_from_hz(0), M4A_PCM_FREQ_MODE_DEFAULT, "pcm freq modes: 0 Hz is the default");
+    ASSERT_EQ(m4a_pcm_freq_mode_from_hz(44100), 12, "pcm freq modes: 44100 snaps to 42048");
+    ASSERT_EQ(m4a_pcm_freq_mode_from_hz(14000), 4, "pcm freq modes: 14000 snaps to 13379");
+    m4a_engine_set_pcm_freq_mode(&engine, 12);
+    ASSERT_EQ(engine.pcmSamplesPerVBlank, 704, "pcm freq modes: 42048 Hz mixes 704 samples per VBlank");
+    ASSERT_EQ(engine.pcmDmaPeriod, 2, "pcm freq modes: DMA period 1584 / 704");
+    ASSERT_EQ(engine.pcmFreq, 42048, "pcm freq modes: pcmFreq");
+    ASSERT_EQ(engine.pcmDivFreq, (16777216 / 42048 + 1) >> 1, "pcm freq modes: divFreq");
+    ASSERT_EQ(engine.gba.timerPeriodDen, 704, "pcm freq modes: timer reprogrammed");
+    m4a_engine_set_pcm_freq_mode(&engine, 99);
+    ASSERT_EQ(engine.pcmSamplesPerVBlank, 224, "pcm freq modes: out of range selects the default");
+
     /* Verify CGB channel types */
     ASSERT_EQ(engine.cgbChannels[0].type, 1, "cgb ch0 type");
     ASSERT_EQ(engine.cgbChannels[1].type, 2, "cgb ch1 type");

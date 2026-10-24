@@ -236,27 +236,20 @@ static void render_general_tab(M4AGuiState *gui)
     }
 
     {
-        /* DirectSound (PCM) mixing rate.  The m4a engine mixes PCM at a low-ish sample rate,
-         * so high notes alias audibly; higher rates progressively reduce that. */
-        static const char  *mixRateNames[]  = {
-            "13379 Hz (m4a's default)", "21024 Hz", "31536 Hz", "42048 Hz",
-            "Host rate (clean, no aliasing)"
-        };
-        static const float  mixRateValues[] = {
-            13379.0f, 21024.0f, 31536.0f, 42048.0f, 0.0f
-        };
-        const int mixRateCount = (int)(sizeof(mixRateValues) / sizeof(mixRateValues[0]));
-
-        int curIdx = -1;
-        for (int k = 0; k < mixRateCount; k++) {
-            if (gui->settings.pcmMixRate == mixRateValues[k]) { curIdx = k; break; }
-        }
-        const char *preview = (curIdx >= 0) ? mixRateNames[curIdx] : "Custom";
-        if (ImGui::BeginCombo("PCM Mix Rate", preview)) {
-            for (int k = 0; k < mixRateCount; k++) {
-                bool selected = (k == curIdx);
-                if (ImGui::Selectable(mixRateNames[k], selected)) {
-                    gui->settings.pcmMixRate = mixRateValues[k];
+        /* DirectSound (PCM) mixing rate: the m4a sound mode's frequency
+         * setting (SOUND_MODE_FREQ_xxxxx), one of the engine's twelve rates. */
+        char names[M4A_PCM_FREQ_MODE_MAX + 1][48];
+        for (int m = M4A_PCM_FREQ_MODE_MIN; m <= M4A_PCM_FREQ_MODE_MAX; m++)
+            snprintf(names[m], sizeof(names[m]), "%d Hz%s", m4a_pcm_freq_mode_hz(m),
+                     m == M4A_PCM_FREQ_MODE_DEFAULT ? " (m4a's default)" : "");
+        int cur = gui->settings.pcmFreqMode;
+        if (cur < M4A_PCM_FREQ_MODE_MIN || cur > M4A_PCM_FREQ_MODE_MAX)
+            cur = M4A_PCM_FREQ_MODE_DEFAULT;
+        if (ImGui::BeginCombo("PCM Mix Rate", names[cur])) {
+            for (int m = M4A_PCM_FREQ_MODE_MIN; m <= M4A_PCM_FREQ_MODE_MAX; m++) {
+                bool selected = (m == cur);
+                if (ImGui::Selectable(names[m], selected)) {
+                    gui->settings.pcmFreqMode = (uint8_t)m;
                     gui->settingsChanged = true;
                 }
                 if (selected)
@@ -265,9 +258,10 @@ static void render_general_tab(M4AGuiState *gui)
             ImGui::EndCombo();
         }
         ImGui::SetItemTooltip(
-            "Rate the DirectSound (PCM) channels are mixed at before upsampling.\n"
-            "The m4a engine uses 13379 Hz by default, so high notes have aliasing.\n"
-            "Higher rates sound better, but are less accurate compared to in-game.");
+            "Rate the DirectSound (PCM) channels are mixed at: the m4a sound mode's\n"
+            "frequency setting (SOUND_MODE_FREQ_xxxxx).  Pokemon games use 13379 Hz,\n"
+            "so high notes alias as in-game; a game that sets a higher rate sounds\n"
+            "cleaner, at a CPU cost it would pay too.");
     }
 }
 
@@ -882,7 +876,7 @@ M4AGuiState *m4a_gui_create(const clap_host_t *host, const M4AGuiSettings *initi
         memset(&gui->settings, 0, sizeof(gui->settings));
         gui->settings.masterVolume     = 12;
         gui->settings.songMasterVolume = 127;
-        gui->settings.pcmMixRate       = 13379.0f;
+        gui->settings.pcmFreqMode      = M4A_PCM_FREQ_MODE_DEFAULT;
     }
     sync_buffers(gui);
 
