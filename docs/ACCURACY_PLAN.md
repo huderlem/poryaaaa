@@ -260,11 +260,79 @@ documented gaps: hand-written-only XCMDs (xwave, xcmd_0D sample start
 offset) are consumed but not applied; memacc indices are masked to the
 16-byte area where the GBA reads out of bounds.
 
-### Next: engine milestone 2, the output stage
+### In progress: engine milestone 2, the output stage (branch `accuracy-harness`)
 
-The plan section above stands.  The sequencer's frame hook is where the
-cycle-based scheduler should call MPlayMain; the per-frame tick already
-runs the sequencer before the envelopes, as SoundMain does.
+Ordered so each step is independently verifiable and committed; the harness
+gates each.
+
+1. **Done (03f0b41)** `plugin/m4a_blip.{h,c}`: MIT reimplementation of
+   blip_buf's fast linear-delta path.  `test/test_blip.c`
+   (`poryaaaa_blip_tests`, built with `ACCURACY_MGBA_DIR`) checks it against
+   mgba's blip_buf: 49112 checks, 0 failures, bit-exact.
+2. **Done (ff805df)** `plugin/m4a_gba.{h,c}` + scheduler in `m4a_engine.c`:
+   cycle clock, timer-0 FIFO sample-and-hold, DMA ring, SOUNDBIAS stage,
+   boot replay, `m4a_engine_boot`.  Harness after this step: every PCM
+   micro-test at lag **0.0 ms**, level gap **0.0 dB**, null -36..-42 dB
+   (pcm_bass passes -40; pcm_hi -22.7 and pcm_reverb -10.4 are mixer-port
+   items); all songs lag 0.0, drift 0.0.  PSG tests unchanged (old
+   oscillators still attached, stepped on the DAC grid): noise7, psg_mix,
+   mus_weather_groudon read 1.2-1.4 dB worse than the sequencer baseline,
+   which step 3 is for.
+3. **Next**: PSG model ported from mgba `src/gb/audio.c` (GBA style) +
+   CgbSound register driver replacing the host-rate oscillators in
+   `m4a_channel.c`; run the harness.
+4. **Then**: remove the analog low-pass (engine flag, `--analog-filter`,
+   GUI checkbox, `analog_filter` config key, CLAP state byte kept for
+   back-compat reading).  Save `baselines/<date>_output-stage.json`,
+   update this section, independent reviews, fixes, re-run.
+
+Facts measured in mgba 0.10.5 with `test/accuracy/ref/mgba_probe.c` (a
+libmgba debugger probe; the plan's earlier assumptions were wrong on the
+first two):
+
+- **The DAC runs at 65536 Hz, not 32768.** Emerald's `SOUND_MODE_DA_BIT_8`
+  writes SOUNDBIAS_H = 0x40 (resolution 1): mgba samples every 256 cycles,
+  4 samples per 1024-cycle sample event, blip frames of 2048 cycles.
+- **Desktop mgba uses blip_buf's sinc kernel**, not the fast path: the
+  `#define blip_add_delta blip_add_delta_fast` in audio.c is `#ifdef __3DS__`
+  only.  The linear path was implemented as decided; the kernel difference
+  will bound PSG/PCM nulls somewhere around -20..-30 dB in the top octave.
+  Decide later whether an MIT sinc path is wanted (the bl_step table is
+  LGPL data; it would have to be regenerated from a windowed sinc).
+- mgba's GBA-style noise is **point-sampled** (`ch4.sample << 3`), not
+  coalesced; squares/wave/noise are unipolar 0..15 x 8 x (1 + NR50 volume),
+  >> 2 (SOUNDCNT_H volume 2), PCM is int8 << 2, then bias 0x200, clamp
+  0..0x3FF, x48 -> int16.
+- Reset: video starts at line 126; frame k >= 1 starts at
+  124773 + (k-1) x 280896 cycles.  m4aSoundInit: SOUNDCNT_X 0x8F @5720,
+  SOUNDCNT_H 0xA90E @5737, SOUNDBIAS_H 0x40 @5760, DMA on @15873, timer on
+  @39794 (line 159 of frame 0), MPlayExtender PSG writes @39875-39935
+  (NR52 0x8F, NR50/51 0, NR12/22/42 = 8, NR14/24/44 = 0x80, NR30 = 0,
+  NR50 = 0x77), DMA off @41238, timer off @47452, DMA on @47893, timer on
+  @320682 (line 159 of frame 1).  IME is set at 323299, after frame 1's
+  VBlank, so the first interrupts the ROM catches are frame 2's: VSync
+  handler entry line 150 + 164 (DMA restart ~+250), SoundMain entry line
+  160 + 197.  The test starts after that SoundMain; the song's first
+  MPlayMain is frame 3's VBlank.  The FIFO carries 2 stale words + 3
+  internal bytes across the second init pass (SOUNDCNT_H is written once),
+  so ring byte k plays at timer tick 12 + k after the final timer enable.
+- CgbSound entry: VBlank line start + 1390 in a steady frame, + ~4070 on
+  the song-start frame (MPlayMain's note setup); register writes follow
+  within ~200-900 cycles, channels 1..4 in order.  The engine uses one
+  constant (+1740) for all writes; the start-frame extra is not modeled.
+- Register write sequences (byte writes; mgba handles NR11-14/21-24/31-34/
+  41-44 bytes individually, NR10/NR30/NR50/NR51/NR52 through the merged
+  16-bit path which ignores writes while NR52 is off): square start NR10,
+  NRx1 = duty<<6|length, then MO_PIT NRx3/NRx4 (no trigger: n4 = 0), then
+  MO_VOL NR51, NRx2, NRx4|0x80 (plus a second identical NR14 write when
+  NR10 bit 3 is clear).  Wave: NR30 = 0x40, WAVE_RAM x4, NR30 = 0, NR31,
+  NR33, NR34 = 0x80|hi (n4 = 0x80 triggers at MO_PIT), NR51, NR32, NR30 =
+  0x80, NR34 = n4, then n4 &= 0x7F so later frames never retrigger.  Noise:
+  NR41, NR43 = period<<3, NR43 = (old & 8)|freq, NR44 = 0, NR51, NR42,
+  NR44 = 0x80.  CgbOscOff: NRx2 = 8, NRx4 = 0x80 (wave: NR30 = 0).
+- m4aSoundVSync's DMA restart is a disable/enable pair: the START_NOW
+  write happens while the DMA is already enabled, so mgba does not
+  transfer; only the source address reloads.  FIFO contents are kept.
 
 ### Reference: milestone 1 decisions as agreed
 
