@@ -49,6 +49,7 @@ void m4a_gba_set_pcm_rate(M4AGbaAudio *g, int pcmSamplesPerVBlank, const int8_t 
     g->ring = ring;
     g->ringSize = ringSize;
     g->fifo[0].srcPos = g->fifo[1].srcPos = 0;
+    g->fifoDmaCycle = -1;      /* the refill cadence restarts with the new timer period */
 }
 
 void m4a_gba_write_soundbias_resolution(M4AGbaAudio *g, int resolution)

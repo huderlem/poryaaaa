@@ -315,7 +315,7 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 			if (!strcmp(name, "CgbModVol"))        /* r0 = CgbChannel: CgbPan's and the clamp's inputs */
 				fprintf(gOut, " rv=%02X lv=%02X sus=%02X", rd8(cpu->gprs[0] + 2), rd8(cpu->gprs[0] + 3), rd8(cpu->gprs[0] + 6));
 			if (!strncmp(name, "CgbSound_", 9))   /* r4 = CgbChannel, r6 = ch: the state its branches test */
-				fprintf(gOut, " ch%d st=%02X mod=%02X envc=%02X envv=%02X goal=%02X iec=%02X n4=%02X swp=%02X", cpu->gprs[6], rd8(cpu->gprs[4]), rd8(cpu->gprs[4] + 0x1D), rd8(cpu->gprs[4] + 0x0B), rd8(cpu->gprs[4] + 0x09), rd8(cpu->gprs[4] + 0x0A), rd8(cpu->gprs[4] + 0x0D), rd8(cpu->gprs[4] + 0x21), rd8(cpu->gprs[4] + 0x1F));
+				fprintf(gOut, " ch%d st=%02X mod=%02X envc=%02X envv=%02X goal=%02X iec=%02X n4=%02X swp=%02X", cpu->gprs[6], rd8(cpu->gprs[4]), rd8(cpu->gprs[4] + 0x1D), rd8(cpu->gprs[4] + 0x0B), rd8(cpu->gprs[4] + 0x09), rd8(cpu->gprs[4] + 0x0A), rd8(cpu->gprs[4] + 0x0D), rd8(cpu->gprs[4] + 0x1A), rd8(cpu->gprs[4] + 0x1F));
 			if (!strcmp(name, "RealClearChain"))   /* r0 = channel: its track / prev / next decide the unlink path */
 				fprintf(gOut, " trk=%08X prev=%08X next=%08X", rd32(cpu->gprs[0] + 0x2C), rd32(cpu->gprs[0] + 0x30), rd32(cpu->gprs[0] + 0x34));
 			else if (!strcmp(name, "_081DD938"))   /* r5 = track: wait and the LFO fields the tick tests */

@@ -129,7 +129,7 @@ void m4a_gba_dma_disable(M4AGbaAudio *g);
  * between `from` (exclusive) and `to` (inclusive): both FIFOs are refilled
  * with 4 words each at the same timer overflow every 16 samples, 18 cycles
  * measured in mgba (test/accuracy/ref/mgba_probe.c: eight 2-cycle FIFO
- * writes at frame cycle 15092..15106, every 20064 cycles).  The timing
+ * writes at frame cycle 15091..15105, every 20064 cycles).  The timing
  * model adds it to MPlayMain's and CgbSound's cursors. */
 int64_t m4a_gba_fifo_dma_stall(const M4AGbaAudio *g, int64_t from, int64_t to);
 #define M4A_CYC_FIFO_DMA_STALL 18

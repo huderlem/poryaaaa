@@ -648,8 +648,9 @@ keysh 89, voice 184, vol 89, pan 91, bend 91, bendr 89, lfos 69, lfodl
 goto 110 (2 + 108), patt 30 + goto 140, pend 18 + 22 = 40 (12 + 22 at
 pattern level 0, where the `beq` skips the pop).  Not executed by the
 corpus in 5 s (*est.* 90, the median of the measured one-byte handlers):
-tune, rept, memacc, prio, endtie, fine, port, the other xcmd
-sub-commands.  ply_note exit `_081DDCEA` -> `_081DD938` 30.
+tune, rept, memacc, prio, endtie, fine, port.  The xcmd sub-commands
+other than xiecv / xiecl are charged the measured 110 of those two
+(*est.*).  ply_note exit `_081DDCEA` -> `_081DD938` 30.
 
 **ply_note.**  Entry to `_081DDB46`: 78 with no data bytes (running
 key/velocity), 97 with a key byte, 114 with key and velocity, *est.* 129
@@ -760,7 +761,7 @@ cycles between consecutive breakpoints / writes:
   wave NR32 -> NR30 = 0x80 16 -> NR34 6 -> channel_complete 18 (NR32 ->
   channel_complete 20 without the retrigger); NRx4 -> channel_complete 24
   (square 1: the sweep-direction test, bit set), 12 (square 2 / noise);
-  square 1 with NR10 bit 3 clear writes NR14 again (*est.* 10, then 18).
+  square 1 with NR10 bit 3 clear writes NR14 again (*est.* 14, then 6: the 24 path without its taken branch).
 - oscillator_off -> CgbOscOff 14; CgbOscOff -> NR12 37 (-> NR14 14), NR22
   37 (-> NR24 6), NR30 51, NR42 45 (-> NR44 6); -> channel_complete 22;
   channel_complete -> next 4 -> next loop head 16.
@@ -772,7 +773,7 @@ cycles between consecutive breakpoints / writes:
 
 **The FIFO refill DMA.**  The two sound FIFOs are refilled by DMA 1 / DMA 2
 with four words each at the same timer-0 overflow, once every 16 samples
-= 20064 cycles; the eight FIFO writes sit at frame cycle 15092..15106
+= 20064 cycles; the eight FIFO writes sit at frame cycle 15091..15105
 (relative to VBlank line 160; the previous refill is at -4973, the next at
 35155) and stall the CPU for **18 cycles**: every segment of MPlayMain or
 CgbSound that spans 15091 measured 18 long (ply_vol 58, keysh 107, xiecv
@@ -1235,6 +1236,59 @@ scheduler lateness of the PCM mix (1c, -50 dB floor), the DMA stall's
 instruction-boundary alignment (mgba's first FIFO write varies 15091..
 15096 with the instruction in flight; the model charges at 15091), and
 the one-cycle DAC rounding tune_psg shows on a pitch update.
+
+**Code review of the timing model step 3 (2026-10-24).**  Two
+independent reviews (probe + cost model against m4a_1.s / m4a.c and the
+probe frames; sequencer charging against m4a_1.s and the recorded
+numbers), every claim applied alone and run through the unit tests, the
+write-cycle diff of the 14 PSG micro-tests and the six probed songs, and
+the harness against the timing-3 baseline.  None moved a write or a test:
+every adopted claim was harness-neutral (38/38, every -inf kept, all six
+songs at 0 cycles on every write), none was rejected by measurement.
+Adopted, source-verified: the FIFO stall counted on CgbSound's entry ->
+loop-head segment too (R2#21); the apply pass charging
+`cgb_freq_key_cost` after TrkVolPitSet, on the new keyM (R2#12); LFOS 0
+charged the 109 of MOD 0, its clear_modM path (R2#3; unit test
+`test_sequencer_cycles_lfos_zero`); the LFO step's rising half computed
+on the untruncated `lfoSpeedC + lfoSpeed` sum, as `_081DD95A`'s `subs`
+does, in both the sequencer and the engine's own LFO (R2#7; unit test
+`test_sequencer_lfo_untruncated_sum`, which fails on the truncated sum
+at the fourth step of LFOS 0x50); an attack step that reaches its goal
+with decay 0 charged once, `CGB_CYC_STEP_ATTACK_SUSTAIN` 229 (*est.*
+219 + 10) instead of attack->decay plus decay->sustain (R1#24 / R2#19;
+unit test in `test_cgb_driver_square`, NR51 at CgbSound entry + 574);
+with sustain 0 as well, `STEP_ATTACK_OFF` 221 / `STEP_ATTACK_ECHO` 247
+(*est.*); a start frame with attack, decay and sustain all 0 keeping its
+start-block cost (`pendStart + START_SUSTAIN`, *est.*) before the
+pseudo-echo decision (R1#23); noise keys at or below 20 on their own
+*est.* constant, 90 (R1#19); square 1's second NR14 write *est.* 14 then
+6 (the measured 24 path less its taken branch; R1#26); ply_fine's loop
+charged per chained channel, *est.* 14 + RealClearChain's measured
+`WALK_UNLINK_*` cost, newest first (R1#16); a note the GBA rejected
+charged its rejection only when the polyphony-debug invert mode plays it
+on a shadow channel (R2#22, non-stock; unit test
+`test_sequencer_cycles_poly_invert`); TrackStop killing only the channels
+still chained to the track, as its `track->chan` walk does (R2#23; unit
+test `test_sequencer_track_stop_chain`; no stock path can observe the
+difference, since every unchaining either frees the channel or clears
+the track's EXIST flag first).  Tooling and plumbing: the probe's `n4`
+read from CgbChannel + 0x1A, not the frequency's high byte at + 0x21
+(R1#1); the FIFO writes sit at frame cycle 15091..15105, as the logs
+say, not 15092.. (R1#29); cmd_diff.py ignores the handlers' local labels
+(`ply_fine_loop` ...) that the nm listing turns into breakpoints (R1#5);
+`m4a_gba_set_pcm_rate` restarts the refill cadence (`fifoDmaCycle` = -1,
+R2#27); poryaaaa_render closes its --seq-log / --psg-log files (R2#32).
+Not acted on (unmeasured paths the corpus never takes, kept at their
+*est.* values and listed here so the next review does not re-raise them):
+the sweep test's pan-bit branch and the RHY path on CGB drum voices
+(R1#18a / 17a, *est.* +-4); TrkVolPitSet's y clamp (R1#18b); CgbModVol's
+clamp branches (R1#7, +-2); the measured -2 inNote asymmetry of TrkVolPitSet
+(R1#18d, left as measured); the frame where every track has finished
+(R1#14); the key > 130 clamp in MidiKeyToCgbFreq (R1#15); the `frameCount`
+comment and the modulo in the FIFO stall test (R2#26, R2#31); the plan's
+"other xcmd sub-commands at 90" wording, corrected above to the 110 the
+code charges (R2#2); ply_endtie's walk over more than one chained channel
+(R1#16, measured 95 / 89 with one).
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

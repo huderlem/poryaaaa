@@ -168,12 +168,14 @@ static void track_stop(M4ASequencer *s, int i)
     M4AEngine *e = s->engine;
     if (!(s->tracks[i].flags & MPT_FLG_EXIST))
         return;
+    /* TrackStop walks track->chan: only the channels still chained to the
+     * track are killed.  A channel ply_fine already unchained (its release
+     * still running) keeps going, as on the GBA. */
     for (int h = 0; h < CHAN_COUNT; h++) {
-        if (s->chainOwner[h] == i + 1)
-            s->chainOwner[h] = 0;            /* track->chan = 0, channel->track = 0 */
-        if (!chan_is_real(h) || chan_track(e, h) != i)
+        if (s->chainOwner[h] != i + 1)
             continue;
-        if (*chan_status(e, h))
+        s->chainOwner[h] = 0;                /* track->chan = 0, channel->track = 0 */
+        if (chan_is_real(h) && *chan_status(e, h))
             m4a_engine_kill_channel(e, h);   /* CgbOscOff for CGB channels */
     }
 }
@@ -236,9 +238,15 @@ static void clear_mod_m(M4ASequencer *s, int i)
 static void ply_fine(M4ASequencer *s, int i)
 {
     M4AEngine *e = s->engine;
+    /* RealClearChain on every chained channel, newest first: each unlink
+     * sees prev == 0 (the one before it was just removed) and next set
+     * except for the last. */
+    int chain[CHAN_COUNT];
+    int n = chain_list(s, i, chain);
+    for (int k = 0; k < n; k++)
+        cyc(s, M4A_CYC_FINE_CHAN + unlink_cost(s, chain[k], M4A_CYC_WALK_UNLINK_00, M4A_CYC_WALK_UNLINK_01,
+                                               M4A_CYC_WALK_UNLINK_10, M4A_CYC_WALK_UNLINK_11));
     for (int h = 0; h < CHAN_COUNT; h++) {
-        if (s->chainOwner[h] == i + 1)
-            s->chainOwner[h] = 0;            /* RealClearChain on every chained channel */
         if (!chan_is_real(h) || chan_track(e, h) != i)
             continue;
         uint8_t *st = chan_status(e, h);
@@ -514,7 +522,7 @@ static int cgb_freq_key_cost(const M4ASequencer *s, int i, int key, bool noise)
     if (k < 0)
         k = 0;
     if (noise)
-        return (k <= 20 || k > 80) ? M4A_CYC_NOISE_FREQ_CLAMP : 0;
+        return k <= 20 ? M4A_CYC_NOISE_FREQ_LOW_KEY : k > 80 ? M4A_CYC_NOISE_FREQ_CLAMP : 0;
     return k <= 35 ? M4A_CYC_CGB_FREQ_LOW_KEY : 0;
 }
 
@@ -665,9 +673,13 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
     int h = m4a_engine_note_on(e, i, t->key, t->velocity);
     if (h < 0)
         return;
-    /* (expect disagreeing with h would be an allocation bug in one of the
-     * two walks; the cost follows the GBA's walk above either way.) */
-    (void)expect;
+    /* A note the GBA rejected (expect < 0) was charged its exit above; the
+     * polyphony-debug invert mode may still have played it on a shadow
+     * channel, which the GBA's accounting never sees.  (expect >= 0 with a
+     * different h would be an allocation bug in one of the two walks; the
+     * cost follows the GBA's walk above either way.) */
+    if (expect < 0)
+        return;
 
     /* ClearChain(channel) and the prepend to this track's chain. */
     cyc(s, M4A_CYC_NOTE_TAKE);
@@ -726,7 +738,7 @@ static int cmd_cycles(const M4ASequencer *s, int i, uint8_t cmd)
     case 0xBF: return 91;    /* pan */
     case 0xC0: return 91;    /* bend */
     case 0xC1: return 89;    /* bendr */
-    case 0xC2: return 69;    /* lfos (value 0 adds clear_modM, below) */
+    case 0xC2: return rd8(s, t->cmdPtr) != 0 ? 69 : 109;   /* lfos; value 0 branches to clear_modM like mod 0 (est.: the same 51 + 58) */
     case 0xC3: return 81;    /* lfodl */
     case 0xC4: return rd8(s, t->cmdPtr) != 0 ? 69 : 109;   /* mod; 51 + clear_modM 58 for 0 */
     case 0xC5: return rd8(s, t->cmdPtr) != et->modT ? 95 : 91;   /* modt */
@@ -804,13 +816,17 @@ static void lfo_step(M4ASequencer *s, int i)
         return;
     }
     cyc(s, M4A_CYC_LFO_STEP);
-    et->lfoSpeedC = (uint8_t)(et->lfoSpeedC + et->lfoSpeed);
+    /* `adds r0, r1; strb r0, lfoSpeedC; adds r1, r0, 0`: the stored
+     * accumulator is the low byte, but the rising half computes 0x80 - the
+     * untruncated sum (up to 510), which differs once lfoSpeed >= 0x41. */
+    int32_t sum = (int32_t)et->lfoSpeedC + et->lfoSpeed;
+    et->lfoSpeedC = (uint8_t)sum;
     int32_t r;
     if ((int8_t)(et->lfoSpeedC - 0x40) < 0) {
         r = (int8_t)et->lfoSpeedC;
         cyc(s, M4A_CYC_LFO_NEG);
     } else {
-        r = 0x80 - et->lfoSpeedC;
+        r = 0x80 - sum;
         cyc(s, M4A_CYC_LFO_POS);
     }
     r = (et->mod * r) >> 6;
@@ -916,6 +932,9 @@ static void track_apply(M4ASequencer *s, int i)
     bool pit = (t->flags & MPT_FLG_PITCHG) != 0;
 
     cyc(s, M4A_CYC_APPLY_FLAGGED + M4A_CYC_APPLY_TVPS + tvps_cost(s, i, t->flags, false));
+    /* TrkVolPitSet runs before the channel loop, so the key tests below
+     * see the new keyM; the engine's apply does the same work. */
+    m4a_engine_track_apply(e, i, vol, pit);
     int chain[CHAN_COUNT];
     int n = chain_list(s, i, chain);
     if (n == 0) {
@@ -941,7 +960,6 @@ static void track_apply(M4ASequencer *s, int i)
         }
     }
     cyc(s, M4A_CYC_APPLY_TRACK_END);
-    m4a_engine_track_apply(e, i, vol, pit);
     t->flags &= 0xF0;
 }
 
@@ -1057,7 +1075,6 @@ void m4a_sequencer_start(M4ASequencer *s, const M4ASong *song)
     s->noteCount = 0;
     s->seqCounter = 0;
     memset(s->chanSeq, 0, sizeof(s->chanSeq));
-    memset(s->chainOwner, 0, sizeof(s->chainOwner));
 
     int i = 0;
     for (; i < s->trackCount; i++) {

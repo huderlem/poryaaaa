@@ -567,6 +567,7 @@ struct M4AEngine {
 #define M4A_CYC_CMD_TABLE          50    /* _081DD8F6 -> _081DD90C 10 -> the ply_* handler 40 */
 #define M4A_CYC_CMD_WAIT           46    /* a W## byte: _081DD8F6 -> _081DD90C 10 -> _081DD92E 10 -> _081DD938 26 */
 #define M4A_CYC_CMD_DEFAULT        90    /* an unmeasured handler to _081DD938 (est.: the one-byte handlers' median) */
+#define M4A_CYC_FINE_CHAN          14    /* ply_fine's loop body per chained channel, without RealClearChain (est.: ldrb/tst/orrs/strb, ldr/cmp/bne taken); RealClearChain is the M4A_CYC_WALK_UNLINK_* cost */
 /* ply_note: entry, voice, channel, setup (handler entry to _081DD938). */
 #define M4A_CYC_NOTE_ENTRY         78    /* ply_note -> _081DDB46, no data bytes ... */
 #define M4A_CYC_NOTE_KEY_BYTE      19    /* ... + a key byte */
@@ -620,7 +621,8 @@ struct M4AEngine {
 #define M4A_CYC_NOTE_CGB_FREQ      248   /* _081DDCA0 -> _081DDCBC 28, MidiKeyToCgbFreq 30 + 190 */
 #define M4A_CYC_NOTE_CGB_SWEEP     4     /* ... + a real sweep value (pan bit clear, time bits set): the taken bne */
 #define M4A_CYC_CGB_FREQ_LOW_KEY   -10   /* MidiKeyToCgbFreq with key <= 35 (the key = 0 branch): 180 instead of 190 */
-#define M4A_CYC_NOISE_FREQ_CLAMP   -4    /* ... noise with key > 80 (clamped to 59): 94 instead of 98; key <= 20 est. the same */
+#define M4A_CYC_NOISE_FREQ_CLAMP   -4    /* ... noise with key > 80 (clamped to 59): 94 instead of 98 */
+#define M4A_CYC_NOISE_FREQ_LOW_KEY -8    /* ... noise with key <= 20 (the key = 0 branch): est. 90 (one taken branch and the sub/clamp compare fewer) */
 #define M4A_CYC_NOTE_NOISE_FREQ    156   /* ... noise: 28 + 30 + 98 */
 #define M4A_CYC_NOTE_CGB_ROM_VOICE 16    /* ... length/sweep from a ROM sub-voice (est.) */
 #define M4A_CYC_NOTE_PCM_FREQ      267   /* _081DDCA0 -> _081DDCCE 12, MidiKeyToFreq 20 + 235 */

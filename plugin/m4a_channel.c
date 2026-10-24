@@ -275,6 +275,12 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
 #define CGB_CYC_STEP_OFF           165   /* release ended, no echo -> oscillator_off */
 #define CGB_CYC_STEP_DECAY_OFF     211   /* decay reached a sustain of 0, no echo -> oscillator_off */
 #define CGB_CYC_STEP_DECAY_ECHO    237   /* ... with an echo -> envelope_complete (est.: 211 + the 26 of 191 - 165) */
+/* attack reached its goal with decay 0: envelope_decay_start falls through
+ * to envelope_sustain_start in one pass (est.: the decay -> sustain costs
+ * + 10 for the attack branch's goal test and the decay test) */
+#define CGB_CYC_STEP_ATTACK_SUSTAIN 229  /* ... sustain != 0 -> envelope_sustain */
+#define CGB_CYC_STEP_ATTACK_OFF    221   /* ... sustain 0, no echo -> oscillator_off */
+#define CGB_CYC_STEP_ATTACK_ECHO   247   /* ... sustain 0, echo -> envelope_complete */
 #define CGB_CYC_STEP_SKIP          12    /* envelopeCounter != 0: step -> envelope_step_complete */
 /* envelope_step_complete -> envelope_complete, or back to the step (prevC15 == 0) */
 #define CGB_CYC_STEPDONE_ENVDONE   18
@@ -299,8 +305,8 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
 #define CGB_CYC_NR32_DONE          20
 #define CGB_CYC_NR34_DONE_VOL      18    /* after the retrigger: same as the pitch block's NR34 */
 #define CGB_CYC_NRX4_DONE_SQ1      24    /* square 1: the sweep-direction test, bit set */
-#define CGB_CYC_NR14_NR14          10    /* est.: square 1 with the sweep direction bit clear writes NR14 again */
-#define CGB_CYC_NR14_DONE          18    /* est. */
+#define CGB_CYC_NR14_NR14          14    /* est.: square 1 with the sweep direction bit clear writes NR14 again (the 24 path without its taken branch, 20, split 14 + 6) */
+#define CGB_CYC_NR14_DONE          6     /* est. */
 #define CGB_CYC_NRX4_DONE_OTHER    12
 /* oscillator_off -> CgbOscOff -> its writes -> channel_complete */
 #define CGB_CYC_OSCOFF_CALL        14
@@ -599,7 +605,8 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
     int envelopeVolume, sustainGoal;
     int pan = 0;                 /* CgbPan's cost on the last CgbModVol */
     int pendStart = 0;           /* start block: last write -> envelope_step_complete */
-    int echoFrom = 0;            /* pseudo-echo start reached from: 0 nostart, 1 release end, 2 decay end */
+    int echoFrom = 0;            /* pseudo-echo start reached from: 0 nostart, 1 release end, 2 decay end, 3 attack end (decay 0) */
+    int fromAttack = 0;          /* envelope_sustain_start reached from the attack step with decay 0 */
 
     /* A sound moved to the polyphony-debug shadow pool mid-note: give its
      * PSG the start-frame registers it never saw, then re-apply pitch and
@@ -689,11 +696,13 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
                         ch->modify |= MO_VOL;
                         if (chn != 3)
                             envelopeStepTimeAndDir = 0 | 0x08;
-                        cgb_adv(&io, echoFrom == 2 ? CGB_CYC_STEP_DECAY_ECHO + pan
+                        cgb_adv(&io, echoFrom == 3 ? CGB_CYC_STEP_ATTACK_ECHO + pan
+                                   : echoFrom == 2 ? CGB_CYC_STEP_DECAY_ECHO + pan
                                    : echoFrom == 1 ? CGB_CYC_STEP_ECHO + pan : CGB_CYC_NOSTART_ECHO);
                         goto envelope_complete;
                     } else {
-                        cgb_adv(&io, echoFrom == 2 ? CGB_CYC_STEP_DECAY_OFF + pan
+                        cgb_adv(&io, echoFrom == 3 ? CGB_CYC_STEP_ATTACK_OFF + pan
+                                   : echoFrom == 2 ? CGB_CYC_STEP_DECAY_OFF + pan
                                    : echoFrom == 1 ? CGB_CYC_STEP_OFF + pan : CGB_CYC_NOSTART_OFF);
                         goto oscillator_off;
                     }
@@ -714,7 +723,16 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
                 envelope_sustain_start:
                     if (ch->sustain == 0) {
                         ch->status &= ~CHN_ENV_MASK;
-                        if (echoFrom == 1)
+                        if (pendStart) {
+                            /* start frame with attack 0, decay 0, sustain 0:
+                             * the start block's tail, then the pseudo-echo
+                             * decision (est.: the sustain != 0 start cost) */
+                            cgb_adv(&io, pendStart + CGB_CYC_START_SUSTAIN);
+                            pendStart = 0;
+                        }
+                        if (fromAttack)
+                            echoFrom = 3;
+                        else if (echoFrom == 1)
                             echoFrom = 2;
                         goto envelope_pseudoecho_start;
                     } else {
@@ -724,6 +742,8 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
                             envelopeStepTimeAndDir = 0 | 0x08;
                         if (pendStart)
                             cgb_adv(&io, pendStart + CGB_CYC_START_SUSTAIN);
+                        else if (fromAttack)
+                            cgb_adv(&io, CGB_CYC_STEP_ATTACK_SUSTAIN + pan);
                         else
                             cgb_adv(&io, (chn == 3 ? CGB_CYC_STEP_DECAY_SUSTAIN_W : CGB_CYC_STEP_DECAY_SUSTAIN) + pan);
                         pendStart = 0;
@@ -751,7 +771,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
                         pendStart = 0;
                     } else {
                         if (!pendStart)
-                            cgb_adv(&io, CGB_CYC_STEP_ATTACK_DECAY + pan);   /* est.: the sustain start follows */
+                            fromAttack = 1;   /* one charge at envelope_sustain_start */
                         goto envelope_sustain_start;
                     }
                 } else {

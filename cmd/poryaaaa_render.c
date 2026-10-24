@@ -895,6 +895,8 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
         if (total + n > endAt) n = endAt - total;
         if (grow_buffers(&l, &r, &cap, total + n, limit) != 0) {
             fprintf(stderr, "Out of memory allocating audio buffers\n");
+            if (seqLog) fclose(seqLog);
+            if (sPsgLog.f) { fclose(sPsgLog.f); sPsgLog.f = NULL; }
             m4a_sequencer_detach(&seq);
             m4a_engine_destroy(&engine);
             voicegroup_free(vg);
@@ -931,6 +933,12 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
         }
     }
 
+    if (seqLog)
+        fclose(seqLog);
+    if (sPsgLog.f) {
+        fclose(sPsgLog.f);
+        sPsgLog.f = NULL;
+    }
     m4a_sequencer_detach(&seq);
     m4a_engine_destroy(&engine);
     voicegroup_free(vg);

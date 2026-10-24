@@ -1655,6 +1655,9 @@ static void test_cgb_driver_square(void)
     voices[2].key = 60;
     voices[2].wavePointer = (uint32_t *)(uintptr_t)1;
     voices[2].sustain = 15;
+    /* voice 3: sq2 with attack 1, decay 0: the attack's goal frame falls through to sustain */
+    voices[3] = voices[2];
+    voices[3].attack = 1;
 
     M4AEngine engine;
     float outL[1024], outR[1024];
@@ -1810,6 +1813,42 @@ static void test_cgb_driver_square(void)
     m4a_engine_all_sound_off(&engine);
     EXPECT_LOG(&log, "driver: all-sound-off -> CgbOscOff(2)", PSG_REG_NR22, 0x08, PSG_REG_NR24, 0x80);
     ASSERT_EQ(sq2->status, 0, "driver: channel freed by all-sound-off");
+
+    /* --- square 2, attack 1 / decay 0: the goal frame is one envelope pass
+     * (attack step -> envelope_decay_start -> envelope_sustain_start ->
+     * envelope_sustain), charged once, not as attack->decay plus
+     * decay->sustain. --- */
+    m4a_engine_program_change(&engine, 1, 3);
+    m4a_engine_note_on(&engine, 1, 60, 127);
+    advance_frames(&engine, 1, outL, outR);
+    ASSERT_EQ(sq2->status, CHN_ENV_ATTACK, "driver: attack 1 starts in the attack phase");
+    frames = 0;
+    while (sq2->status == CHN_ENV_ATTACK && frames < 40) {
+        soundMain = engine.nextSoundMain;
+        log.n = 0;
+        advance_frames(&engine, 1, outL, outR);
+        frames++;
+    }
+    ASSERT_EQ(sq2->status, CHN_ENV_SUSTAIN, "driver: attack 1 / decay 0 reaches sustain in the goal frame");
+    ASSERT_EQ(sq2->envelopeVolume, sq2->sustainGoal, "driver: volume = sustainGoal");
+    EXPECT_LOG(&log, "driver: the goal frame writes NR51, NR22 = sustain | inc, NR24 trigger",
+               PSG_REG_NR51, (uint8_t)((nr51Before & ~0x22u) | (0x22 & sq2->pan)),
+               PSG_REG_NR22, (uint32_t)(0x08 | (sq2->envelopeVolume << 4)),
+               PSG_REG_NR24, 0x80 | ((sq2->frequency >> 8) & 0x07));
+    /* channel 1 inactive 44, loop 26, switch 61, no-start 30 + 38, step ->
+     * CgbModVol 18 + 10, attack -> sustain 229 (centre pan), envelope_complete
+     * 18, -> volume block 26, NR51 21; the start frame's SoundMain is one
+     * track's MPlayMain before CgbSound as in the first note. */
+    {
+        int64_t entry3 = log.when[0] - (53 + 44 + 26 + 61 + 30 + 38 + 18 + 10 + 229 + 18 + 26 + 21);
+        ASSERT_EQ((entry3 - soundMain) % GBA_CYCLES_PER_FRAME,
+                  (int64_t)(M4A_CYC_CGB_ENTRY_BASE + M4A_CYC_PER_TRACK - M4A_CYC_SOUNDMAIN_ENTRY),
+                  "driver: attack->sustain goal frame: NR51 at CgbSound entry + 574 (one pass, 229)");
+        ASSERT_EQ(log.when[1] - log.when[0], 28, "driver: NR22 28 after NR51");
+        ASSERT_EQ(log.when[2] - log.when[1], 10, "driver: NR24 10 after NR22");
+    }
+    log.n = 0;
+    m4a_engine_all_sound_off(&engine);
 
     m4a_engine_destroy(&engine);
 }
@@ -3541,6 +3580,192 @@ static void test_sequencer_cycles(void)
     m4a_song_free(song);
 }
 
+/* MPlayMain's LFO (m4a_1.s _081DD95A): the accumulator is stored as a
+ * byte, but the rising half computes 0x80 - the untruncated sum.  With
+ * LFOS 0x50 and MOD 1 the fourth step sums to 0x140: the GBA gets modM =
+ * (0x80 - 0x140) >> 6 = -3, a byte-truncated port would get (0x80 -
+ * 0x40) >> 6 = 1. */
+static void test_sequencer_lfo_untruncated_sum(void)
+{
+    printf("Testing sequencer LFO: the rising half uses the untruncated accumulator...\n");
+    ToneData voices[128];
+    seq_test_voices(voices);
+    M4ASong *song = seq_song(
+        "\t.byte\tLFOS , 0x50\n"
+        "\t.byte\tMOD , 1\n"
+        "\t.byte\t\tN96   , Cn3 , v127\n"
+        "\t.byte\tW96\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "lfo song parses");
+    if (!song) return;
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+    /* frame 1: the commands and the note (no LFO step on the note's tick);
+     * frames 2..5: four LFO steps on the wait. */
+    /* One LFO step per tick, the first on the note's own tick (its W96 is
+     * read in the same tick).  Each step adds lfoSpeed to the stored byte:
+     * the sum exceeds 255 on the fourth step (0xF0 + 0x50 = 0x140), where
+     * the rising half gives (0x80 - 0x140) >> 6 = -3; a byte-truncated
+     * port would give (0x80 - 0x40) >> 6 = 1. */
+    int8_t expected[6] = { 0, 0, 0, 0, 0, 0 };
+    uint8_t c = 0;
+    for (int i = 1; i <= 5; i++) {
+        int sum = c + 0x50;
+        c = (uint8_t)sum;
+        int r = ((int8_t)(c - 0x40) < 0) ? (int8_t)c : 0x80 - sum;
+        expected[i] = (int8_t)((1 * r) >> 6);
+    }
+    for (int i = 1; i <= 5; i++) {
+        m4a_sequencer_frame(&seq);
+        ASSERT_EQ(engine.tracks[0].modM, expected[i], "modM after an LFO step follows the asm's arithmetic");
+    }
+    ASSERT_EQ(expected[4], -3, "the fourth step crosses 256: modM -3, not 1");
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
+/* Handlers whose cost depends on their operand: MOD 0 and LFOS 0 branch
+ * to clear_modM (51 + 58 instead of 69); the frame sum must differ by 40
+ * from the nonzero form and nothing else. */
+static void test_sequencer_cycles_lfos_zero(void)
+{
+    printf("Testing sequencer cycle accounting: LFOS / MOD 0 take the clear_modM path...\n");
+    ToneData voices[128];
+    seq_test_voices(voices);
+    static const char *forms[4] = {
+        "\t.byte\tLFOS , 44\n", "\t.byte\tLFOS , 0\n",
+        "\t.byte\tMOD , 1\n", "\t.byte\tMOD , 0\n" };
+    int cycles[4] = { 0, 0, 0, 0 };
+    for (int f = 0; f < 4; f++) {
+        char body[256];
+        snprintf(body, sizeof(body), "%s\t.byte\tW24\n\t.byte\tFINE\n", forms[f]);
+        M4ASong *song = seq_song(body);
+        ASSERT(song != NULL, "lfos/mod song parses");
+        if (!song) return;
+        M4AEngine engine;
+        m4a_engine_init(&engine, 48000.0f);
+        m4a_engine_set_voicegroup(&engine, voices);
+        M4ASequencer seq;
+        m4a_sequencer_init(&seq, &engine);
+        m4a_sequencer_start(&seq, song);
+        m4a_sequencer_frame(&seq);
+        cycles[f] = seq.frameCycles;
+        m4a_sequencer_detach(&seq);
+        m4a_engine_destroy(&engine);
+        m4a_song_free(song);
+    }
+    /* clear_modM also flags PITCHG, so the frame gains the pitch pass
+     * (30 + 62 + 50, empty chain 6, track end 10, less the no-flags 20 =
+     * 138); LFOS 0 then takes the wait path with lfoSpeed 0 (23 vs 28). */
+    ASSERT_EQ(cycles[1] - cycles[0], 40 + 138 - 5, "LFOS 0: clear_modM 40, the pitch pass 138, lfoSpeed-0 wait -5");
+    /* MOD 1 with the default lfoSpeed 0x16 runs an LFO step on the wait
+     * (34 + 26 + 20 = 80 instead of 28): MOD 0 saves 52 there. */
+    ASSERT_EQ(cycles[3] - cycles[2], 40 + 138 - 52, "MOD 0: clear_modM 40, the pitch pass 138, no LFO step -52");
+    ASSERT_EQ(cycles[3] - cycles[1], 5, "MOD 0 and LFOS 0 differ only by the wait path's lfoSpeed test");
+}
+
+/* A note the GBA rejects (same priority, an earlier track holds the CGB
+ * channel) costs the rejection path only; the polyphony-debug invert mode
+ * plays it on a shadow channel but must not add the take/chain charges. */
+static void test_sequencer_cycles_poly_invert(void)
+{
+    printf("Testing sequencer cycle accounting: a rejected note costs the same in poly-debug invert mode...\n");
+    ToneData voices[128];
+    seq_test_voices(voices);
+    static const char *text =
+        "\t.equ\tt_grp, voicegroup_test\n"
+        "\t.equ\tt_pri, 0\n\t.equ\tt_rev, 0\n\t.equ\tt_mvl, 127\n\t.equ\tt_key, 0\n\t.equ\tt_tbs, 1\n"
+        "\t.section .rodata\n\t.global\tt\n\t.align\t2\n"
+        "t_1:\n\t.byte\tVOICE , 0\n\t.byte\tN96 , Cn3 , v127\n\t.byte\tW96\n\t.byte\tFINE\n"
+        "t_2:\n\t.byte\tVOICE , 0\n\t.byte\tW02\n\t.byte\tN48 , En3 , v127\n\t.byte\tW72\n\t.byte\tFINE\n"
+        "\t.align\t2\nt:\n\t.byte\t2, 0, t_pri, t_rev\n\t.word\tt_grp\n\t.word\tt_1\n\t.word\tt_2\n";
+    int cycles[2][4];
+    for (int inv = 0; inv < 2; inv++) {
+        M4ASong *song = parse_song_text(text);
+        ASSERT(song != NULL, "poly-invert song parses");
+        if (!song) return;
+        M4AEngine engine;
+        m4a_engine_init(&engine, 48000.0f);
+        m4a_engine_set_voicegroup(&engine, voices);
+        m4a_engine_set_poly_debug_invert(&engine, inv == 1);
+        M4ASequencer seq;
+        m4a_sequencer_init(&seq, &engine);
+        m4a_sequencer_start(&seq, song);
+        for (int f = 0; f < 4; f++) {
+            m4a_sequencer_frame(&seq);
+            cycles[inv][f] = seq.frameCycles;
+        }
+        /* frame 1 starts both tracks, frame 2.. ticks; track 2's note lands
+         * on the tick where its W02 expires, and track 1 still holds square 1. */
+        ASSERT(engine.cgbChannels[0].status != 0 && engine.cgbChannels[0].trackIndex == 0,
+               "poly-invert: track 1 keeps square 1");
+        if (inv == 1)
+            ASSERT(engine.cgbChannels[MAX_CGB_CHANNELS].status != 0, "poly-invert: the rejected note plays on the shadow channel");
+        else
+            ASSERT_EQ(engine.cgbChannels[MAX_CGB_CHANNELS].status, 0, "poly-invert off: the rejected note is dropped");
+        m4a_sequencer_detach(&seq);
+        m4a_engine_destroy(&engine);
+        m4a_song_free(song);
+    }
+    for (int f = 0; f < 4; f++)
+        ASSERT_EQ(cycles[1][f], cycles[0][f], "poly-invert: the frame's MPlayMain cost is the GBA's either way");
+}
+
+/* TrackStop (m4aMPlayStart / Stop) walks the track's channel chain: a
+ * chained, sounding channel is cut (CgbOscOff); a channel ply_fine
+ * unchained keeps releasing through the next song's start (ply_fine also
+ * clears the track's EXIST flag, which TrackStop tests first, so both the
+ * chain walk and that flag protect it). */
+static void test_sequencer_track_stop_chain(void)
+{
+    printf("Testing sequencer TrackStop: only chained channels are killed...\n");
+    ToneData voices[128];
+    seq_test_voices(voices);
+    voices[0].release = 1;                     /* a long software release */
+    M4ASong *fineSong = seq_song("\t.byte\tVOICE , 0\n\t.byte\tVOL , 127*t_mvl/mxv\n\t.byte\tN02 , Cn3 , v127\n\t.byte\tW02\n\t.byte\tFINE\n");
+    M4ASong *holdSong = seq_song("\t.byte\tVOICE , 0\n\t.byte\tVOL , 127*t_mvl/mxv\n\t.byte\tN96 , Cn3 , v127\n\t.byte\tW96\n\t.byte\tFINE\n");
+    M4ASong *restSong = seq_song("\t.byte\tW96\n\t.byte\tFINE\n");
+    ASSERT(fineSong && holdSong && restSong, "track-stop songs parse");
+    if (!fineSong || !holdSong || !restSong) return;
+
+    M4AEngine engine;
+    float outL[1024], outR[1024];
+    engine_init_booted(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);      /* the frame hook runs MPlayMain, then CgbSound */
+    M4ACGBChannel *sq = &engine.cgbChannels[0];
+
+    /* FINE after the note: ply_fine flags CHN_STOP and unchains; the
+     * release runs on. */
+    m4a_sequencer_start(&seq, fineSong);
+    advance_frames(&engine, 6, outL, outR);
+    ASSERT(sq->status & CHN_ON, "track-stop: the channel is still releasing after FINE");
+    ASSERT_EQ(seq.chainOwner[TOTAL_PCM_CHANNELS], 0, "track-stop: ply_fine unchained it");
+    m4a_sequencer_start(&seq, restSong);
+    ASSERT(sq->status & CHN_ON, "track-stop: a new song's TrackStop leaves the unchained release alone");
+
+    /* A chained, sounding channel is cut by the next start. */
+    m4a_sequencer_start(&seq, holdSong);
+    advance_frames(&engine, 3, outL, outR);
+    ASSERT(sq->status & CHN_ON, "track-stop: the held note sounds");
+    ASSERT_EQ(seq.chainOwner[TOTAL_PCM_CHANNELS], 1, "track-stop: the held note is chained to track 1");
+    m4a_sequencer_start(&seq, restSong);
+    ASSERT_EQ(sq->status, 0, "track-stop: the chained channel is killed by the next start");
+    ASSERT_EQ(seq.chainOwner[TOTAL_PCM_CHANNELS], 0, "track-stop: and unchained");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(fineSong);
+    m4a_song_free(holdSong);
+    m4a_song_free(restSong);
+}
+
 /* The sound FIFO's refill DMA stalls the CPU 18 cycles every 16 samples
  * (20064 cycles at 13379 Hz), counted on the cycle spans the timing model
  * charges. */
@@ -3796,6 +4021,10 @@ int main(void)
     test_sequencer_lfo_and_engine_tick();
     test_sequencer_lfo_delay_note_on();
     test_sequencer_cycles();
+    test_sequencer_cycles_lfos_zero();
+    test_sequencer_lfo_untruncated_sum();
+    test_sequencer_cycles_poly_invert();
+    test_sequencer_track_stop_chain();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

@@ -1721,15 +1721,18 @@ static void m4a_lfo_tick(M4AEngine *engine)
             continue;
         }
 
-        track->lfoSpeedC += track->lfoSpeed;
+        /* The asm keeps the untruncated sum for the rising half (see
+         * lfo_step in m4a_sequencer.c). */
+        int32_t lfoSum = (int32_t)track->lfoSpeedC + track->lfoSpeed;
+        track->lfoSpeedC = (uint8_t)lfoSum;
         uint8_t lfoPos = track->lfoSpeedC;
-        int8_t lfoVal;
+        int32_t lfoVal;
 
         /* Triangle wave */
         if ((int8_t)(lfoPos - 0x40) < 0) {
             lfoVal = (int8_t)lfoPos;
         } else {
-            lfoVal = (int8_t)(0x80 - lfoPos);
+            lfoVal = 0x80 - lfoSum;
         }
 
         int8_t newModM = (int8_t)((track->mod * lfoVal) >> 6);
@@ -1896,7 +1899,8 @@ void m4a_engine_tick(M4AEngine *engine)
     for (int pool = 0; pool < TOTAL_CGB_CHANNELS / MAX_CGB_CHANNELS; pool++) {
         /* The cursor is the cycle of each channel's loop head (`for (ch = 1
          * ...)` in CgbSound); a channel's pass moves it to the next one's. */
-        int64_t cursor = cgbEntry + (engine->c15 == 14 ? M4A_CYC_CGB_ENTRY_RELOAD : M4A_CYC_CGB_ENTRY_TO_LOOP);
+        int entryToLoop = engine->c15 == 14 ? M4A_CYC_CGB_ENTRY_RELOAD : M4A_CYC_CGB_ENTRY_TO_LOOP;
+        int64_t cursor = cgbEntry + entryToLoop + m4a_gba_fifo_dma_stall(&engine->gba, cgbEntry, cgbEntry + entryToLoop);
         for (int c = 0; c < MAX_CGB_CHANNELS; c++) {
             int i = pool * MAX_CGB_CHANNELS + c;
             M4ACGBChannel *ch = &engine->cgbChannels[i];

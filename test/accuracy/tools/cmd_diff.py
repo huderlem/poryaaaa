@@ -22,7 +22,9 @@ def main(probe, seqlog, limit=20):
     mg = {}
     for line in open(probe):
         m = re.match(r"^\s*(\d+) f\d+ v\s*\d+ B [0-9A-F]{8} (ply_\w+)", line)
-        if m and m.group(2) not in ("ply_xiecv", "ply_xiecl", "ply_goto_1", "ply_pend_done") and not (m.group(2) == "ply_goto" and False):
+        # the nm listing's local labels inside handlers are breakpoints too; only the handler entries count
+        if m and m.group(2) not in ("ply_xiecv", "ply_xiecl", "ply_goto_1", "ply_pend_done", "ply_fine_loop", "ply_fine_ok",
+                                    "ply_fine_done", "ply_patt_done", "ply_rept_1", "ply_rept_2"):
             t = int(m.group(1))
             k = (t - F1) // CPF + 1
             mg.setdefault(k, []).append((m.group(2), (t - F1) % CPF - L160))
