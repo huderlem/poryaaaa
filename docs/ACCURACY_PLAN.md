@@ -84,8 +84,17 @@ Work happens on a feature branch; main stays releasable.
    the "mix at host rate" choice is removed.
 4. **Cries and SE**: add to the test ROM and corpus; fix engine paths as
    the harness shows.
-5. **MIDI quantization**: latch MIDI events to the next frame tick by
-   default, with a live-play override.
+5. **MIDI quantization**: latch MIDI events (note-on, note-off, CC, pitch
+   bend) to the next frame tick, because MPlayMain runs once per VBlank and
+   the game can only start a note on a frame edge. This adds up to 16.7 ms
+   of latency (8.4 ms average) and, more noticeably, 0 to 16.7 ms of jitter,
+   which makes a MIDI keyboard feel rubbery. So:
+   - Default to **unquantized when the host transport is stopped** (live
+     playing) and **quantized when the transport is playing** (honest
+     preview of recorded parts). CLAP exposes transport state, so this
+     needs no user-facing toggle; still provide a manual override.
+   - The engine's own tick (envelopes, LFOs, tempo) advances per frame in
+     both modes. The modes differ only in when a note may start.
 
 ## Corpus
 
