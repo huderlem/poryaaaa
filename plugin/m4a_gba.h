@@ -45,10 +45,8 @@ extern "C" {
 #define GBA_BLIP_FRAME        2048     /* cycles per resampler frame */
 #define GBA_PCM_DMA_BUF_SIZE  1584     /* m4a's PCM_DMA_BUF_SIZE, samples per side */
 
-/* One 32-bit FIFO word: four consecutive PCM samples.  Kept wider than the
- * hardware's bytes so the engine can run its mixer without the 8-bit wrap
- * (the wrap belongs to the mixer port); values that fit int8 behave exactly
- * like the hardware. */
+/* One 32-bit FIFO word: four consecutive PCM samples (int8 on the
+ * hardware; held sign-extended here). */
 typedef struct {
     int16_t s[4];
 } M4AFifoWord;
@@ -99,7 +97,7 @@ typedef struct {
     /* DirectSound FIFOs and the DMA that feeds them */
     M4AGbaFifo fifo[2];         /* 0 = A, 1 = B */
     bool dmaEnabled;            /* both FIFO DMAs on/off together */
-    const int16_t *ring;        /* [2][ringSize]: A's buffer then B's */
+    const int8_t *ring;        /* [2][ringSize]: A's buffer then B's */
     int ringSize;
 
     /* Timer 0, period 280896 / pcmSamplesPerVBlank cycles, integer like the
@@ -117,7 +115,7 @@ typedef struct {
 
 /* Reset to mgba's power-on state at cycle 0.  `ring` is the m4a PCM buffer
  * pair (A then B, `ringSize` samples each) the DMA reads; the caller owns it. */
-void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int16_t *ring, int ringSize,
+void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int8_t *ring, int ringSize,
                   int pcmSamplesPerVBlank);
 void m4a_gba_destroy(M4AGbaAudio *g);
 
@@ -128,7 +126,7 @@ void m4a_gba_dma_enable(M4AGbaAudio *g);           /* DMA1/2CNT_H enable (source
 void m4a_gba_dma_disable(M4AGbaAudio *g);
 void m4a_gba_timer_enable(M4AGbaAudio *g);         /* TM0CNT_H enable: first overflow after one period */
 void m4a_gba_timer_disable(M4AGbaAudio *g);
-void m4a_gba_set_pcm_rate(M4AGbaAudio *g, int pcmSamplesPerVBlank, const int16_t *ring, int ringSize);
+void m4a_gba_set_pcm_rate(M4AGbaAudio *g, int pcmSamplesPerVBlank, const int8_t *ring, int ringSize);
 
 /* Next hardware event time (PSG frame step, sample event or timer overflow). */
 int64_t m4a_gba_next_event(const M4AGbaAudio *g);

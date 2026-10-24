@@ -7,7 +7,6 @@
 void m4a_pcm_channel_start(M4APCMChannel *ch, WaveData *wav, uint8_t type);
 void m4a_pcm_channel_stop(M4APCMChannel *ch);
 void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume);
-void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR);
 
 /* CGB channel operations: the CgbSound register driver (m4a_channel.c) on
  * top of the PSG model (m4a_psg.c).  Writes are stamped at gba->now. */

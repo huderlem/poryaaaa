@@ -5,7 +5,7 @@
 #define BLIP_SIZE 0x4000
 #define PSG_FRAME_EVENT 32768   /* PSG frame sequencer period (m4a_psg.h) */
 
-void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int16_t *ring, int ringSize,
+void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int8_t *ring, int ringSize,
                   int pcmSamplesPerVBlank)
 {
     memset(g, 0, sizeof(*g));
@@ -42,7 +42,7 @@ void m4a_gba_destroy(M4AGbaAudio *g)
     g->left = g->right = NULL;
 }
 
-void m4a_gba_set_pcm_rate(M4AGbaAudio *g, int pcmSamplesPerVBlank, const int16_t *ring, int ringSize)
+void m4a_gba_set_pcm_rate(M4AGbaAudio *g, int pcmSamplesPerVBlank, const int8_t *ring, int ringSize)
 {
     g->timerPeriodDen = pcmSamplesPerVBlank > 0 ? pcmSamplesPerVBlank : 224;
     g->ring = ring;
@@ -128,7 +128,7 @@ static void fifo_push(M4AGbaFifo *f, M4AFifoWord w)
 static void fifo_dma(M4AGbaAudio *g, int ch)
 {
     M4AGbaFifo *f = &g->fifo[ch];
-    const int16_t *base = g->ring + ch * g->ringSize;
+    const int8_t *base = g->ring + ch * g->ringSize;
     int limit = (2 - ch) * g->ringSize;
     for (int w = 0; w < 4; w++) {
         M4AFifoWord word;

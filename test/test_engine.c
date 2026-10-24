@@ -4,6 +4,7 @@
 #include <math.h>
 #include "m4a_engine.h"
 #include "m4a_channel.h"
+#include "m4a_mixer.h"
 #include "m4a_tables.h"
 #include "m4a_song.h"
 #include "m4a_sequencer.h"
@@ -60,6 +61,17 @@ static void advance_frames(M4AEngine *e, int frames, float *outL, float *outR)
     int64_t target = e->nextSoundMain + (int64_t)(frames - 1) * GBA_CYCLES_PER_FRAME;
     while (e->gba.now < target)
         m4a_engine_process(e, outL, outR, 64);
+}
+
+/* Mix one SoundMainRAM frame of a hand-built channel through the real
+ * mixer into a zeroed ring-shaped buffer (A = right at 0, B = left at
+ * GBA_PCM_DMA_BUF_SIZE) and hand back the right side's bytes.  The engine
+ * only supplies pcmSamplesPerVBlank / pcmDivFreq and the DPCM decoding
+ * buffer; tests set pcmDivFreq to 1 so `frequency` is the 23-bit step. */
+static void mix_frame(M4AEngine *e, M4APCMChannel *ch, int8_t *frame)
+{
+    memset(frame, 0, GBA_PCM_DMA_BUF_SIZE * 2);
+    m4a_mixer_mix_channel(e, ch, frame);
 }
 
 /* Test umul3232H32 */
@@ -2147,12 +2159,17 @@ static void test_golden_sun_synth(void)
     free(wdPulse);
 }
 
-/* Golden Sun synth waveform shapes: drive m4a_pcm_channel_render directly
- * with a hand-built channel so the generated waveforms can be checked
+/* Golden Sun synth waveform shapes: drive the mixer frame by frame with a
+ * hand-built channel so the generated waveforms can be checked
  * sample-by-sample against the GBA algorithm. */
 static void test_golden_sun_synth_waveforms(void)
 {
     printf("Testing Golden Sun synth waveform shapes...\n");
+
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    const int spv = e.pcmSamplesPerVBlank;
+    static int8_t frame[GBA_PCM_DMA_BUF_SIZE * 2];
 
     /* Channel template: sustain state, unity-ish volume (128 -> value >> 1),
      * frequency chosen so phase advances 0x800000 per sample = 512-sample
@@ -2172,14 +2189,16 @@ static void test_golden_sun_synth_waveforms(void)
         M4APCMChannel ch = base;
         ch.synthType = M4A_SYNTH_TRIANGLE;
         ch.fw = 0x40000000u;
-        int32_t out[1024];
+        int32_t out[1024 + 256];
         int32_t maxV = -1000, minV = 1000;
-        for (int i = 0; i < 1024; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            out[i] = l;
-            if (l > maxV) maxV = l;
-            if (l < minV) minV = l;
+        int n = 0;
+        while (n < 1024) {
+            mix_frame(&e, &ch, frame);
+            for (int i = 0; i < spv && n < 1024 + 256; i++, n++) {
+                out[n] = frame[i];
+                if (out[n] > maxV) maxV = out[n];
+                if (out[n] < minV) minV = out[n];
+            }
         }
         ASSERT_EQ(out[0], 0, "gs triangle: starts at the zero crossing");
         ASSERT_EQ(maxV, 64, "gs triangle: positive peak (full-scale equivalent)");
@@ -2204,13 +2223,14 @@ static void test_golden_sun_synth_waveforms(void)
         ch.synthType = M4A_SYNTH_PULSE;
         ch.wav = wd;
         ch.synthPulseDuty = 0x80000000u;
-        int high = 0, low = 0, other = 0;
-        for (int i = 0; i < 512; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            if (l == 32) high++;
-            else if (l == -32) low++;
-            else other++;
+        int high = 0, low = 0, other = 0, n = 0;
+        while (n < 512) {
+            mix_frame(&e, &ch, frame);
+            for (int i = 0; i < spv && n < 512; i++, n++) {
+                if (frame[i] == 32) high++;
+                else if (frame[i] == -32) low++;
+                else other++;
+            }
         }
         ASSERT_EQ(high, 256, "gs pulse: 50 percent duty high samples");
         ASSERT_EQ(low, 256, "gs pulse: 50 percent duty low samples");
@@ -2225,28 +2245,35 @@ static void test_golden_sun_synth_waveforms(void)
         M4APCMChannel ch = base;
         ch.synthType = M4A_SYNTH_SAW;
         int32_t maxV = -100000, minV = 100000;
-        for (int i = 0; i < 2048; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            if (l > maxV) maxV = l;
-            if (l < minV) minV = l;
+        for (int f = 0; f < 10; f++) {
+            mix_frame(&e, &ch, frame);
+            for (int i = 0; i < spv; i++) {
+                if (frame[i] > maxV) maxV = frame[i];
+                if (frame[i] < minV) minV = frame[i];
+            }
         }
         ASSERT(maxV > 30 && maxV <= 56, "gs saw: positive range");
         ASSERT(minV < -30 && minV >= -56, "gs saw: negative range");
     }
+    m4a_engine_destroy(&e);
 }
 
 /* Reverse (TONEDATA_TYPE_REV / voice_directsound_alt) samples play from the
  * last sample to the first, interpolating toward the earlier sample, ignore
  * loops, and end when they run off the front -- the SoundMainRAM_Unk1
- * reverse path.  Driven directly with a hand-built channel at unity volume
- * (256 -> value >> 8 is the sample itself). */
+ * reverse path.  Driven frame by frame with a hand-built channel at
+ * envelope volume 128 (value >> 1). */
 /* What a hand-driven PCM channel at envelope volume 128 outputs for sample v. */
 #define PCM_OUT(v) (((int32_t)(v) * 128) >> 8)
 
 static void test_pcm_reverse(void)
 {
     printf("Testing reverse-played samples...\n");
+
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    e.pcmDivFreq = 1;
+    static int8_t frame[GBA_PCM_DMA_BUF_SIZE * 2];
 
     enum { N = 8 };
     WaveData *wd = calloc(1, sizeof(WaveData) + N + 1);
@@ -2268,19 +2295,16 @@ static void test_pcm_reverse(void)
         ch.frequency = 0x800000;
         ch.envelopeVolumeLeft = 128;
         ch.envelopeVolumeRight = 128;
-        ASSERT(ch.currentPointer == wd->data + N, "reverse: starts at the end of the data");
-
+        mix_frame(&e, &ch, frame);
+        /* Unk1's first-mix setup: the channel is flagged and plays from
+         * data + size backwards (one source sample per output). */
+        ASSERT((ch.status & CHN_SPECIAL) != 0 || ch.status == 0, "reverse: Unk1 set the channel up");
         int ok = 1;
-        for (int i = 0; i < N; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            if (l != PCM_OUT(10 * (N - i)) || r != l) ok = 0;
-        }
+        for (int i = 0; i < N; i++)
+            if (frame[i] != PCM_OUT(10 * (N - i)) || frame[GBA_PCM_DMA_BUF_SIZE + i] != frame[i]) ok = 0;
         ASSERT(ok, "reverse: plays the samples last-to-first");
         ASSERT_EQ(ch.status, 0, "reverse: stops at the front (loop ignored)");
-        int32_t l = 0, r = 0;
-        m4a_pcm_channel_render(&ch, &l, &r);
-        ASSERT_EQ(l, 0, "reverse: silent once stopped");
+        ASSERT_EQ(frame[N], 0, "reverse: silent once stopped (rest of the frame unmixed)");
     }
 
     /* Half speed: interpolates toward the previous sample. */
@@ -2292,16 +2316,17 @@ static void test_pcm_reverse(void)
         ch.frequency = 0x400000;
         ch.envelopeVolumeLeft = 128;
         ch.envelopeVolumeRight = 128;
+        mix_frame(&e, &ch, frame);
         static const int32_t expect[6] = { 80, 75, 70, 65, 60, 55 };
         int ok = 1;
-        for (int i = 0; i < 6; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            if (l != PCM_OUT(expect[i])) ok = 0;
-        }
+        for (int i = 0; i < 6; i++)
+            if (frame[i] != PCM_OUT(expect[i])) ok = 0;
         ASSERT(ok, "reverse: half speed interpolates toward the earlier sample");
-        ASSERT_EQ(ch.count, 5, "reverse: count tracks the samples left");
-        ASSERT(ch.currentPointer == wd->data + 5, "reverse: pointer stays one past the current sample");
+        /* 16 outputs cover the 8 samples; the 16th interpolates toward the
+         * byte before the data (0 on the GBA: the header's last byte). */
+        ASSERT_EQ(frame[14], PCM_OUT(10), "reverse: last sample");
+        ASSERT_EQ(frame[15], PCM_OUT(5), "reverse: look-behind before the data reads 0");
+        ASSERT_EQ(ch.status, 0, "reverse: stops after running off the front");
     }
 
     /* Half speed with the FIX bit (0x18): sample-and-hold like the main
@@ -2316,14 +2341,13 @@ static void test_pcm_reverse(void)
         ch.frequency = 0x400000;
         ch.envelopeVolumeLeft = 128;
         ch.envelopeVolumeRight = 128;
-        static const int32_t expect[6] = { 80, 80, 70, 70, 60, 60 };
+        mix_frame(&e, &ch, frame);
+        /* Unk1 ignores the frequency for FIX voices: step 0x800000. */
+        static const int32_t expect[6] = { 80, 70, 60, 50, 40, 30 };
         int ok = 1;
-        for (int i = 0; i < 6; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            if (l != PCM_OUT(expect[i])) ok = 0;
-        }
-        ASSERT(ok, "reverse fix: half speed holds each sample (no interpolation)");
+        for (int i = 0; i < 6; i++)
+            if (frame[i] != PCM_OUT(expect[i])) ok = 0;
+        ASSERT(ok, "reverse fix: one sample per output regardless of frequency");
     }
 
     /* Through the engine: a voice_directsound_alt voice on a rising ramp
@@ -2376,6 +2400,7 @@ static void test_pcm_reverse(void)
     }
 
     free(wd);
+    m4a_engine_destroy(&e);
 }
 
 /* Portamento legato inheritance across a reverse voice and a forward voice
@@ -2436,8 +2461,7 @@ static void test_pcm_reverse_legato_inherit(void)
         ASSERT(second != NULL, "rev legato: second note has a channel");
         ASSERT(second != first, "rev legato: opposite direction gets a fresh channel");
         ASSERT_EQ(second->count, N, "rev legato: opposite direction starts the sample over");
-        int8_t *expectPtr = (voices[cases[c].to].type & VOICE_TYPE_REV) ? wd->data + N : wd->data;
-        ASSERT(second->currentPointer == expectPtr, "rev legato: pointer uses the new direction's convention");
+        ASSERT(second->currentPointer == wd->data, "rev legato: pointer starts at the data (Unk1 flips it on the first mix)");
         ASSERT((first->status & CHN_ON) != 0, "rev legato: previous channel keeps releasing (not silenced)");
 
         /* Render well past the point where a wrongly-inherited forward
@@ -2488,6 +2512,7 @@ static WaveData *make_dpcm_wave(uint32_t size, uint32_t loopStart, int looped,
     WaveData *wd = calloc(1, sizeof(WaveData) + bytes + 1);
     wd->type = 1;
     wd->status = looped ? 0x4000 : 0;
+    wd->freq = 13379 << 10;
     wd->loopStart = loopStart;
     wd->size = size;
     wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
@@ -2527,6 +2552,10 @@ static void test_pcm_dpcm(void)
     enum { SIZE = 100, LOOP = 40 };
     int8_t decoded[SIZE + 1];
     WaveData *wd = make_dpcm_wave(SIZE, LOOP, 1, decoded);
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    e.pcmDivFreq = 1;
+    static int8_t frame[GBA_PCM_DMA_BUF_SIZE * 2];
 
     /* Forward at one sample per output: exact decode, then the loop wraps
      * back to loopStart. */
@@ -2538,20 +2567,18 @@ static void test_pcm_dpcm(void)
         ch.frequency = 0x800000;
         ch.envelopeVolumeLeft = 128;
         ch.envelopeVolumeRight = 128;
+        mix_frame(&e, &ch, frame);
         int ok = 1, wrapOk = 1;
-        for (int i = 0; i < SIZE; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            if (l != PCM_OUT(decoded[i])) ok = 0;
-        }
+        for (int i = 0; i < SIZE; i++)
+            if (frame[i] != PCM_OUT(decoded[i])) ok = 0;
         ASSERT(ok, "dpcm: forward decode matches the delta table");
-        for (int i = 0; i < 2 * (SIZE - LOOP); i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            if (l != PCM_OUT(decoded[LOOP + i % (SIZE - LOOP)])) wrapOk = 0;
-        }
+        for (int i = 0; i < 2 * (SIZE - LOOP); i++)
+            if (frame[SIZE + i] != PCM_OUT(decoded[LOOP + i % (SIZE - LOOP)])) wrapOk = 0;
         ASSERT(wrapOk, "dpcm: forward loop wraps to loopStart");
         ASSERT((ch.status & CHN_ON) != 0, "dpcm: looped channel keeps playing");
+        ASSERT((ch.status & CHN_SPECIAL) != 0, "dpcm: Unk1 flagged the channel");
+        ASSERT_EQ((int)(ch.currentPointer - wd->data), (int)(LOOP + (224 - SIZE) % (SIZE - LOOP)),
+                  "dpcm: currentPointer is a sample index after the frame");
     }
 
     /* Forward at half speed: interpolates between decoded neighbours, and
@@ -2565,13 +2592,12 @@ static void test_pcm_dpcm(void)
         ch.frequency = 0x400000;
         ch.envelopeVolumeLeft = 128;
         ch.envelopeVolumeRight = 128;
+        mix_frame(&e, &ch, frame);
         int ok = 1;
         for (int i = 0; i < 2 * SIZE - 2; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
             int32_t s0 = decoded[i / 2], s1 = decoded[i / 2 + 1];
             int32_t expect = (i % 2 == 0) ? s0 : s0 + (((s1 - s0) * 0x400000) >> 23);
-            if (l != PCM_OUT(expect)) ok = 0;
+            if (frame[i] != PCM_OUT(expect)) ok = 0;
         }
         ASSERT(ok, "dpcm: half speed interpolates between decoded samples");
     }
@@ -2586,13 +2612,12 @@ static void test_pcm_dpcm(void)
         ch.frequency = 0x400000;
         ch.envelopeVolumeLeft = 128;
         ch.envelopeVolumeRight = 128;
+        mix_frame(&e, &ch, frame);
+        /* Unk1's FIX step is 0x800000 whatever the frequency. */
         int ok = 1;
-        for (int i = 0; i < 2 * SIZE - 2; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            if (l != PCM_OUT(decoded[i / 2])) ok = 0;
-        }
-        ASSERT(ok, "dpcm fix: half speed holds each decoded sample");
+        for (int i = 0; i < SIZE; i++)
+            if (frame[i] != PCM_OUT(decoded[i])) ok = 0;
+        ASSERT(ok, "dpcm fix: one decoded sample per output regardless of frequency");
     }
 
     /* Reverse (cry_reverse): last sample first, loop ignored. */
@@ -2604,14 +2629,34 @@ static void test_pcm_dpcm(void)
         ch.frequency = 0x800000;
         ch.envelopeVolumeLeft = 128;
         ch.envelopeVolumeRight = 128;
+        mix_frame(&e, &ch, frame);
         int ok = 1;
-        for (int i = 0; i < SIZE; i++) {
-            int32_t l = 0, r = 0;
-            m4a_pcm_channel_render(&ch, &l, &r);
-            if (l != PCM_OUT(decoded[SIZE - 1 - i])) ok = 0;
-        }
+        for (int i = 0; i < SIZE; i++)
+            if (frame[i] != PCM_OUT(decoded[SIZE - 1 - i])) ok = 0;
         ASSERT(ok, "dpcm reverse: plays the decoded samples last-to-first");
         ASSERT_EQ(ch.status, 0, "dpcm reverse: stops at the front (loop ignored)");
+    }
+
+    /* The decoding buffer is shared: a second compressed channel decoding
+     * a different block replaces it, and the first channel's cached block
+     * tag (xpi) does not notice -- exactly the GBA's sDecodingBuffer. */
+    {
+        M4APCMChannel a, b;
+        memset(&a, 0, sizeof(a));
+        memset(&b, 0, sizeof(b));
+        m4a_pcm_channel_start(&a, wd, VOICE_CRY);
+        m4a_pcm_channel_start(&b, wd, VOICE_CRY);
+        a.status = b.status = CHN_ENV_SUSTAIN;
+        a.frequency = b.frequency = 0x800000;
+        a.envelopeVolumeLeft = a.envelopeVolumeRight = 128;
+        b.envelopeVolumeLeft = b.envelopeVolumeRight = 128;
+        b.currentPointer = wd->data + 64;   /* start offset: block 1 */
+        b.count = SIZE - 64;
+        mix_frame(&e, &a, frame);          /* leaves block 1 (xpi 1) in the buffer */
+        ASSERT_EQ((int)a.xpi, 1, "dpcm shared: channel a ends in block 1");
+        mix_frame(&e, &b, frame);          /* decodes block 1 too -- no change */
+        ASSERT_EQ((int)b.xpi, 1, "dpcm shared: channel b decoded block 1");
+        ASSERT_EQ(frame[0], PCM_OUT(decoded[64]), "dpcm shared: b plays block 1 from its start");
     }
 
     /* Through the engine, a cry voice is audible (uncompressed treatment
@@ -2631,15 +2676,202 @@ static void test_pcm_dpcm(void)
         m4a_engine_program_change(&engine, 0, 0);
         m4a_engine_cc(&engine, 0, 7, 127);
         m4a_engine_note_on(&engine, 0, 60, 127);
-        int32_t l = 0, r = 0;
+        float outL[256], outR[256];
+        advance_frames(&engine, 1, outL, outR);   /* the note's first mixed frame */
         M4APCMChannel *ch = &engine.pcmChannels[0];
-        m4a_pcm_channel_render(ch, &l, &r);
-        ASSERT_EQ(l, (decoded[0] * ch->envelopeVolumeLeft) >> 8,
-                  "dpcm engine: first output is the first decoded sample");
+        ASSERT((ch->status & CHN_SPECIAL) != 0, "dpcm engine: the channel went through Unk1");
+        ASSERT((int)(ch->currentPointer - wd->data) > 0 && (int)(ch->currentPointer - wd->data) < SIZE,
+               "dpcm engine: position is a sample index inside the data");
         m4a_engine_destroy(&engine);
     }
 
     free(wd);
+    m4a_engine_destroy(&e);
+}
+
+/* ------------------------------------------------------------------------
+ * The SoundMainRAM mixer against hand-computed arithmetic (m4a_mixer.c)
+ * ------------------------------------------------------------------------ */
+
+static WaveData *ramp_wave(int n, int looped, uint32_t loopStart)
+{
+    WaveData *wd = calloc(1, sizeof(WaveData) + n + 1);
+    wd->status = looped ? 0x4000 : 0;
+    wd->loopStart = loopStart;
+    wd->size = (uint32_t)n;
+    wd->freq = 13379 << 10;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    for (int i = 0; i < n; i++)
+        wd->data[i] = (int8_t)(10 * (i + 1));
+    wd->data[n] = 0;   /* the byte after the data: wav2agb's padding */
+    return wd;
+}
+
+static void test_mixer_arithmetic(void)
+{
+    printf("Testing the SoundMainRAM mixer arithmetic...\n");
+
+    /* The packed word: mul / bic 0xFF0000 / add ror 8.  Four samples at
+     * volume 128 land little-endian as (s * 128) >> 8; a pre-loaded word
+     * (the reverb base) adds lane by lane; the lanes wrap at 8 bits. */
+    {
+        uint32_t w = 0;
+        static const int32_t s[4] = { 10, -20, 30, -40 };
+        for (int i = 0; i < 4; i++)
+            w = m4a_mixer_acc(w, 128u << 16, s[i]);
+        ASSERT_EQ(w, 0xEC0FF605u, "ror8: four lanes little-endian, floor(s*v/256)");
+        w = 0x01020304u;
+        for (int i = 0; i < 4; i++)
+            w = m4a_mixer_acc(w, 128u << 16, s[i]);
+        ASSERT_EQ(w, 0xED11F909u, "ror8: adds onto the loaded word lane by lane");
+        /* 127 * 255 >> 8 = 126; twice in one lane = 252 = -4 as int8. */
+        w = 0;
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < 4; i++)
+                w = m4a_mixer_acc(w, 255u << 16, 127);
+        ASSERT_EQ(w, 0xFCFCFCFCu, "ror8: lanes wrap at 8 bits (126 + 126 = -4)");
+        /* bic 0xFF0000: the product's low byte never carries into the lane. */
+        w = m4a_mixer_acc(0xFF000000u, 1u << 16, 1);   /* 1*1 = 1 -> high byte 0 */
+        ASSERT_EQ(w, 0x00FF0000u, "ror8: a product below 256 contributes 0 to its lane");
+    }
+
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    e.pcmDivFreq = 1;
+    static int8_t frame[GBA_PCM_DMA_BUF_SIZE * 2];
+    const int spv = e.pcmSamplesPerVBlank;
+
+    /* One looped 8-sample ramp, FIX type: the frame is the ramp repeated,
+     * both sides at their own volume, count carried across the frame. */
+    {
+        WaveData *wd = ramp_wave(8, 1, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX);
+        ch.status = CHN_ENV_SUSTAIN | CHN_LOOP;
+        ch.frequency = 12345;   /* ignored by the FIX loop */
+        ch.envelopeVolumeRight = 128;
+        ch.envelopeVolumeLeft = 64;
+        mix_frame(&e, &ch, frame);
+        int ok = 1;
+        for (int i = 0; i < spv; i++) {
+            int v = 10 * (i % 8 + 1);
+            if (frame[i] != (v * 128) >> 8 || frame[GBA_PCM_DMA_BUF_SIZE + i] != (v * 64) >> 8)
+                ok = 0;
+        }
+        ASSERT(ok, "fix loop: the ramp repeats through the frame at each side's volume");
+        ASSERT_EQ(ch.count, 8 - spv % 8, "fix loop: count after the frame");
+        ASSERT(ch.currentPointer == wd->data + spv % 8, "fix loop: pointer after the frame");
+        free(wd);
+    }
+
+    /* The interpolating loop at half speed on an unlooped 8-sample ramp:
+     * 10, 15, 20, ... 80, then the look-ahead toward the byte after the
+     * data (0): 40; the channel stops there, mid-word, and the rest of the
+     * frame is left untouched (nothing else was mixed). */
+    {
+        WaveData *wd = ramp_wave(8, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x400000;
+        ch.envelopeVolumeRight = ch.envelopeVolumeLeft = 128;
+        memset(frame, 3, sizeof(frame));
+        m4a_mixer_mix_channel(&e, &ch, frame);
+        int ok = 1;
+        for (int i = 0; i < 15; i++)
+            if (frame[i] != 3 + ((10 + 5 * i) * 128 >> 8)) ok = 0;
+        ASSERT(ok, "interp: half speed interpolates between neighbours on top of the base");
+        ASSERT_EQ(frame[15], 3 + 20, "interp: last output looks ahead to the padding byte (0)");
+        ASSERT_EQ(frame[16], 3, "interp: the frame past the stop is untouched");
+        ASSERT_EQ(frame[GBA_PCM_DMA_BUF_SIZE + 15], 3 + 20, "interp: left side mixed alike");
+        ASSERT_EQ(ch.status, 0, "interp: channel off when count runs out");
+        free(wd);
+    }
+
+    /* The interpolating loop crossing a loop end: 8-sample ramp looping
+     * from 6 at 1.5 samples per output.  Outputs: pos 0 (10), 1.5 (25),
+     * 3 (40), 4.5 (55), 6 (70), 7.5 (80 + (0-80)/2 = 40, the look-ahead
+     * reads the padding byte at the loop end), then the wrap: count 8 -
+     * 1 - 1 - 2 - 1 - 2 ... let the mixer count; the position after the
+     * wrap is loopStart + (advance - count). */
+    {
+        WaveData *wd = ramp_wave(8, 1, 6);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        ch.status = CHN_ENV_SUSTAIN | CHN_LOOP;
+        ch.frequency = 0xC00000;
+        ch.envelopeVolumeRight = ch.envelopeVolumeLeft = 128;
+        mix_frame(&e, &ch, frame);
+        static const int expect[8] = { 10, 25, 40, 55, 70, 40, /* wrap: 7.5 + 1.5 = 9 -> 6 + 1 */ 80, /* 10.5 -> 6 + 0.5 */ 75 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (frame[i] != (expect[i] * 128) >> 8) ok = 0;
+        ASSERT(ok, "interp loop: wraps to loopStart + overshoot and keeps interpolating");
+        ASSERT((ch.status & CHN_ON) != 0, "interp loop: still playing");
+        free(wd);
+    }
+
+    /* Two full-volume channels on one frame wrap the lane sum: 100 and
+     * 100 at volume 255 give 99 + 99 = 198 = -58. */
+    {
+        WaveData *wd = calloc(1, sizeof(WaveData) + 8 + 1);
+        wd->status = 0x4000; wd->size = 8; wd->freq = 13379 << 10;
+        wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+        memset(wd->data, 100, 8);
+        M4APCMChannel a, b;
+        memset(&a, 0, sizeof(a));
+        m4a_pcm_channel_start(&a, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX);
+        a.status = CHN_ENV_SUSTAIN | CHN_LOOP;
+        a.envelopeVolumeRight = a.envelopeVolumeLeft = 255;
+        b = a;
+        mix_frame(&e, &a, frame);
+        ASSERT_EQ(frame[0], 99, "wrap: one channel at 100 * 255 >> 8");
+        m4a_mixer_mix_channel(&e, &b, frame);
+        ASSERT_EQ(frame[0], -58, "wrap: the second channel wraps the 8-bit lane");
+        ASSERT_EQ(frame[GBA_PCM_DMA_BUF_SIZE + 5], -58, "wrap: both sides");
+        free(wd);
+    }
+
+    /* SoundMainRAM_Reverb: (a + b + c + d) * reverb >> 9, +1 when bit 7 of
+     * the result is set, written to both sides of the current slot; the
+     * taps are the slot's previous contents and the next slot's (the
+     * buffer start when pcmDmaCounter == 2). */
+    {
+        M4AEngine r;
+        m4a_engine_init(&r, 44100.0f);
+        r.reverb.amount = 64;
+        int off = 2 * r.pcmSamplesPerVBlank;
+        int8_t *A = r.pcmBuffer, *B = r.pcmBuffer + GBA_PCM_DMA_BUF_SIZE;
+        A[off] = -10; B[off] = -10; A[off + 224] = -10; B[off + 224] = -10;   /* -40 * 64 >> 9 = -5 -> -4 */
+        A[off + 1] = 20; B[off + 1] = 20; A[off + 225] = 0; B[off + 225] = 0;  /* 40 * 64 >> 9 = 5 */
+        A[off + 2] = -1; B[off + 2] = 0;  A[off + 226] = 0; B[off + 226] = 0;  /* -64 >> 9 = -1 -> 0 */
+        A[off + 3] = 3;  B[off + 3] = 3;  A[off + 227] = 1; B[off + 227] = 1;  /* 8 * 64 >> 9 = 1 */
+        m4a_sound_main_ram(&r, off, 5);
+        ASSERT_EQ(A[off], -4, "reverb: negative result rounds toward zero (+1 on bit 7)");
+        ASSERT_EQ(B[off], -4, "reverb: mono, written to both sides");
+        ASSERT_EQ(A[off + 1], 5, "reverb: positive result floors");
+        ASSERT_EQ(A[off + 2], 0, "reverb: -1 >> 9 becomes 0");
+        ASSERT_EQ(A[off + 3], 1, "reverb: small positive");
+        ASSERT_EQ(A[off + 4], 0, "reverb: empty taps give 0");
+        /* pcmDmaCounter == 2: the second tap is the buffer start. */
+        memset(r.pcmBuffer, 0, sizeof(r.pcmBuffer));
+        int last = 6 * r.pcmSamplesPerVBlank;
+        A[0] = 100; B[0] = 100;
+        m4a_sound_main_ram(&r, last, 2);
+        ASSERT_EQ(A[last], (200 * 64) >> 9, "reverb: counter 2 taps the buffer start");
+        /* No reverb: the slot is zero-filled. */
+        r.reverb.amount = 0;
+        A[off] = 50; B[off] = 50;
+        m4a_sound_main_ram(&r, off, 5);
+        ASSERT_EQ(A[off], 0, "no reverb: slot zero-filled");
+        ASSERT_EQ(B[off], 0, "no reverb: both sides");
+        m4a_engine_destroy(&r);
+    }
+
+    m4a_engine_destroy(&e);
 }
 
 
@@ -3416,6 +3648,7 @@ int main(void)
     test_pcm_reverse();
     test_pcm_reverse_legato_inherit();
     test_pcm_dpcm();
+    test_mixer_arithmetic();
     test_song_parser();
     test_sequencer_tempo();
     test_sequencer_notes();

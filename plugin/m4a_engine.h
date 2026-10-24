@@ -80,6 +80,7 @@ extern "C" {
 /* Channel status flags (matching GBA) */
 #define CHN_START       0x80
 #define CHN_STOP        0x40
+#define CHN_SPECIAL     0x20  /* SoundMainRAM_Unk1 has set the channel up (REV flip, CMP index) */
 #define CHN_LOOP        0x10
 #define CHN_IEC         0x04
 #define CHN_ENV_MASK    0x03
@@ -201,12 +202,19 @@ typedef struct {
     int8_t rhythmPan;
     uint8_t gateTime;
 
-    /* Sample playback */
+    /* Sample playback (SoundChannel.count / fw / frequency / wav /
+     * currentPointer).  currentPointer is a pointer into wav->data, or, for
+     * a DPCM-compressed wave once SoundMainRAM_Unk1 has set the channel up
+     * (CHN_SPECIAL), data + <sample index>.  frequency is the MidiKeyToFreq
+     * result; the mixer multiplies it by SoundInfo.divFreq per sample. */
     WaveData *wav;
     int8_t *currentPointer;
     int32_t count;          /* remaining samples */
     uint32_t fw;            /* fractional position (23-bit fraction) */
-    uint32_t frequency;     /* playback frequency word */
+    uint32_t frequency;     /* MidiKeyToFreq(wav, key, pitch) */
+    /* SoundChannel.xpi: the DPCM block held in engine->decodingBuffer by
+     * this channel's last decode (0xFF000000 = none). */
+    uint32_t xpi;
 
     /* Owner */
     int trackIndex;
@@ -228,13 +236,6 @@ typedef struct {
     bool isLoop;
     int32_t loopLen;        /* loop length in samples */
     int8_t *loopStart;      /* pointer to loop start in sample data */
-
-    /* DPCM decode cache for compressed samples (WaveData.type != 0): the
-     * block currently held in dpcmBuf, or -1 when nothing is decoded yet.
-     * Plays the role of SoundChannel.xpi + sDecodingBuffer in m4a_1.s
-     * (per channel here rather than one shared buffer). */
-    int32_t dpcmBlock;
-    int8_t dpcmBuf[M4A_DPCM_BLOCK_SAMPLES];
 
     /* Golden Sun synth voice (M4A_SYNTH_*; M4A_SYNTH_NONE = normal sample).
      * When active, the channel reuses fw as the 32-bit oscillator phase (one
@@ -353,14 +354,13 @@ struct M4AEngine {
 
     float sampleRate;       /* host output rate */
 
-    /* DirectSound (PCM) mixing rate.  The m4a engine mixes all PCM channels at
-     * one of the sound-mode rates (SOUND_MODE_FREQ, 13379 Hz in pokeemerald:
-     * 224 samples per VBlank) into a ring buffer that timer-driven DMA feeds
-     * to the DirectSound FIFOs, so high notes alias heavily -- part of the
-     * GBA's characteristic sound.  pcmMixRate selects the rate; 0 means
-     * "follow the host rate" (the nearest whole number of samples per
-     * VBlank).  Default 13379 Hz for hardware accuracy. */
-    float pcmMixRate;
+    /* DirectSound (PCM) mixing rate: the sound-mode frequency
+     * (SOUND_MODE_FREQ_xxxxx >> 16, 1..12 into gPcmSamplesPerVBlankTable;
+     * pokeemerald uses SOUND_MODE_FREQ_13379 = 4, 224 samples per VBlank).
+     * SoundMainRAM mixes the PCM channels at this rate into the DMA ring
+     * the timer-driven FIFOs read, so high notes alias as on the GBA.
+     * SampleFreqSet's derived numbers follow. */
+    uint8_t pcmFreqMode;
     int32_t pcmSamplesPerVBlank; /* samples mixed per VBlank frame */
     int32_t pcmFreq;             /* SoundInfo.pcmFreq for that count */
     int32_t pcmDivFreq;          /* SoundInfo.divFreq */
@@ -377,8 +377,13 @@ struct M4AEngine {
     /* The PSG: [0] is the hardware the real CGB channels drive, [1] the
      * shadow pool's (polyphony-overflow debug); both see the boot writes. */
     M4APsg psg[2];
-    int16_t *pcmRing;
-    int pcmRingSize;
+    /* SoundInfo.pcmBuffer: the DMA ring, A (right) then B (left), int8 as
+     * the hardware FIFOs read it. */
+    int8_t pcmBuffer[GBA_PCM_DMA_BUF_SIZE * 2];
+    /* sDecodingBuffer: the one DPCM block decoder shared by every channel. */
+    int8_t decodingBuffer[M4A_DPCM_BLOCK_SAMPLES];
+    /* A discarded frame the muted pool mixes into (polyphony debug). */
+    int8_t mutedFrame[GBA_PCM_DMA_BUF_SIZE * 2];
     int64_t nextVSync;           /* next m4aSoundVSync (VCOUNT 150 interrupt) */
     int64_t nextSoundMain;       /* next m4aSoundMain (VBLANK interrupt) */
     int bootStep;                /* progress through the boot-time register writes */
@@ -523,11 +528,19 @@ void m4a_engine_destroy(M4AEngine *engine);
  * call it explicitly, before starting a song, to keep the boot audio. */
 void m4a_engine_boot(M4AEngine *engine, bool emitAudio);
 
-/* Set the DirectSound (PCM) mixing rate in Hz.  Pass 0 to follow the host
- * sample rate (clean, alias-free mixing); pass 13379 for GBA-accurate aliasing.
- * Reinitializes the reverb delay line for the new rate; call while stopped for a
- * glitch-free change (active notes correct their pitch on the next event). */
-void m4a_engine_set_pcm_mix_rate(M4AEngine *engine, float rate);
+/* Set the DirectSound (PCM) mixing rate: a sound-mode frequency index
+ * (SOUND_MODE_FREQ_xxxxx >> 16, 1..12; M4A_PCM_FREQ_MODE_DEFAULT is the
+ * game's 13379 Hz).  Out-of-range values select the default.  Reprograms
+ * the timer and DMA period like m4aSoundMode -> SampleFreqSet; call while
+ * stopped (the ring is restarted). */
+#define M4A_PCM_FREQ_MODE_MIN     1
+#define M4A_PCM_FREQ_MODE_MAX     12
+#define M4A_PCM_FREQ_MODE_DEFAULT 4   /* SOUND_MODE_FREQ_13379 */
+void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode);
+/* The rate in Hz of a mode (SampleFreqSet's pcmFreq: 13379 for mode 4),
+ * and the mode whose rate is nearest to `hz` (the default for hz <= 0). */
+int m4a_pcm_freq_mode_hz(int mode);
+int m4a_pcm_freq_mode_from_hz(double hz);
 
 /* Set voicegroup (must be loaded by voicegroup_loader) */
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup);

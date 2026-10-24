@@ -233,7 +233,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     m4a_engine_set_poly_debug_invert(&data->engine, data->polyDebugInvert);
     /* Apply the configured mix rate before setting the reverb amount, since it
      * rebuilds the reverb delay line for the new rate. */
-    m4a_engine_set_pcm_mix_rate(&data->engine, data->pcmMixRate);
+    m4a_engine_set_pcm_freq_mode(&data->engine, m4a_pcm_freq_mode_from_hz(data->pcmMixRate));
     m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
 
     /* If voicegroup is configured, load it */
@@ -301,14 +301,12 @@ static void plugin_stop_processing(const clap_plugin_t *plugin)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
     m4a_engine_all_sound_off(&data->engine);
-    m4a_reverb_reset(&data->engine.reverb);
 }
 
 static void plugin_reset(const clap_plugin_t *plugin)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
     m4a_engine_all_sound_off(&data->engine);
-    m4a_reverb_reset(&data->engine.reverb);
 }
 
 /* ---- MIDI event processing ---- */
@@ -600,7 +598,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         data->engine.respectBaseMidiKey = data->respectBaseMidiKey;
         m4a_engine_set_portamento_enabled(&data->engine, data->portamentoEnabled);
         m4a_engine_set_pwm_enabled(&data->engine, data->pwmEnabled);
-        m4a_engine_set_pcm_mix_rate(&data->engine, data->pcmMixRate);
+        m4a_engine_set_pcm_freq_mode(&data->engine, m4a_pcm_freq_mode_from_hz(data->pcmMixRate));
         m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
     }
 
@@ -715,7 +713,7 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
         m4a_engine_set_pwm_enabled(&data->engine, gs.pwmEnabled);
         m4a_engine_set_poly_debug_invert(&data->engine, gs.polyDebugInvert);
         /* Rebuilds the reverb delay line for the new rate; set amount after. */
-        m4a_engine_set_pcm_mix_rate(&data->engine, gs.pcmMixRate);
+        m4a_engine_set_pcm_freq_mode(&data->engine, m4a_pcm_freq_mode_from_hz(gs.pcmMixRate));
         m4a_reverb_set_amount(&data->engine.reverb, gs.reverbAmount);
     }
 

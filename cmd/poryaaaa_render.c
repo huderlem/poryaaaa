@@ -846,7 +846,7 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
     engine.respectBaseMidiKey = o->respectBaseMidiKey;
     m4a_engine_set_portamento_enabled(&engine, o->portamento);
     m4a_engine_set_pwm_enabled(&engine, o->pwm);
-    m4a_engine_set_pcm_mix_rate(&engine, o->pcmMixRate);
+    m4a_engine_set_pcm_freq_mode(&engine, m4a_pcm_freq_mode_from_hz(o->pcmMixRate));
 
     M4ASequencer seq;
     m4a_sequencer_init(&seq, &engine);
@@ -1480,7 +1480,7 @@ oom:
     engine.respectBaseMidiKey = respectBaseMidiKey;
     m4a_engine_set_portamento_enabled(&engine, portamento);
     m4a_engine_set_pwm_enabled(&engine, pwm);
-    m4a_engine_set_pcm_mix_rate(&engine, pcmMixRate);
+    m4a_engine_set_pcm_freq_mode(&engine, m4a_pcm_freq_mode_from_hz(pcmMixRate));
     /* Keep the boot's output so MIDI and compiled-song renders of the same
      * material line up with each other and with an emulator recording. */
     m4a_engine_boot(&engine, true);
