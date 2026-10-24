@@ -1,6 +1,6 @@
 ---
 name: accuracy-harness
-description: Run and interpret the poryaaaa-vs-mgba null-test harness (test/accuracy), save baselines, and debug PSG write timing with mgba_probe / --psg-log / probe_diff.py. Use before and after any engine change, when asked about accuracy numbers, baselines, references, PSG timing, or to add a micro-test or corpus song.
+description: Run and interpret the poryaaaa-vs-mgba null-test harness (test/accuracy), save baselines, attribute a sub--40 dB residual (sample diff, mgba_probe lateness), check loader data against the ROM, and debug PSG write timing with mgba_probe / --psg-log / probe_diff.py. Use before and after any engine or loader change, when asked about accuracy numbers, baselines, references, PSG timing, or to add a micro-test or corpus song.
 ---
 
 # Accuracy harness
@@ -66,11 +66,17 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
    flags regressions over 1 dB.
 4. When a milestone lands (and again after its review fixes, so the next
    agent's "reproduces exactly" check holds), save both the report and the
-   table, then record the numbers in the plan's status section:
+   table, then record the numbers in the plan's status section.
+   `report.json` is whatever the **last** run wrote, so run the default
+   harness immediately before copying (a `--tests` or `--input midi` run
+   in between produces a two-test baseline; this happened once):
    ```sh
+   test/accuracy/tools/accuracy.py > /tmp/full.txt
    cp build/accuracy/report.json test/accuracy/baselines/<date>_<milestone>.json
-   test/accuracy/tools/accuracy.py | grep -vE '^columns|^  null|^  gm|^report' \
+   grep -vE '^columns|^  null|^  gm|^report' /tmp/full.txt \
        > test/accuracy/baselines/<date>_<milestone>.txt
+   test/accuracy/tools/compare_reports.py test/accuracy/baselines/<previous>.json \
+       test/accuracy/baselines/<date>_<milestone>.json   # sanity: all 38 rows present
    ```
 
 ## Testing a review claim or a constant change
@@ -88,6 +94,38 @@ bit-exact tests. For each candidate:
 4. Regression: revert and record the claim as "rejected by measurement" in
    the plan with the numbers. Neutral but source-verified (e.g. an ordering
    rule read from mgba): adopt and say it was harness-neutral.
+5. A claim that improves most tests but costs one `-inf` is **wrong**, not
+   "mostly right": the -inf tests are the ones whose data you can check
+   byte for byte.  The mixer milestone's look-ahead byte did exactly this
+   (12 tests gained 6 dB, pcm_adsr and pcm_bass lost -inf) because the rule
+   was reasoned from the converter's source instead of read from the ROM;
+   the ROM gave the right rule in one step (next section).
+
+## Checking loader data against the ROM
+
+Any claim about what a sample, voice or header byte "is" gets settled by
+reading the test ROM, not the converter's source or the plugin's loader.
+Every symbol's address is in the map, and the ROM is the file mgba plays:
+
+```python
+import struct, re
+rom = open('build/accuracy/rom/accuracy_test.gba', 'rb').read()
+mp = open('test/accuracy/rom/build/accuracy_test.map').read()
+addr = int(re.search(r'0x([0-9a-f]{16})\s+DirectSoundWaveData_sc88pro_flute\b', mp).group(1), 16) - 0x08000000
+typ, status, freq, loopStart, size = struct.unpack_from('<HHIII', rom, addr)
+data = addr + 16
+print(rom[data + size: data + size + 4].hex())      # the bytes after the data
+# compare with what the loader reads:
+# open('~/pokeemerald/sound/direct_sound_samples/sc88pro_flute.bin','rb').read()[16:]
+```
+
+Micro-voice symbols are in `test/accuracy/rom/accuracy_micro.inc`
+(`DirectSoundWaveData_*`, `Cry_*`, `ProgrammableWaveData_*`).  Do this
+*before* editing the loader; it is six lines and replaces a harness
+round-trip.  What the ROM holds for the look-ahead byte, the DPCM block
+tails and the headers is recorded in docs/ACCURACY_PLAN.md ("Done: engine
+milestone 3").
+
 
 ## PSG write timing: probe, log, diff
 
@@ -175,5 +213,63 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
 build/mgba_render build/accuracy/rom/accuracy_test.gba /tmp/ref.wav --frames 240 --type micro --id 0
 python3 -c "import sys; sys.path.insert(0,'test/accuracy/tools'); import metrics; print(metrics.compare_files('/tmp/ref.wav','build/accuracy/out/sq1.wav'))"
 ```
-Micro-test ids are line numbers (from 0) in `test/accuracy/rom/micro/micro.cfg`.
-Song ids come from pokeemerald `include/constants/songs.h`.
+Micro-test ids are line numbers (from 0) in `test/accuracy/rom/micro/micro.cfg`
+(`grep -n '' test/accuracy/rom/micro/micro.cfg`; sq1 0, pcm 10, pcm_cmp
+14, pcm_chord 16, pcm_psg 30).  Song ids come from pokeemerald
+`include/constants/songs.h`.
+
+## Attributing a residual below -40 dB
+
+A PCM test that nulls at -45..-60 instead of -inf differs in a few
+samples.  Find them before suspecting the mixer: the reference is
+`build/accuracy/refs/<romhash-mgba>/<test>.wav`, the render
+`build/accuracy/out/<test>.wav`.
+
+```python
+import numpy as np, wave
+def rd(p):
+    w = wave.open(p); d = np.frombuffer(w.readframes(w.getnframes()), np.int16)
+    return d.reshape(-1, w.getnchannels()).astype(np.int64), w.getframerate()
+r, sr = rd('build/accuracy/refs/<romhash-mgba>/pcm_cmp.wav'); t, _ = rd('build/accuracy/out/pcm_cmp.wav')
+n = min(len(r), len(t)); d = r[:n, 0] - t[:n, 0]
+idx = np.nonzero(np.abs(d) > 20)[0]           # ignore the resampler's +-1 ringing
+runs, a = [], idx[0]
+for p, q in zip(idx, idx[1:]):
+    if q - p > 40: runs.append((a, p)); a = q
+runs.append((a, idx[-1]))
+for a, b in runs: print(f"{a/sr:.4f}s len {(b-a+1)/sr*13379:.0f} pcm samples maxdiff {abs(d[a:b+1]).max()}")
+```
+
+Reading the runs (48 kHz output; one 13379 Hz PCM sample spans about 3.6
+output samples and the band-limited resampler rings for about 5 ms; one
+PCM LSB is about 192 in the int16 output):
+
+- **A run of one PCM sample, a few per second, at no particular note
+  event**: mgba scheduler lateness, not the engine.  Confirm with the
+  probe: `build/probe/mgba_probe <rom> build/probe/<test>.txt 180 2 <id>
+  <map>` and read the `timer0 ... slot_crossed=N (first at cycle C)` line
+  of `build/probe/<test>.txt.events`; `C / 16777216` is the time of the
+  first error run.  pcm_cmp has 9 such crossings, pcm_chord 6, pcm 0 (and
+  pcm is -inf).  This floor is about -55 dB on the micro-tests and is the
+  deferred item 1c in the plan; nothing in the engine fixes it.
+- **A run of about 64 PCM samples at a note start**: one DPCM block, i.e.
+  the decoder or the block data.
+- **A run of one or two samples at the end of a sample or at every loop
+  pass**: the look-ahead byte after the data (check the ROM, section
+  above).
+- **Whole frames (224 samples) off**: envelope or volume arithmetic.
+- **Constant level offset (`gm null` much deeper than `null`)**: a scale
+  constant.
+
+## Hand-built channel tests
+
+`test/test_engine.c` drives the mixer frame by frame with a hand-built
+`M4APCMChannel` through `m4a_mixer_mix_channel(&e, &ch, frame)`, where
+`frame` is `int8_t[2 * GBA_PCM_DMA_BUF_SIZE]` (right side at 0, left at
+`+GBA_PCM_DMA_BUF_SIZE`).  Set `e.pcmDivFreq = 1` so `ch.frequency` is the
+23-bit per-sample step (0x800000 = one source sample per output); the
+engine's real divFreq is 627 at 13379 Hz, and a Golden Sun synth's phase
+step is `(divFreq * frequency) << 3`.  Expected bytes at envelope volume
+128 are `(sample * 128) >> 8`; see `test_mixer_arithmetic` for the
+patterns (ror-8 packing, FIX frame, interpolating frame, loop wrap, lane
+wrap, reverb rounding).
