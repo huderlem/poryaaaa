@@ -434,7 +434,7 @@ void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
  * lands on the same 65536 Hz slot it does in mgba.
  *
  * Offsets inside a channel (cycles from the channel's start):
- *   start sequence, first write: square 1 +231, square 2 +239, wave +257,
+ *   start sequence, first write: square 1 +231, square 2 +237, wave +255,
  *     noise +246; then NR10->NR11 10; NR30->WAVE 26, WAVE->WAVE 15, WAVE->
  *     NR30 6, NR30->NR31 4; NR41->NR43 8; start block -> MO_PIT NRx3: square
  *     202, wave 158, noise 162.
@@ -442,8 +442,10 @@ void m4a_pcm_channel_render(M4APCMChannel *ch, int32_t *mixL, int32_t *mixR)
  *   MO_VOL: NR51 33 after the MO_PIT NRx4, or +207 (square) / +416 (wave,
  *     noise) when nothing was written before; NR51->NRx2 28 (wave 32),
  *     NRx2->NRx4 10, wave NR32->NR30 16, NR30->NR34 6.
- *   CgbOscOff: square NRx2 +203, noise NR42 +220, wave NR30 +229; NRx2->NRx4
- *     14 (square) / 6 (noise).
+ *   CgbOscOff: square NRx2 +203, noise NR42 +220, wave NR30 +229 (release 0),
+ *     149 / 166 / 175 when the pseudo-echo expired; NRx2->NRx4 14 (square) /
+ *     6 (noise).  A plain decay/release step before a write costs 195, a
+ *     sustain step 163, the c15 double step 36 more.
  *   The envelope double-step (prevC15 == 0) adds 199 before the writes.
  *   A channel ends 93 cycles after its last write, or after 244 if it wrote
  *   nothing.
@@ -465,10 +467,10 @@ typedef struct {
  * the real pool's timeline) writes at the current cycle. */
 static void cgb_sync(CgbIo *io)
 {
-    if (io->cursor > io->gba->now) {
-        m4a_gba_run(io->gba, io->cursor - 1);
-        io->gba->now = io->cursor;
-    }
+    /* mgba runs every event due at or before an instruction's start cycle
+     * before executing it, so a store at T lands after the events due at T. */
+    if (io->cursor > io->gba->now)
+        m4a_gba_run(io->gba, io->cursor);
 }
 
 static void cgb_write(CgbIo *io, uint32_t reg, uint8_t value)
@@ -689,7 +691,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
     int chn = ch->type;
     /* First register write of a start sequence, a pitch-only update, a
      * volume-only update and an oscillator-off, from the channel's start. */
-    int startAt = chn == 1 ? 231 : chn == 2 ? 239 : chn == 3 ? 255 : 246;
+    int startAt = chn == 1 ? 231 : chn == 2 ? 237 : chn == 3 ? 255 : 246;
     if (chn == 3 && ch->wavePointer == ch->currentWavePointer)
         startAt = 261;                   /* no wave RAM upload: NR30 = 0 is the first write */
     /* Start block -> MO_PIT write, for a start that goes straight to the
@@ -699,8 +701,9 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
     const int fixPit = (chn < 4 && ch->fixedFreq) ? 40 : 0;   /* TONEDATA_TYPE_FIX rounding */
     const int pitAt = 166 + fixPit;
     int volAt = 207;                     /* decay start (and other transitions) */
-    int offAt = chn == 3 ? 237 : chn == 4 ? 228 : 211;   /* release 0 / no echo -> off */
+    int offAt = chn == 3 ? 229 : chn == 4 ? 220 : 203;   /* release 0 / no echo -> off */
     int envExtra = 0;                    /* envelope passes before the first write */
+    int envDouble = 0;                   /* the c15 double step's second pass */
     uint32_t nrx0, nrx1, nrx2, nrx3, nrx4;
     cgb_regs(chn, &nrx0, &nrx1, &nrx2, &nrx3, &nrx4);
 
@@ -756,7 +759,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
     } else if ((ch->status & CHN_STOP) && (ch->status & CHN_ENV_MASK)) {
         ch->status &= ~CHN_ENV_MASK;
         ch->envelopeCounter = ch->release;
-        volAt = 215;                     /* release start */
+        volAt = 207;                     /* release start */
         if ((int8_t)(ch->release & mask)) {
             ch->modify |= MO_VOL;
             if (chn != 3)
@@ -791,6 +794,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
                     }
                 } else {
                     ch->envelopeCounter = ch->release;
+                    envExtra += 32;      /* a plain release step: 195 (sq1_env decay frames) */
                 }
             } else if ((ch->status & CHN_ENV_MASK) == CHN_ENV_SUSTAIN) {
             envelope_sustain:
@@ -819,6 +823,7 @@ void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAud
                     }
                 } else {
                     ch->envelopeCounter = ch->decay;
+                    envExtra += 32;      /* a plain decay step: 195 */
                 }
             } else {
                 ch->envelopeVolume++;
@@ -848,14 +853,18 @@ envelope_step_complete:
     if (prevC15 == 0) {
         prevC15--;
         envExtra += 36;                  /* the second pass */
+        envDouble += 36;
         goto envelope_step_repeat;
     }
 
 envelope_complete:
     /* Opt-in pulse-width modulation (not stock CgbSound): a duty change on a
      * sounding square is written to NRx1, which the PSG applies at once. */
-    if ((ch->modify & MO_DUTY) && (chn == 1 || chn == 2))
+    if ((ch->modify & MO_DUTY) && (chn == 1 || chn == 2)) {
+        if (!io.wrote)
+            io.cursor = chanStart + pitAt + envExtra;
         cgb_write(&io, nrx1, (uint8_t)(((uint32_t)ch->dutyCycle << 6) + ch->length));
+    }
 
     /* 3. apply pitch to HW registers */
     if (ch->modify & MO_PIT) {
@@ -865,7 +874,7 @@ envelope_complete:
         if (chn < 4 && ch->fixedFreq)
             ch->frequency = (ch->frequency + 1) & 0x7fe;
 
-        io.cursor = io.wrote ? io.cursor + startToPit + fixPit : chanStart + pitAt + envExtra;
+        io.cursor = io.wrote ? io.cursor + startToPit + fixPit + envExtra : chanStart + pitAt + envExtra;
         if (chn != 4)
             cgb_write(&io, nrx3, (uint8_t)ch->frequency);
         else
@@ -877,7 +886,7 @@ envelope_complete:
 
     /* 4. apply envelope & volume to HW registers */
     if (ch->modify & MO_VOL) {
-        io.cursor = io.wrote ? io.cursor + 33 : chanStart + volAt + (envExtra % 163);
+        io.cursor = io.wrote ? io.cursor + 33 : chanStart + volAt + envDouble;
         cgb_write(&io, PSG_REG_NR51,
                   (uint8_t)((cgb_read(&io, PSG_REG_NR51) & ~ch->panMask) | ch->pan));
         if (chn == 3) {
@@ -905,5 +914,5 @@ envelope_complete:
 
 channel_complete:
     ch->modify = 0;
-    *cursor = io.wrote ? io.cursor + 93 : chanStart + 244 + envExtra;
+    *cursor = io.wrote ? io.cursor + 93 : chanStart + M4A_CYC_CGB_ACTIVE_QUIET + envExtra;
 }

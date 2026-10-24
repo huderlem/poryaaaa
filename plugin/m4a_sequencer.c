@@ -580,8 +580,10 @@ static void track_tick(M4ASequencer *s, int i)
             continue;
         uint8_t *gate = chan_gate_time(e, h);
         if (*gate != 0) {
-            if (--*gate == 0)
+            if (--*gate == 0) {
                 *chan_status(e, h) |= CHN_STOP;
+                s->frameCycles += M4A_CYC_GATE_EXPIRY;
+            }
         }
     }
 

@@ -650,6 +650,55 @@ Not a timing item but found on the way: `voicegroup_loader.c` had made
 this time.  The MIDI path (`--input midi`) still renders (lag 35-50 ms
 against the ROM as before; it is not expected to null).
 
+Code review of the timing model (two independent reads: the model and
+driver against m4a.c CgbSound / m4a_1.s MPlayMain and the probe frames;
+the probe and the scheduler interaction against mgba `core/timing.c`,
+`gba/{timer,audio}.c`, `gb/audio.c`).  Verified and fixed (commit after
+9751614):
+
+- Event ordering at a write cycle: mgba's run loop processes every event
+  due by an instruction's start cycle before executing it, so a store at T
+  lands *after* the events due at T; the engine did the opposite
+  (`m4a_gba_run(cursor - 1)`).  Now `m4a_gba_run(cursor)` / `m4a_gba_run(next)`.
+  Only a PSG frame step coinciding with a write could differ; the harness
+  is unchanged (adopted on the source reading, verified neutral).
+- The CgbSound entry is based on the SoundMain stamp
+  (`engine->soundMainStamp`), not on `gba.now`, which a TrackStop's
+  CgbOscOff writes had already moved by 6-14 cycles.
+- Constants that disagreed with the probe frames: the gate-expiry branch
+  of MPlayMain's chain walk costs 8 per expiring channel (sq1/sq1_env/noise
+  frame 33: entry 1874 vs 1866; psg_mix frame 63: +32 for four) and is
+  charged in the sequencer; the oscillator-off and release-start offsets
+  lose the 8 they had absorbed (203/220/229 and 207).  A plain decay or
+  release step before a write costs 195, a sustain step 163 (sq1_env
+  frames 9/20/31).  A quiet active channel costs 238 (psg_mix frames
+  23/30/36/43/49/56: the wave's NR51 at 338 after two 163-pass squares).
+  Square-2 start 237 and the PWM duty write positioned like a pitch write;
+  envelope passes after a start block count toward the MO_PIT write.
+- Probe: timer-0 slot crossings now use the DAC-grid test (the `until`
+  form misses crossings at a 1024-cycle window end); IWRAM symbol
+  addresses come from the map; a square-phase counter for the frame step
+  (GBAudioUpdateFrame runs the PSG to the late time).  Re-measured over
+  the same six runs: identical counts (0 crossings in the micro-tests,
+  5 / 6 in littleroot / groudon, `until` form and grid form agree) and
+  **0 square duty steps between a frame event's due and processing time**
+  in any run, so 1c's conclusion stands.
+
+Review claims **rejected by measurement**: "the tick's per-track cost is
+34 + 26 per live channel in the chain" (sq1 frames 36-47 read 438 instead
+of 464 once the note has died).  Charging it per chained channel breaks
+the start frames (sq1/wave/noise -26, psg_mix -104; sq1_alt, wave,
+wave_alt, psg_mix lose -inf) because the start frame costs the full 60
+with an empty chain; the 438 belongs to the waiting-track state and is
+not modeled.  Noted, not acted on (unmeasured): a channel idling in
+pseudo-echo is charged the 238 quiet cost although its CgbSound pass is
+shorter; ply_fine's ClearChain; ply_note's ClearChain of a dead chained
+channel; TrackStop's writes stamped at the SoundMain entry rather than
+inside MPlayMain.  Write-cycle residual after the review: sq1, sq1_env,
+wave 0; noise 0 (start +3 in psg_mix's noise-after-wave position); lfo_psg
+<= 4; psg_mix <= 29; songs unchanged from the figures above.  Harness:
+27/38, 0 regressions against the timing-model baseline.
+
 ### Next: engine milestone 3, the mixer (handoff, 2026-10-24)
 
 Start from commit e37d52f (branch `accuracy-harness`).  Before any change

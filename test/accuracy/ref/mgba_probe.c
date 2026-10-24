@@ -55,9 +55,10 @@
 #define LINE160 (160 * CYCLES_PER_LINE)
 #define LINE150 (150 * CYCLES_PER_LINE)
 
-/* ROM symbols read at breakpoints (from the map; fixed IWRAM layout) */
-#define ADDR_gSoundInfo    0x03000f70
-#define ADDR_gMPlayInfo_BGM 0x03002008
+/* IWRAM symbols read at breakpoints, taken from the map (fallbacks are the
+ * 2026-10-24 build's addresses) */
+static uint32_t ADDR_gSoundInfo = 0x03000f70;
+static uint32_t ADDR_gMPlayInfo_BGM = 0x03002008;
 #define O_SoundInfo_c15    10
 #define O_MPlayInfo_trackCount 8
 #define O_MPlayInfo_tempoC 0x22
@@ -94,10 +95,12 @@ struct LateStats {
 	long slotCrossed;    /* a 256-cycle DAC slot boundary between due and processing time */
 	long maxLate;
 	long slotCrossedFirst; /* cycle of the first crossing, -1 if none */
+	long untilShifted;   /* timer0 only: mgba's own `until` arithmetic changed (misses window ends) */
+	long phaseCrossed;   /* psgframe only: a square's duty step fell between due and processing time */
 };
-static struct LateStats gTimer0 = { "timer0", 0, {0}, 0, 0, -1 };
-static struct LateStats gSample = { "sample", 0, {0}, 0, 0, -1 };
-static struct LateStats gPsgFrame = { "psgframe", 0, {0}, 0, 0, -1 };
+static struct LateStats gTimer0 = { "timer0", 0, {0}, 0, 0, -1, 0, 0 };
+static struct LateStats gSample = { "sample", 0, {0}, 0, 0, -1, 0, 0 };
+static struct LateStats gPsgFrame = { "psgframe", 0, {0}, 0, 0, -1, 0, 0 };
 static void (*gOrigTimer0)(struct mTiming*, void*, uint32_t);
 static void (*gOrigSample)(struct mTiming*, void*, uint32_t);
 static void (*gOrigPsgFrame)(struct mTiming*, void*, uint32_t);
@@ -144,7 +147,12 @@ static int fifoSlotShifted(uint32_t late) {
 
 static void hookTimer0(struct mTiming* timing, void* context, uint32_t cyclesLate) {
 	int32_t now = mTimingCurrentTime(timing);
-	int crossed = fifoSlotShifted(cyclesLate);
+	/* A boundary of the 256-cycle DAC grid in (due, now] moves the FIFO
+	 * sample one slot later (GBAAudioSampleFIFO picks the slot from the
+	 * processing time), including at a 1024-cycle window end, which the
+	 * `until` arithmetic alone cannot see once the sample event has run. */
+	int crossed = slotCrossed(now, cyclesLate);
+	if (fifoSlotShifted(cyclesLate)) gTimer0.untilShifted++;
 	lateRecord(&gTimer0, cyclesLate, crossed);
 	if (crossed && gOut) fprintf(gOut, "%10d f%u v%3d L timer0 late=%u due=%d (FIFO sample lands one DAC slot later)\n", now, gGba->video.frameCounter, gGba->video.vcount, cyclesLate, now - (int32_t) cyclesLate);
 	gOrigTimer0(timing, context, cyclesLate);
@@ -155,9 +163,29 @@ static void hookSample(struct mTiming* timing, void* context, uint32_t cyclesLat
 	lateRecord(&gSample, cyclesLate, slotCrossed(mTimingCurrentTime(timing), cyclesLate));
 	gOrigSample(timing, context, cyclesLate);
 }
+/* GBAudioUpdateFrame runs the PSG to the processing time, not the due time:
+ * a square whose duty step falls in (due, now] has its pending DAC slot
+ * sampled after that step instead of before it. */
+static int squarePhaseCrossed(int32_t now, uint32_t late) {
+	struct GBAudio* psg = &gGba->audio.psg;
+	int32_t due = now - (int32_t) late;
+	int n = 0;
+	if (psg->playingCh1) {
+		int32_t period = 4 * (2048 - psg->ch1.control.frequency) * psg->timingFactor;
+		if (period > 0 && (now - psg->ch1.lastUpdate) / period != (due - psg->ch1.lastUpdate) / period) n++;
+	}
+	if (psg->playingCh2) {
+		int32_t period = 4 * (2048 - psg->ch2.control.frequency) * psg->timingFactor;
+		if (period > 0 && (now - psg->ch2.lastUpdate) / period != (due - psg->ch2.lastUpdate) / period) n++;
+	}
+	return n;
+}
 static void hookPsgFrame(struct mTiming* timing, void* context, uint32_t cyclesLate) {
 	int32_t now = mTimingCurrentTime(timing);
 	int crossed = slotCrossed(now, cyclesLate);
+	int phase = cyclesLate ? squarePhaseCrossed(now, cyclesLate) : 0;
+	gPsgFrame.phaseCrossed += phase;
+	if (phase && gOut) fprintf(gOut, "%10d f%u v%3d L psgframe late=%u square duty step between due and processing (%d ch)\n", now, gGba->video.frameCounter, gGba->video.vcount, cyclesLate, phase);
 	lateRecord(&gPsgFrame, cyclesLate, crossed);
 	if (crossed && gOut) fprintf(gOut, "%10d f%u v%3d L psgframe late=%u due=%d (slot sampled before the frame step)\n", now, gGba->video.frameCounter, gGba->video.vcount, cyclesLate, now - (int32_t) cyclesLate);
 	gOrigPsgFrame(timing, context, cyclesLate);
@@ -282,8 +310,8 @@ static const char* regName(uint8_t lo) {
 }
 
 static void writeStats(FILE* f, struct LateStats* s) {
-	fprintf(f, "%-9s events=%ld max_late=%ld slot_crossed=%ld (first at cycle %ld)\n  late histogram: 0:%ld 1-7:%ld 8-15:%ld 16-31:%ld 32-63:%ld 64-127:%ld 128-255:%ld 256+:%ld\n",
-	        s->name, s->events, s->maxLate, s->slotCrossed, s->slotCrossedFirst,
+	fprintf(f, "%-9s events=%ld max_late=%ld slot_crossed=%ld (first at cycle %ld) until_shifted=%ld square_phase_crossed=%ld\n  late histogram: 0:%ld 1-7:%ld 8-15:%ld 16-31:%ld 32-63:%ld 64-127:%ld 128-255:%ld 256+:%ld\n",
+	        s->name, s->events, s->maxLate, s->slotCrossed, s->slotCrossedFirst, s->untilShifted, s->phaseCrossed,
 	        s->late[0], s->late[1], s->late[2], s->late[3], s->late[4], s->late[5], s->late[6], s->late[7]);
 }
 
@@ -304,6 +332,8 @@ int main(int argc, char** argv) {
 			if (sscanf(line, " 0x%lx %127s", &a, name) == 2) {
 				int take = !strncmp(name, "ply_", 4);
 				for (int i = 0; !take && want[i]; ++i) if (!strcmp(name, want[i])) take = 1;
+				if (!strcmp(name, "gSoundInfo")) ADDR_gSoundInfo = (uint32_t) a;
+				if (!strcmp(name, "gMPlayInfo_BGM")) ADDR_gMPlayInfo_BGM = (uint32_t) a;
 				if (take && gNumSyms < 128) {
 					int dup = 0;
 					for (int i = 0; i < gNumSyms; ++i) if (!strcmp(gSyms[i].name, name)) dup = 1;

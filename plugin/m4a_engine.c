@@ -518,7 +518,9 @@ static void mix_pcm_frame(M4AEngine *engine)
 /* m4aSoundMain: the VBlank frame. */
 static void sound_main(M4AEngine *engine)
 {
+    engine->soundMainStamp = engine->gba.now;
     m4a_engine_tick(engine);
+    engine->soundMainStamp = -1;
     mix_pcm_frame(engine);
 }
 
@@ -558,9 +560,9 @@ static void psg_frame_cb(void *user, int64_t timestamp)
 }
 
 /* Advance the whole machine to `until` cycles, running hardware events and
- * the driver's interrupts in time order.  On a tie the CPU's register writes
- * come first: in mgba the store completes inside the instruction and the
- * events due at that cycle are processed after it. */
+ * the driver's interrupts in time order.  Events due at a cycle run before the
+ * driver's writes at that cycle: mgba processes every event due by an
+ * instruction's start cycle before executing it. */
 static void run_until(M4AEngine *engine, int64_t until)
 {
     M4AGbaAudio *g = &engine->gba;
@@ -573,9 +575,11 @@ static void run_until(M4AEngine *engine, int64_t until)
             m4a_gba_run(g, until);
             return;
         }
-        m4a_gba_run(g, next - 1);
-        if (g->now < next)   /* a frame's register writes may already be past */
-            g->now = next;
+        /* Events due at `next` run before the driver's writes at `next`, as
+         * mgba processes every event due by an instruction's start cycle
+         * before executing it.  A frame's register writes may already have
+         * carried `now` past `next`; m4a_gba_run then does nothing. */
+        m4a_gba_run(g, next);
         while (engine->bootStep < BOOT_TABLE_LEN && sBootTable[engine->bootStep].cycle == next) {
             boot_action(engine, engine->bootStep);
             engine->bootStep++;
@@ -631,6 +635,7 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
      * every micro-test envelope is in sustain when the double-step lands.) */
     engine->c15 = 0;
     engine->cgbEntryCycles = M4A_CYC_CGB_ENTRY_BASE + M4A_CYC_PER_TRACK - M4A_CYC_SOUNDMAIN_ENTRY;
+    engine->soundMainStamp = -1;
     engine->tempoD = 150;
     engine->tempoU = 0x100;
     engine->tempoI = 150;
@@ -1929,7 +1934,8 @@ void m4a_engine_tick(M4AEngine *engine)
      * (cgbEntryCycles) and each channel advances a cursor through the
      * measured write offsets.  The shadow pool (polyphony debug) replays
      * the same timeline on its own PSG. */
-    int64_t cgbEntry = engine->gba.now + engine->cgbEntryCycles;
+    int64_t cgbEntry = (engine->soundMainStamp >= 0 ? engine->soundMainStamp : engine->gba.now)
+                     + engine->cgbEntryCycles;
     for (int pool = 0; pool < TOTAL_CGB_CHANNELS / MAX_CGB_CHANNELS; pool++) {
         int64_t cursor = cgbEntry + M4A_CYC_CGB_PROLOGUE;
         for (int c = 0; c < MAX_CGB_CHANNELS; c++) {

@@ -468,6 +468,7 @@ struct M4AEngine {
      * steady one-track value applies.  See docs/ACCURACY_PLAN.md,
      * "SoundMain timing probe". */
     int32_t cgbEntryCycles;
+    int64_t soundMainStamp;      /* cycle of the current SoundMain (-1 outside one) */
     /* ply_note's DirectSound channel search: busy channels examined before
      * a free one (maxPcmChannels when none was free), for the timing model. */
     int lastNoteScan;
@@ -484,7 +485,8 @@ struct M4AEngine {
 #define M4A_CYC_PER_TRACK          6     /* ... + 6 per existing track */
 #define M4A_CYC_TICK_BASE          404   /* a tempo tick with no commands ... */
 #define M4A_CYC_TICK_PER_TRACK     84    /* ... + 84 per existing track after the first ... */
-#define M4A_CYC_TICK_FIRST_TRACK   60    /* ... which costs 60 (464 for one track) */
+#define M4A_CYC_TICK_FIRST_TRACK   60    /* ... which costs 60 (464 for one track; 438 measured once its chain is empty and it is waiting) */
+#define M4A_CYC_GATE_EXPIRY        8     /* a channel's gate time reaching 0 in the chain walk */
 #define M4A_CYC_CLEAR_CHAIN        87    /* a dead channel dropped from a track's chain */
 #define M4A_CYC_LFO_STEP           120   /* per track with an active LFO per tick */
 #define M4A_CYC_TRACK_APPLY        376   /* VOLCHG/PITCHG pass, per channel in a flagged track's chain */
@@ -502,7 +504,7 @@ struct M4AEngine {
  * channel without register writes, and the tail after a channel's last write. */
 #define M4A_CYC_CGB_PROLOGUE       120
 #define M4A_CYC_CGB_INACTIVE       41
-#define M4A_CYC_CGB_ACTIVE_QUIET   244
+#define M4A_CYC_CGB_ACTIVE_QUIET   238
 #define M4A_CYC_CGB_CHANNEL_TAIL   93
 
 /* Engine lifecycle */
