@@ -82,8 +82,9 @@ static int write_wav(const char *path, const float *left, const float *right,
     write_u32_le(f, dataSize);
 
     for (uint64_t i = 0; i < numSamples; i++) {
-        int32_t l = (int32_t)(left[i]  * 32767.0f);
-        int32_t r = (int32_t)(right[i] * 32767.0f);
+        /* The engine's output is int16 / 32768, so this is exact. */
+        int32_t l = (int32_t)lrintf(left[i]  * 32768.0f);
+        int32_t r = (int32_t)lrintf(right[i] * 32768.0f);
         if (l >  32767)  l =  32767;
         if (l < -32768)  l = -32768;
         if (r >  32767)  r =  32767;

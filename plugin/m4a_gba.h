@@ -102,12 +102,12 @@ typedef struct {
     const int16_t *ring;        /* [2][ringSize]: A's buffer then B's */
     int ringSize;
 
-    /* Timer 0, period 280896 / pcmSamplesPerVBlank cycles (exact rational) */
+    /* Timer 0, period 280896 / pcmSamplesPerVBlank cycles, integer like the
+     * game's TM0CNT_L reload (1254 at 13379 Hz) */
     bool timerEnabled;
     int64_t timerNext;
     int timerPeriodNum;         /* 280896 */
     int timerPeriodDen;         /* pcmSamplesPerVBlank */
-    int timerRem;               /* Bresenham remainder */
 
     M4AGbaPsgSampleFn psgSample;
     M4AGbaPsgFrameFn psgFrame;

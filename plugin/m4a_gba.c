@@ -45,7 +45,6 @@ void m4a_gba_destroy(M4AGbaAudio *g)
 void m4a_gba_set_pcm_rate(M4AGbaAudio *g, int pcmSamplesPerVBlank, const int16_t *ring, int ringSize)
 {
     g->timerPeriodDen = pcmSamplesPerVBlank > 0 ? pcmSamplesPerVBlank : 224;
-    g->timerRem = 0;
     g->ring = ring;
     g->ringSize = ringSize;
     g->fifo[0].srcPos = g->fifo[1].srcPos = 0;
@@ -97,10 +96,7 @@ void m4a_gba_timer_enable(M4AGbaAudio *g)
      * comes one full period later. */
     if (!g->timerEnabled) {
         g->timerEnabled = true;
-        g->timerRem = 0;
-        int64_t period = g->timerPeriodNum / g->timerPeriodDen;
-        g->timerRem = g->timerPeriodNum % g->timerPeriodDen;
-        g->timerNext = g->now + period;
+        g->timerNext = g->now + g->timerPeriodNum / g->timerPeriodDen;
     }
 }
 
@@ -109,15 +105,12 @@ void m4a_gba_timer_disable(M4AGbaAudio *g)
     g->timerEnabled = false;
 }
 
+/* SampleFreqSet programs REG_TM0CNT_L = -(280896 / pcmSamplesPerVBlank), an
+ * integer reload, and mgba's timer then overflows every 0x10000 - reload
+ * cycles with no fractional carry (1254 at 224 samples per VBlank). */
 static void timer_schedule_next(M4AGbaAudio *g)
 {
-    int64_t period = g->timerPeriodNum / g->timerPeriodDen;
-    g->timerRem += g->timerPeriodNum % g->timerPeriodDen;
-    if (g->timerRem >= g->timerPeriodDen) {
-        g->timerRem -= g->timerPeriodDen;
-        period++;
-    }
-    g->timerNext += period;
+    g->timerNext += g->timerPeriodNum / g->timerPeriodDen;
 }
 
 /* GBAAudioWriteFIFO: one DMA word into the FIFO ring (no fullness check,

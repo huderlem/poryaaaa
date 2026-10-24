@@ -45,11 +45,10 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
   much better than raw, the error is a level offset, not a waveform error.
 - `lag ms`: alignment applied to poryaaaa's render, chosen as the lag with
   the deepest raw null among the envelope-correlation estimate and the top
-  waveform cross-correlation peaks. With the sequencer it is 53.6 ms on
-  every PCM test and every song (the ROM starts on frame 1 plus DMA
-  latency). PSG tests sit at ~36 ms (wave, noise) but square tests are
-  period-ambiguous until the PSG port nulls. A lag that differs from its
-  class, or sits at the window edge, means the waveforms do not correlate;
+  waveform cross-correlation peaks. Since the output stage (milestone 2)
+  it is 0.0 ms on every test and song: the engine reproduces the ROM's
+  start-up timing itself. A nonzero lag now means the waveforms do not
+  correlate (e.g. a pure-PSG song whose CgbSound write timing is off);
   look at them, do not trust that row.
 - `drift`: lag slope in ms per second over 4 s segments (songs only). Any
   nonzero value is a tempo mismatch and makes `null` meaningless for that
@@ -70,8 +69,11 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
    the plan's status section.
 
 Never run `--update-refs` to make numbers better. References change only
-when the ROM changes (micro MIDIs, `accuracy_micro.inc`, ROM sources), and
-the ROM hash in the refs path tells you when that happened.
+when the ROM changes (micro MIDIs, `accuracy_micro.inc`, ROM sources) or
+the reference definition does (the refs path is keyed on the ROM hash and
+`mgba_render --version`, which names the resampler: `mGBA 0.10.5+m4a_blip`
+is mgba's DAC stream through the engine's own m4a_blip, the reference since
+2026-10-24; `--native-resampler` gives mgba's sinc output for listening).
 
 ## Add a test
 

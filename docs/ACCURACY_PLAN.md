@@ -260,7 +260,7 @@ documented gaps: hand-written-only XCMDs (xwave, xcmd_0D sample start
 offset) are consumed but not applied; memacc indices are masked to the
 16-byte area where the GBA reads out of bounds.
 
-### In progress: engine milestone 2, the output stage (branch `accuracy-harness`)
+### Done: engine milestone 2, the output stage (branch `accuracy-harness`)
 
 Ordered so each step is independently verifiable and committed; the harness
 gates each.
@@ -319,20 +319,20 @@ dB, lag 0.0 ms and drift 0.0 everywhere.
 | test | before | after | | test | before | after |
 |------|-------:|------:|-|------|-------:|------:|
 | sq1 | -2.4 | -36.7 | | pcm_chord | -9.0 | -28.6 |
-| sq1_env | -2.2 | -3.5 | | pcm_bass | -9.0 | **-66.5** |
+| sq1_env | -2.2 | -3.5 | | pcm_bass | -9.0 | **-inf** |
 | sq1_sweep | 0.0 (silent) | **-43.1** | | pan | -9.3 | **-48.6** |
-| sq1_alt | -1.6 | -35.1 | | vol | -9.4 | **-56.2** |
-| sq2 | -1.3 | **-73.4** | | vel | -9.4 | -56.2 (worst 1 s -38.6) |
+| sq1_alt | -1.6 | -35.1 | | vol | -9.4 | **-56.7** |
+| sq2 | -1.3 | **-inf** (bit-exact) | | vel | -9.4 | -56.7 (worst 1 s -38.7) |
 | sq2_alt | -0.7 | -34.1 | | bend | -9.4 | **-43.1** |
 | wave | -6.9 | -11.9 | | lfo_vib | -9.4 | **-42.6** |
 | wave_alt | -6.2 | -10.6 | | lfo_trem | -9.4 | **-42.0** |
 | noise | -1.0 | -5.3 | | lfo_pan | -9.4 | **-42.1** |
 | noise7 | -2.4 | -6.2 | | lfo_delay | -9.4 | **-42.3** |
 | pcm | -9.2 | **-46.3** | | lfo_psg | -1.1 | -20.7 |
-| pcm_hi | -6.3 | **-47.2** | | tune | -9.3 | **-58.2** |
-| pcm_adsr | -7.4 | **-64.0** | | tune_psg | -3.2 | -32.8 |
-| pcm_drum | -8.2 | **-69.1** | | psg_mix | -0.1 | -2.4 |
-| pcm_cmp | -8.2 | **-54.6** | | pcm_psg | -2.5 | -17.0 |
+| pcm_hi | -6.3 | **-47.2** | | tune | -9.3 | **-58.6** |
+| pcm_adsr | -7.4 | **-inf** | | tune_psg | -3.2 | -32.8 |
+| pcm_drum | -8.2 | **-inf** | | psg_mix | -0.1 | -2.4 |
+| pcm_cmp | -8.2 | **-55.0** | | pcm_psg | -2.5 | -17.0 |
 | pcm_reverb | -7.2 | -10.4 | | | | |
 
 | song | before | after | | song | before | after |
@@ -375,6 +375,58 @@ Findings:
    -40..-70, so song nulls are now bounded by PSG write timing and the
    mixer items above.  mus_weather_groudon's drift column is 0 now (it was
    noise on an uncorrelated signal).
+
+Code review (two independent reads: scheduler/FIFO/blip/mgba_render
+capture against mgba `src/gba/{audio,timer,dma}.c`, `core/timing.c`,
+blip_buf; PSG + driver against `src/gb/audio.c`, `src/gba/io.c` and
+`m4a.c` CgbSound/CgbOscOff/CgbModVol/MPlayExtender).  Everything else in
+both reads was verified line for line.  Fixed (the review-fixes commit):
+
+- `poryaaaa_render` wrote `(int)(x * 32767)`, truncating every sample by
+  up to 1 LSB; now `lrintf(x * 32768)`, exact for the engine's int16/32768
+  output.  sq2, pcm_adsr, pcm_drum and pcm_bass now null to **-inf**
+  (bit-identical to mgba through the shared resampler).
+- Timer 0 period is the game's integer reload (`TM0CNT_L = -(280896 /
+  spv)`, 1254 cycles at 224) instead of an exact rational; identical at
+  13379 Hz, matters for the other sound-mode rates.
+- CPU register writes at a cycle now land before the hardware events due at
+  that cycle (mgba completes the store inside the instruction).  No tie
+  occurs in the corpus (the SoundMain and VSync stamps are 1 and 63 mod 64
+  while events are multiples of 64), so the numbers did not move.
+- SOUNDBIAS boot write at 5760 as measured (was 5750; same output).
+- CgbModVol is called only where CgbSound calls it (note start and
+  envelopeCounter == 0); MPlayMain's VOLCHG pass is ChnVolSetAsm + MO_VOL.
+  Neutral on the corpus.
+
+Review claims **rejected by measurement** (both make lfo_psg worse against
+mgba, so the reference decides):
+
+- "c15 should start at 0 (SoundInit zero-fills SoundInfo), so the first
+  CgbSound reloads 14."  With 0 lfo_psg goes -20.7 -> -10.8 dB; 14 (the
+  engine's first tick, frame 2's SoundMain, then sees 13) matches mgba.
+  Reading: the ROM's frame-1 VBlank IRQ is pending when IME is set at
+  cycle 323299 (just after that VBlank), so one SoundMain/CgbSound runs
+  before frame 2's; the engine's boot does not replay it (PCM is unaffected
+  since that frame's ring slot is rewritten before the DMA reaches it).  A
+  probe of `SoundInfo.c15` after the first CgbSound would confirm; the c15
+  phase is right either way.
+- "`envelopeGoal = (u32)(left + right)` on a u8 field wraps the sum at 256
+  before `/= 16`."  The wrapped form nulls 12 dB worse (-8.4); agbcc keeps
+  the sum in a register and stores `(left + right) / 16`, so the goal can
+  reach 31 and the `gCgb3Vol` over-read (finding 3) is real.
+
+Deferred, documented: (a) mgba processes timer/frame events at the
+*late* time of the instruction that crossed them (`cyclesLate` corrects
+the rescheduling, not GBAAudioSampleFIFO's `until` or `_updateFrame`'s
+sample time), so a FIFO sample can land one 65536 Hz slot later in mgba
+while the CPU is busy; a plausible -40..-50 dB floor on PCM that needs a
+probe to quantify before chasing mixer items below it.  (b) The FIFO DMA
+moves 4 words instantly instead of over ~40 cycles (only observable with a
+VSync restart inside that window; never at 224 samples per VBlank).
+(c) `m4a_engine_set_pcm_mix_rate` after boot does not replay
+SampleFreqSet (plugin path only).  (d) Sound-mode bit 0 (Emerald's
+default "Mono" option forces center pan on PSG) is not modeled; the test
+ROM never sets it.
 
 Facts measured in mgba 0.10.5 with `test/accuracy/ref/mgba_probe.c` (a
 libmgba debugger probe; the plan's earlier assumptions were wrong on the

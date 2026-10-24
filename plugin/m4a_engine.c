@@ -368,7 +368,7 @@ enum {
 static const struct { int64_t cycle; int action; uint32_t reg; uint8_t value; } sBootTable[] = {
     { 5720,   BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F }, /* SoundInit: SOUNDCNT_X */
     { 5737,   BOOT_FIFO_RESET, 0, 0 },
-    { 5750,   BOOT_SOUNDBIAS, 0, 0 },
+    { 5760,   BOOT_SOUNDBIAS, 0, 0 },
     { 15873,  BOOT_DMA_ON, 0, 0 },
     { 39794,  BOOT_TIMER_ON, 0, 0 },
     { 39875,  BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F }, /* MPlayExtender */
@@ -555,8 +555,9 @@ static void psg_frame_cb(void *user, int64_t timestamp)
 }
 
 /* Advance the whole machine to `until` cycles, running hardware events and
- * the driver's interrupts in time order (hardware first on a tie, as a CPU
- * write at a cycle lands after the events scheduled for it). */
+ * the driver's interrupts in time order.  On a tie the CPU's register writes
+ * come first: in mgba the store completes inside the instruction and the
+ * events due at that cycle are processed after it. */
 static void run_until(M4AEngine *engine, int64_t until)
 {
     M4AGbaAudio *g = &engine->gba;
@@ -569,7 +570,8 @@ static void run_until(M4AEngine *engine, int64_t until)
             m4a_gba_run(g, until);
             return;
         }
-        m4a_gba_run(g, next);
+        m4a_gba_run(g, next - 1);
+        g->now = next;
         while (engine->bootStep < BOOT_TABLE_LEN && sBootTable[engine->bootStep].cycle == next) {
             boot_action(engine, engine->bootStep);
             engine->bootStep++;
@@ -616,6 +618,12 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     engine->auditionPan = M4A_AUDITION_PAN_NONE;
     engine->maxPcmChannels = 5;  /* default, matches Pokemon Emerald init */
     engine->polyEventClock = M4A_POLY_TICK_NONE;
+    /* c15 phase.  SoundInit zero-fills SoundInfo, so the first CgbSound the
+     * ROM runs sees c15 == 0 and reloads 14; the engine's first tick is the
+     * frame-2 SoundMain and starting from 14 (-> 13) nulls against mgba
+     * (lfo_psg -20.7 dB vs -10.8 with 0), i.e. the ROM has already run one
+     * CgbSound by then -- frame 1's VBlank IRQ, pending when IME is set at
+     * cycle 323299 right after it.  Not modeled further; see the plan. */
     engine->c15 = 14;
     engine->tempoD = 150;
     engine->tempoU = 0x100;
@@ -1091,8 +1099,7 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
         /* `_alt` PSG voices; inert on noise -- see m4a_cgb_fix_freq(). */
         ch->fixedFreq = (voice->type & VOICE_TYPE_FIX) && voiceType != 4;
 
-        cgb_chn_vol_set(ch, track);
-        m4a_cgb_mod_vol(ch);
+        cgb_chn_vol_set(ch, track);   /* CgbModVol runs in CgbSound at the start frame */
 
         if (voiceType == 1 || voiceType == 2) {
             ch->dutyCycle = (uint8_t)(uintptr_t)voice->wavePointer & 0x03;
@@ -1333,10 +1340,9 @@ static void apply_track_volumes(M4AEngine *engine, M4ATrack *track, int trackInd
         M4ACGBChannel *ch = &engine->cgbChannels[i];
         if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
             cgb_chn_vol_set(ch, track);
-            m4a_cgb_mod_vol(ch);
-            /* MPlayMain flags MO_VOL on CGB channels when the track volume
-             * changes; the next CgbSound applies it with an NRx4 trigger
-             * write, retriggering the square-1 sweep unit. */
+            /* MPlayMain's VOLCHG pass is ChnVolSetAsm + MO_VOL only; the pan
+             * routing and envelope goal (CgbModVol) are recomputed by CgbSound
+             * at the next envelope step, not before. */
             ch->modify |= 0x01;
         }
     }
@@ -1773,7 +1779,6 @@ static void m4a_lfo_tick(M4AEngine *engine)
                 M4ACGBChannel *ch = &engine->cgbChannels[j];
                 if ((ch->status & CHN_ON) && ch->trackIndex == i) {
                     cgb_chn_vol_set(ch, track);
-                    m4a_cgb_mod_vol(ch);
                     /* Tremolo/autopan LFO steps are volume changes (VOLCHG ->
                      * MO_VOL on the GBA), so they retrigger the square-1
                      * sweep; vibrato steps are MO_PIT and do not. */

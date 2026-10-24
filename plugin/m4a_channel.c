@@ -546,6 +546,12 @@ static int cgb_pan(M4ACGBChannel *ch)
  */
 void m4a_cgb_mod_vol(M4ACGBChannel *ch)
 {
+    /* The C source reads `chan->envelopeGoal = (u32)(left + right);
+     * envelopeGoal /= 16;` on a u8 field, which would wrap the sum at 256
+     * before the divide -- but the ROM agbcc builds keeps the sum in a
+     * register and stores (left + right) / 16 (0..31): the wrapped form
+     * nulls 12 dB worse against mgba on lfo_psg.  So no wrap here, and the
+     * center-pan goal can exceed 15 (see cgb3_vol). */
     if (!cgb_pan(ch)) {
         /* Center (or near-center) pan: output to both sides */
         ch->pan = 0xFF;
