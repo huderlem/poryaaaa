@@ -1,3 +1,37 @@
 [
-  {"name": "mus_littleroot", "seconds": 20.0, "note": "first vanilla song: PSG + DirectSound with reverb"}
+  {
+    "name": "mus_littleroot",
+    "seconds": 20.0,
+    "note": "PSG + DirectSound with reverb (first vanilla song)"
+  },
+  {
+    "name": "mus_weather_groudon",
+    "seconds": 20.0,
+    "note": "pure PSG (square 1/2 _alt + wave), XCMD pseudo-echo"
+  },
+  {
+    "name": "mus_vs_wild",
+    "seconds": 20.0,
+    "note": "DirectSound-heavy with reverb, song priority 1, dense drums"
+  },
+  {
+    "name": "mus_mt_chimney",
+    "seconds": 20.0,
+    "note": "noise channel (3 noise voices), wave, PATT-heavy"
+  },
+  {
+    "name": "mus_rg_vs_trainer",
+    "seconds": 20.0,
+    "note": "FRLG drumset: 9 DirectSound voices + noise"
+  },
+  {
+    "name": "mus_vs_trainer",
+    "seconds": 20.0,
+    "note": "the one vanilla song with a MEMACC command"
+  },
+  {
+    "name": "mus_credits",
+    "seconds": 60.0,
+    "note": "long track"
+  }
 ]

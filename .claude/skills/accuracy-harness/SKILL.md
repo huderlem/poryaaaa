@@ -18,10 +18,19 @@ cmake -B build -DACCURACY_POKEEMERALD_DIR=$HOME/pokeemerald -DACCURACY_MGBA_DIR=
 # ROM + mgba_render + poryaaaa_render + comparison
 cmake --build build --target accuracy
 # re-run only the comparison (after rebuilding poryaaaa_render yourself)
-test/accuracy/tools/accuracy.py                    # all tests
+test/accuracy/tools/accuracy.py                    # all tests, compiled-song input (default)
 test/accuracy/tools/accuracy.py --tests micro      # or song, or name,name
+test/accuracy/tools/accuracy.py --input midi       # the plugin's MIDI path instead of the .s
 test/accuracy/tools/accuracy.py --committed-refs   # no mgba build needed, micro-tests only
+build/poryaaaa_song_tests build/accuracy/rom       # .s parser vs ROM, byte for byte
 ```
+
+`--input song` (default since the sequencer milestone) plays
+`build/accuracy/rom/{micro,songs}/<name>.s` through `poryaaaa_render --song`,
+so poryaaaa and mgba consume byte-identical song data; `--input midi` plays
+the MIDI with the mid2agb options as flags.  The two are not expected to
+null each other below a few dB on PCM: a note that starts at a different
+phase of the 13379 Hz mix grid gives a different sub-sample waveform.
 
 Output: a table on stdout and `build/accuracy/report.json`. poryaaaa WAVs and
 logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-mgba>/`.
@@ -34,12 +43,18 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
   itself"; a correct render reads −40 or lower.
 - `gm null` / `gm wrst`: same after a single least-squares gain. If `gm` is
   much better than raw, the error is a level offset, not a waveform error.
-- `lag ms`: alignment applied to poryaaaa's render. Expected 50–120 ms
-  (the ROM starts on frame 1 plus DMA latency). Values near 0 or near the
-  window edge mean alignment failed; look at the waveforms, do not trust
-  that row.
+- `lag ms`: alignment applied to poryaaaa's render, chosen as the lag with
+  the deepest raw null among the envelope-correlation estimate and the top
+  waveform cross-correlation peaks. With the sequencer it is 53.6 ms on
+  every PCM test and every song (the ROM starts on frame 1 plus DMA
+  latency). PSG tests sit at ~36 ms (wave, noise) but square tests are
+  period-ambiguous until the PSG port nulls. A lag that differs from its
+  class, or sits at the window edge, means the waveforms do not correlate;
+  look at them, do not trust that row.
 - `drift`: lag slope in ms per second over 4 s segments (songs only). Any
-  nonzero value is a tempo mismatch and makes `null` meaningless for that test.
+  nonzero value is a tempo mismatch and makes `null` meaningless for that
+  test -- unless the song does not correlate at all (null around 0 dB, e.g.
+  pure-PSG mus_weather_groudon today), in which case the drift is noise.
 - `ref` / `test`: RMS level in dBFS. A constant offset across all tests is
   the output-scale problem, see the plan.
 
@@ -66,7 +81,7 @@ the ROM hash in the refs path tells you when that happened.
   `--update-refs`, commit the new FLAC in `test/accuracy/refs/micro/`.
 - Vanilla song: append `{"name": "mus_xxx", "seconds": N}` to
   `test/accuracy/songs.json`. Id and mid2agb options are looked up
-  automatically.
+  automatically; the compiled `.s` is already in `build/accuracy/rom/songs/`.
 - Cry or SE: the ROM and `mgba_render` already accept `--type cry --id N`
   and SE song ids; the runner needs a test entry type for them (milestone 4).
 

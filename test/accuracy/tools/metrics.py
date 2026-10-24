@@ -67,17 +67,57 @@ def _xcorr_argmax(a, b, lo_lag, hi_lag):
     return lo + int(np.argmax(c[lo:hi])) - centre
 
 
-def find_lag(ref, test, rate, min_lag_s=-0.02, max_lag_s=0.2, fine_s=0.005, env_ms=1.0):
+def _xcorr_peaks(a, b, lo_lag, hi_lag, count):
+    """Lags of the `count` highest local maxima of sum_i a[i] * b[i - lag] in [lo_lag, hi_lag]."""
+    c = fftconvolve(a, b[::-1], mode="full")
+    centre = len(b) - 1
+    lo = max(0, centre + lo_lag)
+    hi = min(len(c), centre + hi_lag + 1)
+    if hi - lo < 3:
+        return []
+    w = c[lo:hi]
+    peaks = np.nonzero((w[1:-1] > w[:-2]) & (w[1:-1] >= w[2:]))[0] + 1
+    if len(peaks) == 0:
+        return []
+    peaks = peaks[np.argsort(w[peaks])[::-1][:count]]
+    return [int(lo + p - centre) for p in peaks]
+
+
+def _null_at(a, b, lag):
+    """RMS(a - b delayed by lag) / RMS(a) over the overlap (the raw null depth)."""
+    if lag >= 0:
+        aa, bb = a[lag:], b[:len(b) - lag] if lag else b
+    else:
+        aa, bb = a[:len(a) + lag], b[-lag:]
+    n = min(len(aa), len(bb))
+    if n <= 0:
+        return math.inf
+    ra = rms(aa[:n])
+    return math.inf if ra == 0.0 else rms(aa[:n] - bb[:n]) / ra
+
+
+def find_lag(ref, test, rate, min_lag_s=-0.02, max_lag_s=0.2, fine_s=0.005, env_ms=1.0, peaks=12):
     """Lag (samples) by which `test` must be delayed to best match `ref`.
 
-    Two stages, because a raw waveform cross-correlation of two renderings
-    that differ in pitch, LFO phase or timbre happily locks onto a wrong
-    period hundreds of ms away: first the energy envelopes (`env_ms` blocks)
-    are correlated within [min_lag_s, max_lag_s], then the waveforms are
-    correlated within +-fine_s of that coarse lag. The default window is
-    asymmetric because of how the harness renders: poryaaaa starts the song
-    at t = 0 while the ROM starts it on frame 1 and the first DMA buffer
-    plays a few frames later, so the reference always lags by 50 to 120 ms.
+    Candidate lags come from two estimators, and the one that actually gives
+    the deepest raw null (RMS of the difference over the overlap) wins:
+
+    - energy envelopes (`env_ms` blocks) correlated within [min_lag_s,
+      max_lag_s], then the waveforms correlated within +-fine_s of that
+      coarse lag -- robust against a raw waveform cross-correlation locking
+      onto a wrong period of a tone that differs in pitch or timbre;
+    - the `peaks` highest local maxima of the raw waveform cross-correlation
+      over the whole window -- which rescues the cases where the envelope
+      estimate is off by more than fine_s (sustained notes whose envelope
+      correlation is flat, or envelopes shaped differently by the two
+      renderers), as the fine stage then cannot reach the right lag.
+
+    Choosing by the null depth makes the reported lag the one the metrics
+    are computed at, by definition the best alignment for the test.  The
+    default window is asymmetric because of how the harness renders:
+    poryaaaa starts the song at t = 0 while the ROM starts it on frame 1 and
+    the first DMA buffer plays a few frames later, so the reference always
+    lags by 50 to 120 ms.
     """
     a = _mono(ref)
     b = _mono(test)
@@ -86,15 +126,18 @@ def find_lag(ref, test, rate, min_lag_s=-0.02, max_lag_s=0.2, fine_s=0.005, env_
     b = b[:n] - b[:n].mean()
     if rms(a) == 0.0 or rms(b) == 0.0:
         return 0
+    lo, hi = int(min_lag_s * rate), int(max_lag_s * rate)
     blk = max(1, int(rate * env_ms / 1000.0))
     nb = n // blk
     ea = np.square(a[:nb * blk]).reshape(nb, blk).mean(axis=1)
     eb = np.square(b[:nb * blk]).reshape(nb, blk).mean(axis=1)
     ea -= ea.mean()
     eb -= eb.mean()
-    coarse = _xcorr_argmax(ea, eb, int(min_lag_s * rate / blk), int(max_lag_s * rate / blk)) * blk
+    coarse = _xcorr_argmax(ea, eb, lo // blk, hi // blk) * blk
     fine = int(fine_s * rate)
-    return _xcorr_argmax(a, b, coarse - fine, coarse + fine)
+    candidates = [_xcorr_argmax(a, b, max(lo, coarse - fine), min(hi, coarse + fine))]
+    candidates += _xcorr_peaks(a, b, lo, hi, peaks)
+    return min(candidates, key=lambda lag: _null_at(a, b, lag))
 
 
 def shift_and_trim(ref, test, lag):

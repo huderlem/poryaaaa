@@ -10,8 +10,12 @@ Steps (all idempotent, cached under --build-dir):
      micro-test references in test/accuracy/refs/micro (the committed set,
      FLAC via the optional soundfile module), which is what runs without
      mgba_render.
-  3. poryaaaa_render renders the same MIDI with the mid2agb options from the
-     .cfg (-V -> --song-volume, -R -> --reverb, -G -> voicegroup).
+  3. poryaaaa_render renders the same material.  With --input song (the
+     default) it plays the compiled song (mid2agb's .s from the ROM build,
+     byte-identical to what mgba plays) through the MPlayMain sequencer
+     port; with --input midi it plays the MIDI with the mid2agb options from
+     the .cfg mapped to flags (-V -> --song-volume, -R -> --reverb,
+     -G -> voicegroup).
   4. metrics.compare on each pair; a table on stdout and a JSON report.
 
 Typical use (after `make` in test/accuracy/rom and building mgba_render and
@@ -88,6 +92,7 @@ def build_tests(args):
         vg, vol, rev, ext = mid2agb_opts(opts)
         tests.append(dict(name=name, group="micro", type="micro", id=i,
                           midi=os.path.join(MICRO_DIR, name + ".mid"),
+                          song=os.path.join(args.rom_dir, "micro", name + ".s") if args.rom_dir else None,
                           voicegroup=vg, volume=vol, reverb=rev, extended=ext,
                           seconds=MICRO_SECONDS))
     if args.pokeemerald:
@@ -105,6 +110,7 @@ def build_tests(args):
             vg, vol, rev, ext = mid2agb_opts(cfg[name])
             tests.append(dict(name=name, group="song", type="song", id=ids[const],
                               midi=os.path.join(midi_dir, name + ".mid"),
+                              song=os.path.join(args.rom_dir, "songs", name + ".s") if args.rom_dir else None,
                               voicegroup=vg, volume=vol, reverb=rev, extended=ext,
                               seconds=float(s.get("seconds", 20.0))))
     if args.tests:
@@ -206,12 +212,18 @@ def render_reference(args, t, ref_dir):
 
 def render_poryaaaa(args, t, overlay, out_dir):
     wav = os.path.join(out_dir, t["name"] + ".wav")
-    cmd = [args.poryaaaa_render, overlay, t["voicegroup"], "--midi", t["midi"], "--output", wav,
-           "--sample-rate", str(args.rate), "--song-volume", str(t["volume"]),
-           "--reverb", str(t["reverb"]), "--total-duration-seconds", str(t["seconds"]),
-           "--fadeout", "0", "--tail", "0"]
-    if t["extended"]:
-        cmd.append("--extended-clocks")
+    common = ["--output", wav, "--sample-rate", str(args.rate),
+              "--total-duration-seconds", str(t["seconds"]), "--fadeout", "0", "--tail", "0"]
+    if args.input == "song":
+        if not t["song"] or not os.path.exists(t["song"]):
+            raise SystemExit(f"compiled song {t['song']} not found; build the ROM or use --input midi")
+        # Volume, reverb and voicegroup come from the .s header.
+        cmd = [args.poryaaaa_render, overlay, "--song", t["song"]] + common
+    else:
+        cmd = [args.poryaaaa_render, overlay, t["voicegroup"], "--midi", t["midi"]] + common
+        cmd += ["--song-volume", str(t["volume"]), "--reverb", str(t["reverb"])]
+        if t["extended"]:
+            cmd.append("--extended-clocks")
     cmd += args.poryaaaa_args
     if run(cmd, wav + ".log") != 0:
         raise SystemExit(f"poryaaaa_render failed for {t['name']}, see {wav}.log")
@@ -238,6 +250,8 @@ def main():
     ap.add_argument("--min-lag", type=float, default=-0.02, help="alignment search window start, seconds (test delayed by this much)")
     ap.add_argument("--max-lag", type=float, default=0.2, help="alignment search window end, seconds")
     ap.add_argument("--tests", default=None, help="comma-separated test names or groups (micro, song)")
+    ap.add_argument("--input", choices=("song", "midi"), default="song",
+                    help="what poryaaaa_render plays: the compiled .s from the ROM build (default) or the MIDI")
     ap.add_argument("--update-refs", action="store_true", help="store micro-test references in test/accuracy/refs/micro")
     ap.add_argument("--committed-refs", action="store_true", help="ignore mgba_render and compare against the committed micro-test references")
     ap.add_argument("--force", action="store_true", help="re-render references even if cached")
@@ -260,6 +274,9 @@ def main():
             args.mgba_render = cand
     if args.mgba_render and not args.rom:
         raise SystemExit("test ROM not found; run make in test/accuracy/rom or pass --rom")
+    args.rom_dir = os.path.dirname(args.rom) if args.rom else None
+    if args.input == "song" and not args.rom_dir:
+        raise SystemExit("--input song needs the ROM build (for the compiled .s files); pass --rom or use --input midi")
     if not os.path.isdir(args.pokeemerald):
         raise SystemExit(f"pokeemerald tree not found at {args.pokeemerald}")
 
@@ -307,7 +324,7 @@ def main():
           "\n  gm = the same after gain matching; ref / test = RMS level dBFS; drift = lag slope, ms per second (tempo mismatch)")
     print(f"{n_pass}/{len(results)} pass at {args.gate:.0f} dB (raw null depth, full file and worst 1 s window)")
     report = {"rom": args.rom, "mgba": ver, "rate": args.rate, "gate_db": args.gate,
-              "label": args.label, "results": results}
+              "label": args.label, "input": args.input, "results": results}
     path = args.json or os.path.join(args.build_dir, "report.json")
     with open(path, "w") as f:
         json.dump(report, f, indent=1)

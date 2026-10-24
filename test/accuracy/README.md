@@ -11,9 +11,11 @@ tooling; the plugin builds without it.
 | `rom/` | Standalone GBA test ROM: pokeemerald's `m4a.c`/`m4a_1.s`/`m4a_tables.c` built with agbcc, the full vanilla sound data and song table, the game's sound-mode init (`m4aSoundInit`, VCOUNT-150 `m4aSoundVSync`, VBLANK `m4aSoundMain`), plus the micro-test voicegroup (`accuracy_micro.inc`) and songs (`micro/*.mid`, compiled by mid2agb with the options in `micro/micro.cfg`). A 32-byte parameter block tagged `PORYACC1` at ROM offset 0xC0 selects what to play (song/SE id, cry index, or micro index, plus cry pitch/pan/volume and the start frame); the harness patches it, so one build serves every test. |
 | `ref/mgba_render.c` | Headless reference renderer linked against `libmgba-static.a`: patches the parameter block, runs N frames from reset, writes 16-bit stereo WAV at the requested rate (48 kHz by default). Deterministic: no user config, idle-loop detection off, unity master volume. |
 | `tools/metrics.py` | Alignment (energy-envelope cross-correlation, then sample-level refinement) and the null-depth metrics: RMS of the difference relative to the reference in dB over the whole file and the worst 1 s window, raw and after a least-squares gain match, plus per-segment lag drift (tempo mismatch). |
-| `tools/accuracy.py` | Runner: builds an overlay project for poryaaaa's voicegroup loader, renders references (cached by ROM hash + mgba version), renders poryaaaa with the mid2agb options mapped to CLI flags, compares, prints a table and writes `report.json`. |
+| `tools/accuracy.py` | Runner: builds an overlay project for poryaaaa's voicegroup loader, renders references (cached by ROM hash + mgba version), renders poryaaaa (`--input song`, the default: the compiled `.s` from the ROM build through `poryaaaa_render --song`, byte-identical to what mgba plays; `--input midi`: the MIDI with the mid2agb options mapped to CLI flags), compares, prints a table and writes `report.json`. |
+| `tools/compare_reports.py` | Diff two reports; flags regressions over 1 dB. |
+| `../test_song_parser.c` (`poryaaaa_song_tests`) | Byte-exact check of the `.s` parser (`plugin/m4a_song.c`) against the ROM: every song under `build/accuracy/rom/{micro,songs}` is parsed, relocated to its address from `accuracy_test.map` and compared with `accuracy_test.gba`. Runs as part of the `accuracy` target. |
 | `tools/gen_micro_midis.py` | Generates `rom/micro/*.mid` and `micro.cfg`. Re-run after editing; then rebuild the ROM. |
-| `songs.json` | Vanilla song corpus (name, seconds). |
+| `songs.json` | Vanilla song corpus (name, seconds, note): PSG + DirectSound (littleroot), pure PSG (weather_groudon), DirectSound-heavy battle (vs_wild), noise (mt_chimney), FRLG drumset (rg_vs_trainer), MEMACC (vs_trainer), long (credits, 60 s). No vanilla music uses compressed samples; the `pcm_cmp` micro-test covers DPCM until cries arrive in milestone 4. |
 | `refs/micro/` | Committed micro-test references (FLAC) and `manifest.json` (ROM hash, mgba version). Lets the micro-tests run without an mgba build. |
 | `baselines/` | Saved reports. |
 
@@ -34,8 +36,15 @@ cmake -B build -DACCURACY_POKEEMERALD_DIR=$HOME/pokeemerald -DACCURACY_MGBA_DIR=
 cmake --build build --target accuracy          # ROM + mgba_render + poryaaaa_render + comparison
 # or by hand:
 make -C test/accuracy/rom POKEEMERALD=$HOME/pokeemerald
-test/accuracy/tools/accuracy.py [--tests micro|song|name,...] [--gate -40] [--update-refs] [-- extra poryaaaa_render args]
+test/accuracy/tools/accuracy.py [--input song|midi] [--tests micro|song|name,...] [--gate -40] [--update-refs] [-- extra poryaaaa_render args]
+build/poryaaaa_song_tests build/accuracy/rom        # parser vs ROM, byte for byte
 ```
+
+The sequencer (`plugin/m4a_sequencer.c`, a port of MPlayMain) plays the
+compiled song inside poryaaaa's VBlank tick, so with `--input song` the
+only differences left between the two renders are in synthesis: the mixer
+and output stage (milestones 2 and 3).  `--input midi` keeps the plugin's
+MIDI path measurable (milestone 5 compares the two).
 
 Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
 `out/` (poryaaaa WAVs and logs), `project/` (overlay), `report.json`.
