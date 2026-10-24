@@ -65,7 +65,6 @@ static const char *s_pluginLogPath = NULL;
  *   voicegroup     - Voicegroup name (e.g. petalburg, littleroot_town)
  *   reverb         - Reverb amount (0-127)
  *   master_volume  - Master volume (0-15)
- *   analog_filter  - GBA analog output low-pass filter (0=off, 1=on)
  */
 static void load_config_file(M4APluginData *data)
 {
@@ -119,7 +118,7 @@ static void load_config_file(M4APluginData *data)
             if (v > MAX_SONG_VOLUME) v = MAX_SONG_VOLUME;
             data->songMasterVolume = (uint8_t)v;
         } else if (strcmp(key, "analog_filter") == 0) {
-            data->analogFilter = (atoi(value) != 0);
+            /* Removed with the cycle-accurate output stage; ignored. */
         } else if (strcmp(key, "respect_base_midi_key") == 0) {
             data->respectBaseMidiKey = (atoi(value) != 0);
         } else if (strcmp(key, "portamento") == 0) {
@@ -187,7 +186,6 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->masterVolume = 12;
     data->songMasterVolume = MAX_SONG_VOLUME;
     data->reverbAmount = 0;
-    data->analogFilter = false;
     data->maxPcmChannels = 5;
     data->respectBaseMidiKey = false;
     data->portamentoEnabled = false;
@@ -228,7 +226,6 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     m4a_engine_init(&data->engine, (float)sample_rate);
     data->engine.masterVolume = data->masterVolume;
     data->engine.songMasterVolume = data->songMasterVolume;
-    data->engine.analogFilter = data->analogFilter;
     data->engine.maxPcmChannels = data->maxPcmChannels;
     data->engine.respectBaseMidiKey = data->respectBaseMidiKey;
     m4a_engine_set_portamento_enabled(&data->engine, data->portamentoEnabled);
@@ -273,7 +270,6 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
         gs.reverbAmount      = data->reverbAmount;
         gs.masterVolume      = data->masterVolume;
         gs.songMasterVolume  = data->songMasterVolume;
-        gs.analogFilter      = data->analogFilter;
         gs.maxPcmChannels    = data->maxPcmChannels;
         gs.pcmMixRate        = data->pcmMixRate;
         gs.respectBaseMidiKey = data->respectBaseMidiKey;
@@ -306,8 +302,6 @@ static void plugin_stop_processing(const clap_plugin_t *plugin)
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
     m4a_engine_all_sound_off(&data->engine);
     m4a_reverb_reset(&data->engine.reverb);
-    data->engine.lowPassLeft  = 0.0f;
-    data->engine.lowPassRight = 0.0f;
 }
 
 static void plugin_reset(const clap_plugin_t *plugin)
@@ -315,8 +309,6 @@ static void plugin_reset(const clap_plugin_t *plugin)
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
     m4a_engine_all_sound_off(&data->engine);
     m4a_reverb_reset(&data->engine.reverb);
-    data->engine.lowPassLeft  = 0.0f;
-    data->engine.lowPassRight = 0.0f;
 }
 
 /* ---- MIDI event processing ---- */
@@ -516,7 +508,8 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     if (stream->write(stream, &data->reverbAmount, 1) != 1) return false;
     if (stream->write(stream, &data->masterVolume, 1) != 1) return false;
     if (stream->write(stream, &data->songMasterVolume, 1) != 1) return false;
-    uint8_t analogFilterByte = data->analogFilter ? 1 : 0;
+    /* Former analog-filter flag: kept as a zero byte so the layout is stable. */
+    uint8_t analogFilterByte = 0;
     if (stream->write(stream, &analogFilterByte, 1) != 1) return false;
     if (stream->write(stream, &data->maxPcmChannels, 1) != 1) return false;
     /* Opt-in feature flags (appended after maxPcmChannels for back-compat) */
@@ -558,10 +551,10 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (stream->read(stream, &data->reverbAmount, 1) != 1) return false;
     if (stream->read(stream, &data->masterVolume, 1) != 1) return false;
     if (stream->read(stream, &data->songMasterVolume, 1) != 1) return false;
-    /* analogFilter byte is optional (not present in older saves); default to enabled */
-    uint8_t analogFilterByte = 1;
+    /* Former analog-filter byte (optional in old saves): read and ignored, the
+     * low-pass is gone with the cycle-accurate output stage. */
+    uint8_t analogFilterByte = 0;
     stream->read(stream, &analogFilterByte, 1);
-    data->analogFilter = (analogFilterByte != 0);
     /* maxPcmChannels byte is optional (not present in older saves); default to 5 */
     uint8_t maxChannelsByte = 5;
     stream->read(stream, &maxChannelsByte, 1);
@@ -603,7 +596,6 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         }
         data->engine.masterVolume = data->masterVolume;
         data->engine.songMasterVolume = data->songMasterVolume;
-        data->engine.analogFilter = data->analogFilter;
         data->engine.maxPcmChannels = data->maxPcmChannels;
         data->engine.respectBaseMidiKey = data->respectBaseMidiKey;
         m4a_engine_set_portamento_enabled(&data->engine, data->portamentoEnabled);
@@ -625,7 +617,6 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         gs.reverbAmount     = data->reverbAmount;
         gs.masterVolume     = data->masterVolume;
         gs.songMasterVolume = data->songMasterVolume;
-        gs.analogFilter     = data->analogFilter;
         gs.maxPcmChannels   = data->maxPcmChannels;
         gs.pcmMixRate       = data->pcmMixRate;
         gs.voicegroupLoaded = (data->loadedVg != NULL);
@@ -708,7 +699,6 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
     data->reverbAmount     = gs.reverbAmount;
     data->masterVolume     = gs.masterVolume;
     data->songMasterVolume = gs.songMasterVolume;
-    data->analogFilter     = gs.analogFilter;
     data->maxPcmChannels   = gs.maxPcmChannels;
     data->respectBaseMidiKey = gs.respectBaseMidiKey;
     data->portamentoEnabled  = gs.portamentoEnabled;
@@ -719,7 +709,6 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
     if (data->activated) {
         data->engine.masterVolume = gs.masterVolume;
         m4a_engine_set_song_volume(&data->engine, gs.songMasterVolume);
-        data->engine.analogFilter = gs.analogFilter;
         data->engine.maxPcmChannels = gs.maxPcmChannels;
         data->engine.respectBaseMidiKey = gs.respectBaseMidiKey;
         m4a_engine_set_portamento_enabled(&data->engine, gs.portamentoEnabled);
@@ -827,7 +816,6 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
     gs.reverbAmount     = data->reverbAmount;
     gs.masterVolume     = data->masterVolume;
     gs.songMasterVolume = data->songMasterVolume;
-    gs.analogFilter     = data->analogFilter;
     gs.maxPcmChannels   = data->maxPcmChannels;
     gs.pcmMixRate       = data->pcmMixRate;
     gs.respectBaseMidiKey = data->respectBaseMidiKey;

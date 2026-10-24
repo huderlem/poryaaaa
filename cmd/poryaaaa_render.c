@@ -738,7 +738,6 @@ static void print_usage(const char *prog)
         "Audio options:\n"
         "  --song-volume <0-127>       Song master volume (default: 127)\n"
         "  --reverb <0-127>            Reverb amount (default: 0)\n"
-        "  --analog-filter             Enable GBA analog low-pass filter (default: off)\n"
         "  --respect-base-midi-key     Opt-in: treat a PCM voice's key as the sample's base MIDI note (default: off)\n"
         "  --portamento                Opt-in: enable the portamento glide effect, CC 5 (default: off)\n"
         "  --pwm                       Opt-in: enable pulse-width modulation on CGB square channels, CC 0x17/0x19 (default: off)\n"
@@ -769,7 +768,7 @@ typedef struct {
     const char *projectRoot;
     const char *voicegroup;      /* NULL: use the song header's */
     const char *songPath;
-    bool analogFilter, respectBaseMidiKey, portamento, pwm;
+    bool respectBaseMidiKey, portamento, pwm;
     int maxChannels;
     double sampleRate;
     float pcmMixRate;
@@ -830,7 +829,6 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
     m4a_engine_init(&engine, (float)o->sampleRate);
     m4a_engine_set_voicegroup(&engine, vg->voices);
     m4a_engine_set_song_volume(&engine, MAX_SONG_VOLUME); /* baked into the song's VOL bytes */
-    engine.analogFilter = o->analogFilter;
     engine.maxPcmChannels = (uint8_t)o->maxChannels;
     engine.respectBaseMidiKey = o->respectBaseMidiKey;
     m4a_engine_set_portamento_enabled(&engine, o->portamento);
@@ -1022,7 +1020,6 @@ int main(int argc, char *argv[])
     bool        doPlay        = false;
     int         songVolume    = 127;
     int         reverbAmount  = 0;
-    bool        analogFilter  = false;
     bool        respectBaseMidiKey = false;
     bool        portamento    = false;
     bool        pwm           = false;
@@ -1054,8 +1051,6 @@ int main(int argc, char *argv[])
             reverbSet = true;
             if (reverbAmount < 0)   reverbAmount = 0;
             if (reverbAmount > 127) reverbAmount = 127;
-        } else if (strcmp(argv[i], "--analog-filter") == 0) {
-            analogFilter = true;
         } else if (strcmp(argv[i], "--respect-base-midi-key") == 0) {
             respectBaseMidiKey = true;
         } else if (strcmp(argv[i], "--portamento") == 0) {
@@ -1117,7 +1112,7 @@ int main(int argc, char *argv[])
                             "(the .s file carries its own master volume and reverb)\n");
         SongRenderOpts o = {
             .projectRoot = projectRoot, .voicegroup = vgName, .songPath = songPath,
-            .analogFilter = analogFilter, .respectBaseMidiKey = respectBaseMidiKey,
+            .respectBaseMidiKey = respectBaseMidiKey,
             .portamento = portamento, .pwm = pwm, .maxChannels = maxChannels,
             .sampleRate = sampleRate, .pcmMixRate = pcmMixRate,
             .tailSeconds = tailSeconds, .fadeoutSeconds = fadeoutSeconds,
@@ -1459,7 +1454,6 @@ oom:
     m4a_engine_set_voicegroup(&engine, vg->voices);
     m4a_engine_set_song_volume(&engine, (uint8_t)songVolume);
     m4a_reverb_set_amount(&engine.reverb, (uint8_t)reverbAmount);
-    engine.analogFilter = analogFilter;
     engine.maxPcmChannels = (uint8_t)maxChannels;
     engine.respectBaseMidiKey = respectBaseMidiKey;
     m4a_engine_set_portamento_enabled(&engine, portamento);

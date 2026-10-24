@@ -1965,17 +1965,4 @@ void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamp
     }
     for (int i = done; i < numSamples; i++)
         outL[i] = outR[i] = 0.0f;
-
-    /* GBA analog output emulation: single-pole IIR low-pass filter (6 dB/octave).
-     * The GBA's PWM output circuit has a characteristic frequency rolloff due to
-     * the output capacitor. Adapted from mGBA _audioLowPassFilter (libretro.c).
-     * Coefficient 0.6/0.4 matches mGBA's default audioLowPassRange (60%). */
-    if (engine->analogFilter) {
-        for (int i = 0; i < numSamples; i++) {
-            engine->lowPassLeft  = engine->lowPassLeft  * 0.6f + outL[i] * 0.4f;
-            engine->lowPassRight = engine->lowPassRight * 0.6f + outR[i] * 0.4f;
-            outL[i] = engine->lowPassLeft;
-            outR[i] = engine->lowPassRight;
-        }
-    }
 }

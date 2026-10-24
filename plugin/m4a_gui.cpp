@@ -269,9 +269,6 @@ static void render_general_tab(M4AGuiState *gui)
             "The m4a engine uses 13379 Hz by default, so high notes have aliasing.\n"
             "Higher rates sound better, but are less accurate compared to in-game.");
     }
-
-    if (ImGui::Checkbox("GBA Analog Filter", &gui->settings.analogFilter))
-        gui->settingsChanged = true;
 }
 
 static void render_voices_tab(M4AGuiState *gui)

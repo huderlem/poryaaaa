@@ -22,7 +22,6 @@ typedef struct {
     uint8_t reverbAmount;
     uint8_t masterVolume;
     uint8_t songMasterVolume;
-    bool analogFilter;
     uint8_t maxPcmChannels;
     /* DirectSound PCM mix rate in Hz (0 = follow host rate; 13379 = GBA). */
     float pcmMixRate;

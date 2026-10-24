@@ -33,7 +33,6 @@ Output (at least one required):
 Audio options:
   --song-volume <0-127>       Song master volume (default: 127)
   --reverb <0-127>            Reverb amount (default: 0)
-  --analog-filter             Enable GBA analog low-pass filter (default: off)
   --polyphony <1-15>          Max simultaneous PCM channels (default: 5)
   --sample-rate <hz>          Sample rate in Hz (default: 44100)
   --pcm-mix-rate <hz>         DirectSound (PCM) mix rate; 0 means same as sample-rate (default: 13379)
@@ -56,9 +55,9 @@ The opt-in effect features require the matching m4a engine extensions in your pr
 Examples:
 
 ```bash
-# Render to WAV with reverb and analog filter
+# Render to WAV with reverb
 ./build/poryaaaa_render /path/to/pokeemerald petalburg \
-    --midi song.mid --output out.wav --reverb 40 --analog-filter
+    --midi song.mid --output out.wav --reverb 40
 
 # Play through speakers
 ./build/poryaaaa_render /path/to/pokeemerald petalburg \
@@ -172,7 +171,7 @@ The opt-in effect features (`respect_base_midi_key`, `portamento`, `pwm`) requir
 
 The plugin opens a settings panel built with [Dear ImGui](https://github.com/ocornut/imgui) and [Pugl](https://github.com/lv2/pugl) (a lightweight embeddable windowing library):
 
-- **General** tab — **Project Root** / **Voicegroup**: edit and press **Reload** to apply; **Song Volume** (0–127), **Reverb** (0–127), **Polyphony**, **GBA Analog Filter**, and **PCM Mix Rate** take effect immediately
+- **General** tab — **Project Root** / **Voicegroup**: edit and press **Reload** to apply; **Song Volume** (0–127), **Reverb** (0–127), **Polyphony**, and **PCM Mix Rate** take effect immediately
 - **Voices** tab — inspect and edit individual voices in the loaded voicegroup
 - **Polyphony** tab — realtime monitor for debugging polyphony overflow
 - **Options** menu — toggle the opt-in effect features (Respect Base MIDI Key, Portamento, Pulse-Width Modulation); hover an item for help text. Toggles take effect immediately and are saved per project.

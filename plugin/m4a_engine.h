@@ -441,11 +441,6 @@ struct M4AEngine {
     uint32_t polyEventTotal;               /* total events; ring head = total % capacity */
     M4APolyEvent polyEvents[M4A_POLY_EVENT_CAPACITY];
 
-    /* GBA analog output emulation: IIR low-pass filter */
-    bool analogFilter;      /* enable/disable the hardware output filter */
-    float lowPassLeft;
-    float lowPassRight;
-
     /* Tempo system (matches GBA MPlayMain tempo accumulator).
      * tempoD = base tempo (ply_tempo param * 2), default 150.
      * tempoU = user tempo multiplier (default 0x100 = 1.0x).
