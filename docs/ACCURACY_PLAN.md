@@ -701,7 +701,7 @@ wave 0; noise 0 (start +3 in psg_mix's noise-after-wave position); lfo_psg
 
 ### Next: engine milestone 3, the mixer (handoff, 2026-10-24)
 
-Start from commit e37d52f (branch `accuracy-harness`).  Before any change
+Start from the tip of branch `accuracy-harness` (the review-fixes commit and this baseline refresh).  Before any change
 the harness must reproduce `baselines/2026-10-24_timing-model.json`
 (27/38; `compare_reports.py`: 0 regressions, 0 improvements) and
 `build/poryaaaa_unit_tests` 973/973, `poryaaaa_blip_tests`,
