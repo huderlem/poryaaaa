@@ -85,6 +85,7 @@ set(ENGINE_SOURCES
     plugin/m4a_channel.c
     plugin/m4a_tables.c
     plugin/m4a_reverb.c
+    plugin/m4a_song.c
     plugin/voicegroup_loader.c
 )
 
@@ -186,6 +187,14 @@ target_include_directories(poryaaaa_unit_tests PRIVATE
 )
 
 target_link_libraries(poryaaaa_unit_tests PRIVATE m)
+
+# Byte-exact check of the .s song parser against the accuracy test ROM
+# (needs the ROM build; skips with status 2 when it is absent).
+add_executable(poryaaaa_song_tests
+    test/test_song_parser.c
+    plugin/m4a_song.c
+)
+target_include_directories(poryaaaa_song_tests PRIVATE plugin)
 
 # ---- Standalone (clap-wrapper) ----
 add_executable(poryaaaa-standalone
@@ -301,6 +310,12 @@ if(ACCURACY_POKEEMERALD_DIR)
         COMMENT "Building the accuracy test ROM with agbcc"
         VERBATIM
     )
+    add_custom_target(accuracy_song_tests
+        COMMAND $<TARGET_FILE:poryaaaa_song_tests> ${CMAKE_BINARY_DIR}/accuracy/rom
+        DEPENDS accuracy_rom poryaaaa_song_tests
+        COMMENT "Accuracy: checking the .s song parser against the ROM"
+        VERBATIM
+    )
 endif()
 
 if(ACCURACY_POKEEMERALD_DIR AND ACCURACY_MGBA_DIR)
@@ -311,7 +326,7 @@ if(ACCURACY_POKEEMERALD_DIR AND ACCURACY_MGBA_DIR)
                 --mgba-render $<TARGET_FILE:mgba_render>
                 --poryaaaa-render $<TARGET_FILE:poryaaaa_render>
                 --build-dir ${CMAKE_BINARY_DIR}/accuracy
-        DEPENDS accuracy_rom mgba_render poryaaaa_render
+        DEPENDS accuracy_rom accuracy_song_tests mgba_render poryaaaa_render
         COMMENT "Accuracy: rendering references with mgba and comparing poryaaaa"
         USES_TERMINAL
         VERBATIM
