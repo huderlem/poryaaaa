@@ -8,4 +8,7 @@ build_pugl/
 poryaaaa.cfg
 .cache
 .DS_Store
-poryaaaa.log
+poryaaaa.logtest/accuracy/rom/build/
+!test/accuracy/refs/**/*.wav
+!test/accuracy/refs/**/*.flac
+__pycache__/

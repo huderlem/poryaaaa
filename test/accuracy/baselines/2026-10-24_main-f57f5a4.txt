@@ -1,0 +1,44 @@
+ROM: /home/huderlem/m4a_plugin/build/accuracy/rom/accuracy_test.gba
+mgba: mGBA 0.10.5
+references: /home/huderlem/m4a_plugin/build/accuracy/refs/7b2e822f7a23-mGBA_0.10.5
+
+test                lag ms  gain dB |    null worst1s | gm null gm wrst |    ref   test |   drift | gate -40
+------------------------------------------------------------------------------------------------------------
+sq1                   52.6     -1.4 |    -1.7     0.7 |    -1.7     0.4 |  -16.9  -20.4 |       - | FAIL
+sq1_env               52.1      1.5 |    -4.3    -1.7 |    -4.5    -1.5 |  -18.4  -21.8 |       - | FAIL
+sq1_sweep              0.0     -inf |     0.0     0.0 |     0.0     0.0 |  -17.0   -inf |       - | FAIL
+sq1_alt               58.4      1.2 |    -3.8    -0.6 |    -3.9    -0.4 |  -16.9  -20.4 |       - | FAIL
+sq2                   52.6     -6.0 |     0.0     2.1 |    -0.7     0.6 |  -18.2  -20.4 |       - | FAIL
+sq2_alt               50.8     -2.2 |    -1.8     1.1 |    -2.0     0.5 |  -18.2  -20.4 |       - | FAIL
+wave                  60.6      0.1 |    -2.6    -1.1 |    -2.6    -1.1 |  -19.8  -23.4 |       - | FAIL
+wave_alt              45.2      0.0 |    -2.6    -1.6 |    -2.6    -1.6 |  -19.8  -23.4 |       - | FAIL
+noise                 53.1     -9.7 |     1.2     6.5 |    -0.5     0.6 |  -20.4  -20.7 |       - | FAIL
+noise7                60.9     -5.8 |    -0.1     1.4 |    -0.8     0.3 |  -18.9  -20.7 |       - | FAIL
+pcm                   66.4      1.0 |    -3.6    -2.3 |    -3.7    -2.2 |  -21.4  -24.9 |       - | FAIL
+pcm_hi                68.6      0.7 |    -2.9     0.3 |    -2.9     0.5 |  -21.1  -24.9 |       - | FAIL
+pcm_adsr              77.6      1.9 |    -4.1     1.1 |    -4.4     2.0 |  -30.0  -33.8 |       - | FAIL
+pcm_drum              73.8     -9.7 |     0.6     1.3 |    -0.2     0.1 |  -22.1  -25.8 |       - | FAIL
+pcm_cmp               70.4     -1.1 |    -1.8     1.7 |    -1.9     1.4 |  -27.2  -30.7 |       - | FAIL
+pcm_reverb            81.7      1.2 |    -4.6    -2.7 |    -4.7    -2.7 |  -21.0  -24.1 |       - | FAIL
+pcm_chord             77.7     -2.7 |    -1.0     0.3 |    -1.2    -0.2 |  -14.2  -17.7 |       - | FAIL
+pcm_bass              82.0     -6.4 |     0.1     3.4 |    -0.5     1.6 |  -25.2  -28.7 |       - | FAIL
+pan                   77.1     -0.7 |    -2.0     1.0 |    -2.1     0.8 |  -19.6  -23.0 |       - | FAIL
+vol                   73.9     -0.3 |    -2.3     1.9 |    -2.4     1.8 |  -25.3  -28.8 |       - | FAIL
+vel                   74.1      2.9 |    -7.0     0.6 |    -8.9     1.7 |  -26.6  -30.1 |       - | FAIL
+bend                  80.7     -3.0 |    -0.9     1.9 |    -1.1     1.1 |  -20.2  -23.7 |       - | FAIL
+lfo_vib               55.1     -1.1 |    -1.8    -1.0 |    -1.8    -1.1 |  -20.2  -23.7 |       - | FAIL
+lfo_trem              75.7    -10.5 |     0.7     1.7 |    -0.2     0.2 |  -20.2  -23.7 |       - | FAIL
+lfo_pan               75.7    -10.8 |     0.8     1.8 |    -0.2     0.2 |  -20.2  -23.7 |       - | FAIL
+lfo_delay              6.3     -3.5 |    -0.7     0.7 |    -1.0     0.1 |  -21.0  -24.6 |       - | FAIL
+lfo_psg               60.5    -21.0 |     1.4     2.1 |    -0.0     0.0 |  -17.2  -20.4 |       - | FAIL
+tune                  81.8     -8.5 |     0.5     1.8 |    -0.3     0.3 |  -21.6  -25.1 |       - | FAIL
+tune_psg              55.4     -5.9 |    -0.0     1.6 |    -0.5     0.5 |  -18.1  -21.6 |       - | FAIL
+psg_mix               82.1     -6.4 |     0.2     1.1 |    -0.9    -0.2 |  -15.4  -16.2 |       - | FAIL
+pcm_psg               57.7     -2.2 |    -1.3    -0.9 |    -1.4    -1.1 |  -13.4  -16.8 |       - | FAIL
+mus_littleroot       118.9    -19.2 |     1.4     2.5 |    -0.0     0.1 |  -23.7  -26.7 |     3.9 | FAIL
+
+columns: lag = alignment applied to the test render; gain = least-squares gain match (dB);
+  null / worst1s = RMS(ref - test) / RMS(ref) in dB over the file and the worst 1 s window (gate uses these);
+  gm = the same after gain matching; ref / test = RMS level dBFS; drift = lag slope, ms per second (tempo mismatch)
+0/32 pass at -40 dB (raw null depth, full file and worst 1 s window)
+report: /home/huderlem/m4a_plugin/build/accuracy/report.json

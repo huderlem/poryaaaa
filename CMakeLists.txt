@@ -264,3 +264,56 @@ if(UNIX AND NOT APPLE)
         endif()
     endforeach()
 endif()
+
+# ---- Accuracy harness (optional; see docs/ACCURACY_PLAN.md, test/accuracy/README.md) ----
+# Enabled only when the pokeemerald tree (with agbcc and its tools built) and an
+# mgba source tree with build/libmgba-static.a are provided:
+#   cmake -B build -DACCURACY_POKEEMERALD_DIR=~/pokeemerald -DACCURACY_MGBA_DIR=~/mgba
+#   cmake --build build --target accuracy
+set(ACCURACY_POKEEMERALD_DIR "" CACHE PATH "pokeemerald tree used to build the accuracy test ROM")
+set(ACCURACY_MGBA_DIR "" CACHE PATH "mgba source tree containing build/libmgba-static.a")
+
+if(ACCURACY_MGBA_DIR)
+    add_executable(mgba_render test/accuracy/ref/mgba_render.c)
+    target_include_directories(mgba_render PRIVATE
+        ${ACCURACY_MGBA_DIR}/include
+        ${ACCURACY_MGBA_DIR}/build/include
+    )
+    target_link_libraries(mgba_render PRIVATE ${ACCURACY_MGBA_DIR}/build/libmgba-static.a z png m pthread)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(mgba_render PRIVATE rt dl)
+    endif()
+    # Only needed when libmgba was built with its GL/EGL features (the default).
+    foreach(_lib EGL GL)
+        find_library(_accuracy_${_lib} ${_lib})
+        if(_accuracy_${_lib})
+            target_link_libraries(mgba_render PRIVATE ${_accuracy_${_lib}})
+        endif()
+    endforeach()
+endif()
+
+if(ACCURACY_POKEEMERALD_DIR)
+    set(ACCURACY_ROM ${CMAKE_BINARY_DIR}/accuracy/rom/accuracy_test.gba)
+    add_custom_target(accuracy_rom
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/accuracy/rom
+        COMMAND $(MAKE) -C ${CMAKE_CURRENT_SOURCE_DIR}/test/accuracy/rom
+                POKEEMERALD=${ACCURACY_POKEEMERALD_DIR} BUILD=${CMAKE_BINARY_DIR}/accuracy/rom
+        COMMENT "Building the accuracy test ROM with agbcc"
+        VERBATIM
+    )
+endif()
+
+if(ACCURACY_POKEEMERALD_DIR AND ACCURACY_MGBA_DIR)
+    add_custom_target(accuracy
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/test/accuracy/tools/accuracy.py
+                --pokeemerald ${ACCURACY_POKEEMERALD_DIR}
+                --rom ${ACCURACY_ROM}
+                --mgba-render $<TARGET_FILE:mgba_render>
+                --poryaaaa-render $<TARGET_FILE:poryaaaa_render>
+                --build-dir ${CMAKE_BINARY_DIR}/accuracy
+        DEPENDS accuracy_rom mgba_render poryaaaa_render
+        COMMENT "Accuracy: rendering references with mgba and comparing poryaaaa"
+        USES_TERMINAL
+        VERBATIM
+    )
+endif()
