@@ -908,6 +908,40 @@ loopStart >= size is disabled by the loader where the GBA would never end
 look-ahead past the last block decode zeros where the GBA reads unrelated
 memory.
 
+### Next: the songs -- timing model step 3 (handoff, 2026-10-24)
+
+Start from the tip of `accuracy-harness` (6757b80: the mixer review fixes,
+the refreshed mixer baseline and the two skills).  Before any change the
+harness must reproduce `baselines/2026-10-24_mixer.json` (31/38;
+`compare_reports.py`: 0 regressions, 0 improvements) and
+`build/poryaaaa_unit_tests` 1018/1018, `poryaaaa_blip_tests`,
+`poryaaaa_song_tests build/accuracy/rom` must pass.
+
+With every single-voice micro-test bit-exact and the remaining micro
+residuals attributed to mgba's scheduler lateness, the seven songs are the
+accuracy gap (mus_weather_groudon -5.0, mt_chimney -7.4, rg_vs_trainer
+-8.3, credits -18.6, vs_wild -19.7, vs_trainer -26.9, littleroot -27.4).
+The timing-model section names what bounds them: the MPlayMain costs the
+probe did not resolve (the DirectSound note cost beyond the channel scan,
+806-1423 measured; the per-track tick cost's dependence on track state,
+61-84 per track; the VOLCHG/PITCHG pass's per-track share, 376 measured on
+one track with one channel; ply_fine's and ply_note's ClearChain; the
+pseudo-echo idle cost; TrackStop's write placement), which put the songs'
+PSG writes +-400 cycles off on PCM-note frames, and wave/noise phase runs
+on the CPU clock.
+
+Scope: extend `test/accuracy/ref/mgba_probe.c` with breakpoints inside
+MPlayMain's track loop (per-track entry/exit of the tick work), ply_note's
+channel search and the VOLCHG/PITCHG pass, so each unresolved cost is a
+measured number (record every number in the probe section before using
+it; never fit a constant to the harness); charge them in
+`m4a_sequencer.c` / `M4A_CYC_*`; verify with `--psg-log` + `probe_diff.py`
+on groudon and littleroot (residual target: the micro-tests' 0-36 cycles),
+then the harness.  Any constant that moves a bit-exact test is wrong.
+Targets: the songs; nothing in the mixer baseline may regress.  Milestone
+4 (cries and SE in the ROM and corpus) follows once the songs null, or
+earlier if the song work stalls on something the corpus cannot show.
+
 ### Reference: milestone 1 decisions as agreed
 
 Goal restated: `poryaaaa_render` and the harness play the **compiled** song
