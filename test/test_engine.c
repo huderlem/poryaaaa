@@ -3459,6 +3459,101 @@ static WaveData *seq_test_wave(void)
     return wd;
 }
 
+/* SoundMain timing model: the sequencer's per-frame MPlayMain cycle sum
+ * against mgba's CgbSound entry for the sq1 micro-test (test/accuracy/rom/
+ * micro/sq1.s; build/probe/sq1.txt.frames from mgba_probe, cycles from
+ * VBlank line 160).  Frame 3 is the song's first MPlayMain: the START init,
+ * KEYSH, TEMPO, VOICE, VOL, PAN, the note and the wait; then no-tick frames
+ * (tempo 120: 1402 = 566 + 150 + 16 + 30 x 10 - 6 + 6 + 370), tick frames
+ * with the gate counting down (1866), the gate expiry (+8, frame 33), the
+ * dead channel's ClearChain (frame 35), the empty-chain wait (1840) and the
+ * second note under running status (frame 48). */
+static void test_sequencer_cycles(void)
+{
+    printf("Testing sequencer cycle accounting against the sq1 probe...\n");
+    ToneData voices[128];
+    seq_test_voices(voices);
+    M4ASong *song = seq_song(
+        "\t.byte\tKEYSH , t_key+0\n"
+        "\t.byte\tTEMPO , 120*t_tbs/2\n"
+        "\t.byte\t\tVOICE , 0\n"
+        "\t.byte\t\tVOL   , 127*t_mvl/mxv\n"
+        "\t.byte\t\tPAN   , c_v+0\n"
+        "\t.byte\t\tN24   , Cn3 , v127\n"
+        "\t.byte\tW36\n"
+        "\t.byte\t\t        Cn4 \n"
+        "\t.byte\tW36\n"
+        "\t.byte\t\tN48   , Cn2 \n"
+        "\t.byte\tW24\n"
+        "\t.byte\tW24\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "sq1 song parses");
+    if (!song) return;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+
+    /* mgba's CgbSound entry for engine frames 3..52 (the probe's column). */
+    static const int expected[50] = {
+        4069, 1402, 1866, 1866, 1866, 1866, 1402, 1866, 1866, 1866,
+        1866, 1402, 1866, 1866, 1866, 1866, 1402, 1866, 1866, 1866,
+        1866, 1402, 1866, 1866, 1866, 1866, 1402, 1866, 1866, 1866,
+        1874, 1402, 1953, 1840, 1840, 1840, 1402, 1840, 1840, 1840,
+        1840, 1402, 1840, 1840, 1840, 2790, 1402, 1866, 1866, 1866 };
+    int mismatches = 0;
+    for (int k = 3; k <= 52; k++) {
+        m4a_sequencer_frame(&seq);
+        if (seq.frameCycles != expected[k - 3]) {
+            if (mismatches++ < 5)
+                printf("  frame %d: engine %d, mgba %d\n", k, seq.frameCycles, expected[k - 3]);
+        }
+        /* The frame is driven without the engine's tick, so stand in for
+         * CgbSound on the note's channel: the start frame settles it in
+         * sustain (attack 0, decay 0) and the gate expiry's SF_STOP turns it
+         * off on the next pass (release 0, no echo), which is what the
+         * sequencer's chain walk sees a frame later. */
+        M4ACGBChannel *ch = &engine.cgbChannels[0];
+        if (ch->status & CHN_START)
+            ch->status = CHN_ENV_SUSTAIN;
+        else if ((ch->status & CHN_STOP) && (ch->status & CHN_ON))
+            ch->status = 0;           /* release 0, no echo: CgbOscOff */
+    }
+    ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the sq1 probe on frames 3..52");
+    ASSERT_EQ(seq.frameCycles, 1866, "sequencer: steady tick frame after the second note");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
+/* The sound FIFO's refill DMA stalls the CPU 18 cycles every 16 samples
+ * (20064 cycles at 13379 Hz), counted on the cycle spans the timing model
+ * charges. */
+static void test_fifo_dma_stall(void)
+{
+    printf("Testing the FIFO DMA stall accounting...\n");
+    M4AGbaAudio g;
+    memset(&g, 0, sizeof(g));
+    g.timerPeriodNum = 280896;
+    g.timerPeriodDen = 224;
+    g.dmaEnabled = true;
+    g.fifoDmaCycle = -1;
+    ASSERT_EQ((int)m4a_gba_fifo_dma_stall(&g, 0, 100000), 0, "stall: nothing before the first refill");
+    g.fifoDmaCycle = 100;
+    ASSERT_EQ((int)m4a_gba_fifo_dma_stall(&g, 0, 99), 0, "stall: span ending before the refill");
+    ASSERT_EQ((int)m4a_gba_fifo_dma_stall(&g, 50, 100), 18, "stall: span ending on the refill cycle");
+    ASSERT_EQ((int)m4a_gba_fifo_dma_stall(&g, 100, 200), 0, "stall: span starting on the refill cycle");
+    ASSERT_EQ((int)m4a_gba_fifo_dma_stall(&g, 20000, 20200), 18, "stall: the next refill, 20064 later");
+    ASSERT_EQ((int)m4a_gba_fifo_dma_stall(&g, 0, 60000), 54, "stall: three refills in 60000 cycles");
+    ASSERT_EQ((int)m4a_gba_fifo_dma_stall(&g, 40300, 40200), 0, "stall: empty span");
+    g.dmaEnabled = false;
+    ASSERT_EQ((int)m4a_gba_fifo_dma_stall(&g, 50, 100), 0, "stall: none while the DMA is off");
+}
+
 static void test_sequencer_lfo_delay_note_on(void)
 {
     printf("Testing sequencer: LFODL note start does not touch older notes...\n");
@@ -3689,6 +3784,8 @@ int main(void)
     test_sequencer_flow();
     test_sequencer_lfo_and_engine_tick();
     test_sequencer_lfo_delay_note_on();
+    test_sequencer_cycles();
+    test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();
 

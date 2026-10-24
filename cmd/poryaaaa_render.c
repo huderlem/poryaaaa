@@ -752,6 +752,7 @@ static void print_usage(const char *prog)
         "Loop options (when MIDI contains '[' / ']' text events):\n"
         "  --loop-count <n>            Number of loop body repetitions (default: 2)\n"
         "  --psg-log <file>            (--song) log every PSG register write with its CPU cycle\n"
+        "  --seq-log <file>            (--song) log each frame's modeled CgbSound entry cycle\n"
         "  --extended-clocks           Song is built with mid2agb -X (48 clocks/beat),\n"
         "                              which raises the length at which a note crossing\n"
         "                              the loop end is tied (held forever, as on hardware)\n"
@@ -779,6 +780,7 @@ typedef struct {
     double tailSeconds, fadeoutSeconds, totalDurSeconds;
     int loopCount;
     const char *psgLogPath;      /* --psg-log: every PSG register write with its CPU cycle */
+    const char *seqLogPath;      /* --seq-log: the sequencer's per-frame CgbSound entry cycle */
 } SongRenderOpts;
 
 /* --psg-log: one line per PSG register write, "cycle reg value", on the
@@ -857,6 +859,8 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
         sPsgLog.engine = &engine;
         engine.psg[0].writeLog = psg_log_cb;
     }
+    FILE *seqLog = o->seqLogPath ? fopen(o->seqLogPath, "w") : NULL;
+    seq.traceFile = seqLog;
     /* Replay the hardware boot with its output kept, so the render lines up
      * with an emulator recording from reset: the song's first frame is the
      * first SoundMain after the one the game catches on boot. */
@@ -1052,6 +1056,7 @@ int main(int argc, char *argv[])
     double      fadeoutSeconds = 5.0;
     double      totalDurSeconds = -1.0; /* -1 = not set */
     const char *psgLogPath    = NULL;
+    const char *seqLogPath    = NULL;
 
     for (int i = firstOpt; i < argc; i++) {
         if (strcmp(argv[i], "--midi") == 0 && i + 1 < argc) {
@@ -1093,6 +1098,8 @@ int main(int argc, char *argv[])
                         hz, m4a_pcm_freq_mode_hz(pcmFreqMode));
         } else if (strcmp(argv[i], "--psg-log") == 0 && i + 1 < argc) {
             psgLogPath = argv[++i];
+        } else if (strcmp(argv[i], "--seq-log") == 0 && i + 1 < argc) {
+            seqLogPath = argv[++i];
         } else if (strcmp(argv[i], "--tail") == 0 && i + 1 < argc) {
             tailSeconds = atof(argv[++i]);
             if (tailSeconds < 0.0) tailSeconds = 0.0;
@@ -1144,6 +1151,7 @@ int main(int argc, char *argv[])
             .tailSeconds = tailSeconds, .fadeoutSeconds = fadeoutSeconds,
             .totalDurSeconds = totalDurSeconds, .loopCount = loopCount,
             .psgLogPath = psgLogPath,
+            .seqLogPath = seqLogPath,
         };
         float *sl, *sr;
         uint64_t sTotal, sFade;

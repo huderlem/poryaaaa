@@ -761,13 +761,11 @@ static M4APCMChannel *allocate_pcm_channel(M4AEngine *engine, uint8_t priority,
     int bestTrackIndex = trackIndex;
     int bestIsStopping = 0;
 
-    engine->lastNoteScan = count;
     for (int i = first; i < first + count; i++) {
         M4APCMChannel *ch = &engine->pcmChannels[i];
 
         if (!(ch->status & CHN_ON)) {
             /* Free channel - use immediately */
-            engine->lastNoteScan = i - first;
             return ch;
         }
 
@@ -964,6 +962,11 @@ static void note_on_keys(const M4AEngine *engine, const M4ATrack *track, uint8_t
     *finalKey = fk;
     *pcmKey = pk;
     *pcmFinalKey = pfk;
+}
+
+const ToneData *m4a_engine_resolve_voice(const ToneData *voice, uint8_t key)
+{
+    return resolve_voice((ToneData *)voice, key);
 }
 
 int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity)

@@ -9,6 +9,7 @@ void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int8_t *ring, int ringS
                   int pcmSamplesPerVBlank)
 {
     memset(g, 0, sizeof(*g));
+    g->fifoDmaCycle = -1;
     g->hostRate = hostRate;
     g->left = m4a_blip_new(BLIP_SIZE);
     g->right = m4a_blip_new(BLIP_SIZE);
@@ -128,6 +129,8 @@ static void fifo_push(M4AGbaFifo *f, M4AFifoWord w)
 static void fifo_dma(M4AGbaAudio *g, int ch)
 {
     M4AGbaFifo *f = &g->fifo[ch];
+    if (ch == 0)
+        g->fifoDmaCycle = g->now;
     const int8_t *base = g->ring + ch * g->ringSize;
     int limit = (2 - ch) * g->ringSize;
     for (int w = 0; w < 4; w++) {
@@ -295,6 +298,25 @@ void m4a_gba_run(M4AGbaAudio *g, int64_t until)
     }
     if (g->now < until)
         g->now = until;
+}
+
+int64_t m4a_gba_fifo_dma_stall(const M4AGbaAudio *g, int64_t from, int64_t to)
+{
+    if (g->fifoDmaCycle < 0 || !g->dmaEnabled || to <= from || g->timerPeriodDen <= 0)
+        return 0;
+    /* The refills repeat every 16 timer periods from the last one seen. */
+    int64_t period = 16 * (int64_t)(g->timerPeriodNum / g->timerPeriodDen);
+    if (period <= 0)
+        return 0;
+    int64_t t = g->fifoDmaCycle;
+    if (t <= from)
+        t += ((from - t) / period + 1) * period;
+    else
+        t -= ((t - from - 1) / period) * period;
+    int64_t n = 0;
+    for (; t <= to; t += period)
+        n++;
+    return n * M4A_CYC_FIFO_DMA_STALL;
 }
 
 int m4a_gba_samples_avail(const M4AGbaAudio *g)

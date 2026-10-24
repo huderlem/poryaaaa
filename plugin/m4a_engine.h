@@ -476,10 +476,7 @@ struct M4AEngine {
      * "SoundMain timing probe". */
     int32_t cgbEntryCycles;
     int64_t soundMainStamp;      /* cycle of the current SoundMain (-1 outside one) */
-    /* ply_note's DirectSound channel search: busy channels examined before
-     * a free one (maxPcmChannels when none was free), for the timing model. */
-    int lastNoteScan;
-};
+    };
 
 /*
  * SoundMain timing model, measured in mgba 0.10.5 on the accuracy test ROM
@@ -490,23 +487,145 @@ struct M4AEngine {
 #define M4A_CYC_CGB_ENTRY_PAUSED   1007  /* CgbSound entry, BGM player paused */
 #define M4A_CYC_CGB_ENTRY_BASE     1396  /* CgbSound entry, playing, no tempo tick ... */
 #define M4A_CYC_PER_TRACK          6     /* ... + 6 per existing track */
-#define M4A_CYC_TICK_BASE          404   /* a tempo tick with no commands ... */
-#define M4A_CYC_TICK_PER_TRACK     84    /* ... + 84 per existing track after the first ... */
-#define M4A_CYC_TICK_FIRST_TRACK   60    /* ... which costs 60 (464 for one track; 438 measured once its chain is empty and it is waiting) */
-#define M4A_CYC_GATE_EXPIRY        8     /* a channel's gate time reaching 0 in the chain walk */
-#define M4A_CYC_CLEAR_CHAIN        87    /* a dead channel dropped from a track's chain */
-#define M4A_CYC_LFO_STEP           120   /* per track with an active LFO per tick */
-#define M4A_CYC_TRACK_APPLY        376   /* VOLCHG/PITCHG pass, per channel in a flagged track's chain */
-#define M4A_CYC_TRACK_START        264   /* MPT_FLG_START init (Clear64byte, defaults) */
-#define M4A_CYC_NOTE_CMD_BYTE      6     /* a note with an explicit command byte (not running status) */
-#define M4A_CYC_WAIT_CMD           0     /* a W## command (inside the note/command costs) */
-#define M4A_CYC_CMD_DEFAULT        180   /* an unmeasured ply_* handler + dispatch */
-#define M4A_CYC_NOTE_CGB           924   /* ply_note starting a square or wave */
-#define M4A_CYC_NOTE_NOISE         832   /* ply_note starting a noise channel */
-#define M4A_CYC_NOTE_PCM           810   /* ply_note starting a DirectSound channel on the first free one ... */
-#define M4A_CYC_NOTE_PCM_SCAN      130   /* ... + per busy channel examined before it (806-1423 measured) */
-#define M4A_CYC_NOTE_NONE          600   /* ply_note that starts nothing */
-#define M4A_CYC_NOTE_CGB_BUSY      50    /* ... taking over a CGB channel still sounding */
+/*
+ * MPlayMain, segment by segment (docs/ACCURACY_PLAN.md, "SoundMain timing
+ * probe, step 3": every number is the measured delta between two of
+ * m4a_1.s's labels; "est." marks a path the corpus never took, estimated
+ * from the neighbouring measured path and the instruction difference).
+ * The sequencer (m4a_sequencer.c) sums these while it runs MPlayMain's
+ * control flow, so the CgbSound entry follows the song state exactly as it
+ * does on the GBA.
+ */
+/* Frame skeleton: the BGM player is the last of six chained players and
+ * runs its body first; the five idle players unwind after it. */
+#define M4A_CYC_MP_BGM_ENTRY       566   /* BGM MPlayMain entry (first entry 291, five idle entries 55 apart) */
+#define M4A_CYC_MP_HEAD            150   /* entry -> FadeOutBody 96 -> _081DD9BC 54 */
+#define M4A_CYC_MP_PAUSED          71    /* status < 0: entry -> _081DDA6C */
+#define M4A_CYC_MP_EXIT            370   /* _081DDA6C, five idle unwinds of 63, CgbSound 55 after the last */
+/* The VOLCHG/PITCHG pass over the player's trackCount tracks (also the
+ * no-tick frame's only work). */
+#define M4A_CYC_APPLY_ENTER        16    /* _081DD9BC -> _081DD9C4 12 -> _081DD9C8 4 */
+#define M4A_CYC_APPLY_NO_TRACK     14    /* _081DD9C8 -> _081DDA62, no MPT_FLG_EXIST */
+#define M4A_CYC_APPLY_NO_FLAGS     20    /* ... exists, no VOLCHG/PITCHG */
+#define M4A_CYC_APPLY_NEXT         16    /* _081DDA62 -> _081DD9C8 */
+#define M4A_CYC_APPLY_LAST         10    /* _081DDA62 -> _081DDA6C */
+#define M4A_CYC_APPLY_FLAGGED      30    /* _081DD9C8 -> TrkVolPitSet */
+#define M4A_CYC_APPLY_TVPS         62    /* TrkVolPitSet -> _081DD9E6, no VOLSET/PITSET work (+ M4A_CYC_TVPS_* below) */
+#define M4A_CYC_APPLY_TVPS_EMPTY   6     /* ... -> _081DDA58 instead, chain empty */
+#define M4A_CYC_APPLY_CH           14    /* _081DD9E6 -> _081DD9F6, a sounding channel */
+#define M4A_CYC_APPLY_CH_VOL       24    /* VOLCHG: _081DD9F6 -> ChnVolSetAsm ... */
+#define M4A_CYC_APPLY_CH_VOL_PCM   72    /* ... -> _081DDA14, DirectSound */
+#define M4A_CYC_APPLY_CH_VOL_CGB   74    /* ... -> _081DDA14, CGB (MO_VOL set) */
+#define M4A_CYC_APPLY_CH_NOVOL     20    /* no VOLCHG: _081DD9F6 -> _081DDA14 */
+#define M4A_CYC_APPLY_CH_PIT       24    /* PITCHG: _081DDA14 -> _081DDA28 ... */
+#define M4A_CYC_APPLY_CH_PIT_CGB   232   /* ... MidiKeyToCgbFreq 32 + 200 to _081DDA52 (+ M4A_CYC_CGB_FREQ_LOW_KEY, est. by ply_note's) */
+#define M4A_CYC_APPLY_CH_PIT_NOISE 140   /* ... noise: 32 + 108 (est.: the 98 of ply_note's noise call + 10) */
+#define M4A_CYC_APPLY_CH_PIT_PCM   263   /* ... _081DDA46 10, MidiKeyToFreq 16 + 237 */
+#define M4A_CYC_APPLY_CH_NOPIT     14    /* no PITCHG: _081DDA14 -> _081DDA52 */
+#define M4A_CYC_APPLY_CH_LAST      6     /* _081DDA52 -> _081DDA58 */
+#define M4A_CYC_APPLY_CH_NEXT      12    /* _081DDA52 -> _081DD9E6, the next chained channel */
+#define M4A_CYC_APPLY_CH_DEAD      119   /* a dead channel met here (est.: 14 + ClearChain 12 + 33 + 54 + 6) */
+#define M4A_CYC_APPLY_TRACK_END    10    /* _081DDA58 -> _081DDA62 */
+/* A tempo tick: the track loop. */
+#define M4A_CYC_TICK_ENTER         22    /* _081DD9BC -> _081DD874 14 -> _081DD87C 8 */
+#define M4A_CYC_TICK_NO_TRACK      16    /* _081DD87C -> _081DD998, no MPT_FLG_EXIST */
+#define M4A_CYC_TICK_TRACK         14    /* _081DD87C -> _081DD886 */
+#define M4A_CYC_TICK_CHAIN         12    /* _081DD886 -> _081DD892, chain not empty */
+#define M4A_CYC_TICK_NO_CHAIN      18    /* _081DD886 -> _081DD8BA, chain empty */
+#define M4A_CYC_WALK_GATE0         20    /* _081DD892 -> _081DD8B4: ON, gate time 0 */
+#define M4A_CYC_WALK_GATE_DEC      26    /* ... gate time decremented, still nonzero */
+#define M4A_CYC_WALK_GATE_EXPIRE   34    /* ... gate time reaching 0, SF_STOP set */
+#define M4A_CYC_WALK_DEAD          59    /* a dead channel: _081DD8AE 14 + ClearChain 12 + RealClearChain 33 ... */
+#define M4A_CYC_WALK_UNLINK_00     54    /* ... RealClearChain -> _081DD8B4, prev 0 / next 0 */
+#define M4A_CYC_WALK_UNLINK_01     50    /* ... prev 0 / next set */
+#define M4A_CYC_WALK_UNLINK_10     56    /* ... prev set / next 0 */
+#define M4A_CYC_WALK_UNLINK_11     52    /* ... both set (est.) */
+#define M4A_CYC_WALK_NEXT          12    /* _081DD8B4 -> _081DD892 */
+#define M4A_CYC_WALK_END           6     /* _081DD8B4 -> _081DD8BA */
+#define M4A_CYC_TICK_NO_START      14    /* _081DD8BA -> _081DD938 */
+#define M4A_CYC_TICK_START         121   /* ... MPT_FLG_START: Clear64byte 20 + 33, SoundMainBTM 68 */
+#define M4A_CYC_WAIT_NO_LFO        28    /* _081DD938 -> _081DD994: wait != 0, lfoSpeed != 0, mod == 0 */
+#define M4A_CYC_WAIT_LFOS0         23    /* ... lfoSpeed == 0 (est.) */
+#define M4A_CYC_WAIT_LFO_DELAY     40    /* ... lfoDelayC != 0, decremented */
+#define M4A_CYC_LFO_STEP           34    /* ... LFO active: _081DD938 -> _081DD95A ... */
+#define M4A_CYC_LFO_NEG            26    /* ... -> _081DD972, lfoSpeedC - 0x40 negative (lsls/asrs/b) */
+#define M4A_CYC_LFO_POS            24    /* ... -> _081DD972, otherwise (the taken bpl) */
+#define M4A_CYC_LFO_SAME           20    /* ... -> _081DD994, modM unchanged */
+#define M4A_CYC_LFO_PIT            38    /* ... modM changed, modT 0 (PITCHG) */
+#define M4A_CYC_LFO_VOL            36    /* ... modM changed, modT 1/2 (VOLCHG) */
+#define M4A_CYC_TICK_TRACK_END     4     /* _081DD994 -> _081DD998 */
+#define M4A_CYC_TICK_NEXT          18    /* _081DD998 -> _081DD87C */
+#define M4A_CYC_TICK_LAST          10    /* _081DD998 -> _081DD9A4 */
+#define M4A_CYC_TICK_EXIT          22    /* _081DD9A4 -> _081DD9BC */
+/* Command dispatch (wait == 0). */
+#define M4A_CYC_CMD_FETCH          12    /* _081DD938 -> _081DD8E0 */
+#define M4A_CYC_CMD_BYTE           21    /* an explicit command byte: _081DD8E0 -> _081DD8EC ... */
+#define M4A_CYC_CMD_BYTE_LOW       14    /* ... -> _081DD8F6, byte < 0xBD (the taken bcc) */
+#define M4A_CYC_CMD_BYTE_RS        10    /* ... -> _081DD8F6, byte >= 0xBD (running status stored) */
+#define M4A_CYC_CMD_RUNNING        25    /* a data byte under running status: _081DD8E0 -> _081DD8F6 */
+#define M4A_CYC_CMD_NOTE           34    /* _081DD8F6 -> ply_note */
+#define M4A_CYC_CMD_TABLE          50    /* _081DD8F6 -> _081DD90C 10 -> the ply_* handler 40 */
+#define M4A_CYC_CMD_WAIT           46    /* a W## byte: _081DD8F6 -> _081DD90C 10 -> _081DD92E 10 -> _081DD938 26 */
+#define M4A_CYC_CMD_DEFAULT        90    /* an unmeasured handler to _081DD938 (est.: the one-byte handlers' median) */
+/* ply_note: entry, voice, channel, setup (handler entry to _081DD938). */
+#define M4A_CYC_NOTE_ENTRY         78    /* ply_note -> _081DDB46, no data bytes ... */
+#define M4A_CYC_NOTE_KEY_BYTE      19    /* ... + a key byte */
+#define M4A_CYC_NOTE_VEL_BYTE      17    /* ... + a velocity byte */
+#define M4A_CYC_NOTE_GATE_BYTE     15    /* ... + a gate-extension byte (est.) */
+#define M4A_CYC_NOTE_VOICE_PLAIN   26    /* _081DDB46 -> _081DDB9C, the track's own voice */
+#define M4A_CYC_NOTE_VOICE_SPLIT   92    /* ... keysplit (table and sub-voice in ROM) */
+#define M4A_CYC_NOTE_VOICE_DRUM    111   /* ... rhythm */
+#define M4A_CYC_NOTE_VOICE_BAD     94    /* a keysplit/rhythm sub-voice that is itself split: to _081DDCEA (est.: 45 + 35 + 14) */
+#define M4A_CYC_NOTE_CGB_PATH      48    /* _081DDB9C -> _081DDBC4 */
+#define M4A_CYC_NOTE_PCM_PATH      40    /* _081DDB9C -> _081DDBEC (+7 with a ROM sub-voice) */
+#define M4A_CYC_NOTE_ROM_VOICE_PATH 7
+#define M4A_CYC_NOTE_CGB_FREE      20    /* _081DDBC4 -> _081DDC40, channel status 0 */
+#define M4A_CYC_NOTE_CGB_STOPPING  26    /* ... SF_STOP set */
+#define M4A_CYC_NOTE_CGB_PRIO      32    /* ... taken from a lower priority (est.) */
+#define M4A_CYC_NOTE_CGB_TRACK     48    /* ... taken by track order at equal priority (mt_chimney frame 348) */
+#define M4A_CYC_NOTE_CGB_REJECT_PRIO  34 /* ... rejected: to _081DDCEA (est.) */
+#define M4A_CYC_NOTE_CGB_REJECT_TRACK 42 /* ... rejected by track order (est.) */
+#define M4A_CYC_NOTE_SCAN_ENTER    14    /* _081DDBEC -> _081DDBFA */
+#define M4A_CYC_SCAN_FREE          14    /* a free channel: _081DDBFA -> _081DDC40 */
+#define M4A_CYC_SCAN_FIRST_STOP    34    /* ON+STOP, first stopping candidate: -> _081DDC32 32 + 2 */
+#define M4A_CYC_SCAN_STOP          24    /* ON+STOP with a stopping candidate: -> _081DDC18 */
+#define M4A_CYC_SCAN_ON            20    /* ON, no STOP: -> _081DDC14 ... */
+#define M4A_CYC_SCAN_ON_SKIP       10    /* ... -> _081DDC34, a stopping candidate exists */
+#define M4A_CYC_SCAN_ON_CMP        4     /* ... -> _081DDC18 */
+#define M4A_CYC_SCAN_LOWER         18    /* _081DDC18: strictly lower priority -> _081DDC32 (est. 16) + 2 */
+#define M4A_CYC_SCAN_CMP           12    /* _081DDC18 -> _081DDC24 */
+#define M4A_CYC_SCAN_HIGHER        8     /* _081DDC24 -> _081DDC34, higher priority (est.) */
+#define M4A_CYC_SCAN_LATER_TRACK   20    /* equal priority, later track -> _081DDC32 18 + 2 */
+#define M4A_CYC_SCAN_SAME_TRACK    18    /* equal priority, same track (the taken bls, bcc not taken) 16 + 2 */
+#define M4A_CYC_SCAN_EARLIER_TRACK 22    /* equal priority, earlier track -> _081DDC34 */
+#define M4A_CYC_SCAN_NEXT          12    /* _081DDC34 -> _081DDBFA */
+#define M4A_CYC_SCAN_DONE          12    /* _081DDC34 -> _081DDC40 after the last channel */
+#define M4A_CYC_SCAN_NONE          14    /* ... -> _081DDCEA, no candidate (est.) */
+#define M4A_CYC_NOTE_TAKE          45    /* _081DDC40 -> ClearChain 12 -> RealClearChain 33 ... */
+#define M4A_CYC_NOTE_UNLINK_NONE   44    /* ... -> _081DDC54, channel in no chain */
+#define M4A_CYC_NOTE_UNLINK_00     68    /* ... chained, prev 0 / next 0 */
+#define M4A_CYC_NOTE_UNLINK_01     64    /* ... prev 0 / next set */
+#define M4A_CYC_NOTE_UNLINK_10     70    /* ... prev set / next 0 */
+#define M4A_CYC_NOTE_UNLINK_11     66    /* ... both set */
+#define M4A_CYC_NOTE_CHAIN_EMPTY   4     /* ... + when the track's chain is empty after the unlink */
+#define M4A_CYC_NOTE_LFODL0        18    /* _081DDC54 -> _081DDC66, lfoDelay 0 */
+#define M4A_CYC_NOTE_LFODL         60    /* ... 24 + clear_modM 36 */
+#define M4A_CYC_NOTE_TVPS          114   /* _081DDC66 -> TrkVolPitSet 14 -> ChnVolSetAsm 100 (+ M4A_CYC_TVPS_*) */
+#define M4A_CYC_TVPS_VOLSET        82    /* TrkVolPitSet with MPT_FLG_VOLSET ... */
+#define M4A_CYC_TVPS_VOLSET_MODT1  4     /* ... + when modT == 1 */
+#define M4A_CYC_TVPS_PITSET        50    /* ... with MPT_FLG_PITSET ... */
+#define M4A_CYC_TVPS_PITSET_MODT   -2    /* ... when modT != 0 */
+#define M4A_CYC_TVPS_ROM_VOICE     25    /* ... type/wav/attack read from a ROM sub-voice (ply_note only) */
+#define M4A_CYC_NOTE_CHNVOL        78    /* ChnVolSetAsm -> _081DDCA0 */
+#define M4A_CYC_NOTE_CGB_FREQ      248   /* _081DDCA0 -> _081DDCBC 28, MidiKeyToCgbFreq 30 + 190 */
+#define M4A_CYC_NOTE_CGB_SWEEP     4     /* ... + a real sweep value (pan bit clear, time bits set): the taken bne */
+#define M4A_CYC_CGB_FREQ_LOW_KEY   -10   /* MidiKeyToCgbFreq with key <= 35 (the key = 0 branch): 180 instead of 190 */
+#define M4A_CYC_NOISE_FREQ_CLAMP   -4    /* ... noise with key > 80 (clamped to 59): 94 instead of 98; key <= 20 est. the same */
+#define M4A_CYC_NOTE_NOISE_FREQ    156   /* ... noise: 28 + 30 + 98 */
+#define M4A_CYC_NOTE_CGB_ROM_VOICE 16    /* ... length/sweep from a ROM sub-voice (est.) */
+#define M4A_CYC_NOTE_PCM_FREQ      267   /* _081DDCA0 -> _081DDCCE 12, MidiKeyToFreq 20 + 235 */
+#define M4A_CYC_NOTE_STORE         14    /* _081DDCDC -> _081DDCEA */
+#define M4A_CYC_NOTE_EXIT          30    /* _081DDCEA -> _081DD938 */
 /* Inside CgbSound: prologue before channel 1, an inactive channel, an active
  * channel without register writes, and the tail after a channel's last write. */
 #define M4A_CYC_CGB_PROLOGUE       120
@@ -559,6 +678,10 @@ void m4a_engine_refresh_voices(M4AEngine *engine);
  * was dropped, or the voice could not be resolved). */
 #define M4A_CHANNEL_NONE (-1)
 int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity);
+/* The voice ply_note would play for `key` on `voice` (keysplit / rhythm
+ * tables resolved), or NULL when the sub-voice is itself a split/rhythm
+ * voice (ply_note starts nothing).  For the sequencer's timing model. */
+const ToneData *m4a_engine_resolve_voice(const ToneData *voice, uint8_t key);
 void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key);
 void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program);
 void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value);

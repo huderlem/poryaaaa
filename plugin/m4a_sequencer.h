@@ -94,6 +94,10 @@ typedef struct {
     /* SoundMain timing model: CPU cycles of MPlayMain work this frame
      * (M4A_CYC_* in m4a_engine.h), published to engine->cgbEntryCycles. */
     int32_t frameCycles;
+    uint32_t frameCount;        /* MPlayMain calls since start (the ROM's engine frame - 2) */
+    /* Optional trace: one line per frame, "<frame> <CgbSound entry cycles from
+     * VBlank line 160>", comparable to mgba_probe's .frames column.  NULL = off. */
+    void *traceFile;            /* FILE * */
 } M4ASequencer;
 
 /* Attach to an engine: installs the frame hook and takes over the per-tick

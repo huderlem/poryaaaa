@@ -97,6 +97,7 @@ typedef struct {
     /* DirectSound FIFOs and the DMA that feeds them */
     M4AGbaFifo fifo[2];         /* 0 = A, 1 = B */
     bool dmaEnabled;            /* both FIFO DMAs on/off together */
+    int64_t fifoDmaCycle;       /* cycle of the last FIFO refill DMA (-1 before the first) */
     const int8_t *ring;        /* [2][ringSize]: A's buffer then B's */
     int ringSize;
 
@@ -124,6 +125,14 @@ void m4a_gba_write_soundbias_resolution(M4AGbaAudio *g, int resolution);
 void m4a_gba_fifo_reset(M4AGbaAudio *g);           /* SOUNDCNT_H FIFO reset bits */
 void m4a_gba_dma_enable(M4AGbaAudio *g);           /* DMA1/2CNT_H enable (source reload) */
 void m4a_gba_dma_disable(M4AGbaAudio *g);
+/* CPU cycles the sound FIFO refill DMAs steal from the instruction stream
+ * between `from` (exclusive) and `to` (inclusive): both FIFOs are refilled
+ * with 4 words each at the same timer overflow every 16 samples, 18 cycles
+ * measured in mgba (test/accuracy/ref/mgba_probe.c: eight 2-cycle FIFO
+ * writes at frame cycle 15092..15106, every 20064 cycles).  The timing
+ * model adds it to MPlayMain's and CgbSound's cursors. */
+int64_t m4a_gba_fifo_dma_stall(const M4AGbaAudio *g, int64_t from, int64_t to);
+#define M4A_CYC_FIFO_DMA_STALL 18
 void m4a_gba_timer_enable(M4AGbaAudio *g);         /* TM0CNT_H enable: first overflow after one period */
 void m4a_gba_timer_disable(M4AGbaAudio *g);
 void m4a_gba_set_pcm_rate(M4AGbaAudio *g, int pcmSamplesPerVBlank, const int8_t *ring, int ringSize);
