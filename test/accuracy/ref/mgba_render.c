@@ -5,16 +5,31 @@
  * (magic "PORYACC1") with what to play, runs N frames from reset and writes the
  * emulator's stereo output at the requested rate as a 16-bit WAV.
  *
+ * By default the raw DAC stream is captured through mAVStream.postAudioFrame
+ * (one int16 pair per DAC slot: 65536 Hz once Emerald sets SOUNDBIAS
+ * resolution 1, 256 CPU cycles per sample) and resampled with the engine's own
+ * band-limited resampler, plugin/m4a_blip.c, exactly as plugin/m4a_gba.c does
+ * (clock 16777216 Hz, level deltas stamped at a clock that advances one DAC
+ * interval per sample, a frame every 2048 cycles).  Both sides of the null
+ * test then share one bit-exact resampler and the harness measures only the
+ * GBA-side model (docs/ACCURACY_PLAN.md, output-stage decision 2026-10-24).
+ * --native-resampler writes mgba's own blip_buf output (the sinc kernel on
+ * desktop builds) instead, for listening checks.  The two modes report
+ * different --version strings so the harness caches their references apart.
+ *
  *   mgba_render <rom.gba> <out.wav> --frames N [--rate 48000]
  *               [--type song|cry|micro|none] [--id N] [--pitch N] [--pan N]
- *               [--volume N] [--start-frame N]
+ *               [--volume N] [--start-frame N] [--native-resampler]
  */
 #include <mgba/core/blip_buf.h>
 #include <mgba/core/config.h>
 #include <mgba/core/core.h>
 #include <mgba/core/log.h>
 #include <mgba/core/version.h>
+#include <mgba/internal/gba/gba.h>
 #include <mgba-util/vfs.h>
+
+#include "m4a_blip.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -47,10 +62,44 @@ static void quietLog(struct mLogger* logger, int category, enum mLogLevel level,
 }
 static struct mLogger sLogger = { .log = quietLog };
 
+/* Reference resampler: the engine's blip fed with the DAC stream. */
+#define CAPTURE_BLIP_SIZE 0x8000
+#define CAPTURE_CLOCK_RATE 16777216
+#define CAPTURE_FRAME 2048
+#define RESAMPLER_TAG "m4a_blip"
+
+struct Capture {
+	struct mAVStream stream;
+	struct GBA* gba;
+	M4ABlip* left;
+	M4ABlip* right;
+	int16_t lastLeft;
+	int16_t lastRight;
+	unsigned clock;
+};
+
+static void captureAudioFrame(struct mAVStream* stream, int16_t left, int16_t right) {
+	struct Capture* c = (struct Capture*) stream;
+	/* Mirror _sample in mgba's src/gba/audio.c: one level delta per DAC slot,
+	 * the clock advancing by the current SOUNDBIAS interval (512 cycles before
+	 * m4aSoundInit sets resolution 1, 256 after). */
+	m4a_blip_add_delta(c->left, c->clock, left - c->lastLeft);
+	m4a_blip_add_delta(c->right, c->clock, right - c->lastRight);
+	c->lastLeft = left;
+	c->lastRight = right;
+	c->clock += c->gba->audio.sampleInterval;
+	if (c->clock >= CAPTURE_FRAME) {
+		m4a_blip_end_frame(c->left, CAPTURE_FRAME);
+		m4a_blip_end_frame(c->right, CAPTURE_FRAME);
+		c->clock -= CAPTURE_FRAME;
+	}
+}
+
 static void usage(const char* prog) {
 	fprintf(stderr,
 	        "Usage: %s <rom.gba> <out.wav> --frames N [--rate HZ] [--type song|cry|micro|none]\n"
-	        "          [--id N] [--pitch N] [--pan N] [--volume N] [--start-frame N]\n",
+	        "          [--id N] [--pitch N] [--pan N] [--volume N] [--start-frame N]\n"
+	        "          [--native-resampler]\n",
 	        prog);
 }
 
@@ -118,8 +167,21 @@ static void writeWavHeader(FILE* f, uint32_t rate, uint32_t frames) {
 }
 
 int main(int argc, char** argv) {
-	if (argc == 2 && !strcmp(argv[1], "--version")) {
-		printf("%s %s\n", projectName, projectVersion);
+	int nativeResampler = 0;
+	int i;
+	for (i = 1; i < argc; ++i) {
+		if (!strcmp(argv[i], "--native-resampler")) {
+			nativeResampler = 1;
+		}
+	}
+	if (argc >= 2 && !strcmp(argv[1], "--version")) {
+		/* The resampler is part of the reference definition: the harness keys
+		 * its reference cache on this string. */
+		if (nativeResampler) {
+			printf("%s %s\n", projectName, projectVersion);
+		} else {
+			printf("%s %s+%s\n", projectName, projectVersion, RESAMPLER_TAG);
+		}
 		return 0;
 	}
 	if (argc < 3) {
@@ -132,11 +194,12 @@ int main(int argc, char** argv) {
 	int rate = 48000;
 	struct Params p = { TYPE_NONE, 0, 15360, 0, 120, 1 };
 
-	int i;
 	for (i = 3; i < argc; ++i) {
 		const char* a = argv[i];
 		const char* v = (i + 1 < argc) ? argv[i + 1] : NULL;
-		if (!strcmp(a, "--frames") && v) {
+		if (!strcmp(a, "--native-resampler")) {
+			continue;
+		} else if (!strcmp(a, "--frames") && v) {
 			frames = atol(v); ++i;
 		} else if (!strcmp(a, "--rate") && v) {
 			rate = atoi(v); ++i;
@@ -207,6 +270,21 @@ int main(int argc, char** argv) {
 		fprintf(stderr, "loadROM failed\n");
 		return 1;
 	}
+	struct Capture cap;
+	memset(&cap, 0, sizeof(cap));
+	if (!nativeResampler) {
+		cap.stream.postAudioFrame = captureAudioFrame;
+		cap.gba = core->board;
+		cap.left = m4a_blip_new(CAPTURE_BLIP_SIZE);
+		cap.right = m4a_blip_new(CAPTURE_BLIP_SIZE);
+		if (!cap.left || !cap.right) {
+			fprintf(stderr, "Out of memory\n");
+			return 1;
+		}
+		m4a_blip_set_rates(cap.left, CAPTURE_CLOCK_RATE, rate);
+		m4a_blip_set_rates(cap.right, CAPTURE_CLOCK_RATE, rate);
+		core->setAVStream(core, &cap.stream);
+	}
 	core->reset(core);
 
 	struct blip_t* left = core->getAudioChannel(core, 0);
@@ -226,13 +304,36 @@ int main(int argc, char** argv) {
 	long f;
 	for (f = 0; f < frames; ++f) {
 		core->runFrame(core);
-		int avail = blip_samples_avail(left);
-		if (avail > 8192) {
-			avail = 8192;
+		int avail;
+		if (nativeResampler) {
+			avail = blip_samples_avail(left);
+			if (avail > 8192) {
+				avail = 8192;
+			}
+			if (avail > 0) {
+				blip_read_samples(left, buf, avail, 1);
+				blip_read_samples(right, buf + 1, avail, 1);
+			}
+		} else {
+			/* mgba's own blip is drained and discarded so it never fills. */
+			int drain = blip_samples_avail(left);
+			if (drain > 8192) {
+				drain = 8192;
+			}
+			if (drain > 0) {
+				blip_read_samples(left, buf, drain, 1);
+				blip_read_samples(right, buf + 1, drain, 1);
+			}
+			avail = m4a_blip_samples_avail(cap.left);
+			if (avail > 8192) {
+				avail = 8192;
+			}
+			if (avail > 0) {
+				m4a_blip_read_samples(cap.left, buf, avail, 1);
+				m4a_blip_read_samples(cap.right, buf + 1, avail, 1);
+			}
 		}
 		if (avail > 0) {
-			blip_read_samples(left, buf, avail, 1);
-			blip_read_samples(right, buf + 1, avail, 1);
 			fwrite(buf, sizeof(int16_t) * 2, avail, out);
 			total += avail;
 		}
@@ -241,6 +342,8 @@ int main(int argc, char** argv) {
 	writeWavHeader(out, rate, total);
 	fclose(out);
 
+	m4a_blip_delete(cap.left);
+	m4a_blip_delete(cap.right);
 	free(buf);
 	free(video);
 	mCoreConfigDeinit(&core->config);

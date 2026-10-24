@@ -278,10 +278,23 @@ gates each.
    oscillators still attached, stepped on the DAC grid): noise7, psg_mix,
    mus_weather_groudon read 1.2-1.4 dB worse than the sequencer baseline,
    which step 3 is for.
-3. **Next**: first switch `mgba_render` to the engine's resampler (see the
-   blip note below) and regenerate the references; then the PSG model
-   ported from mgba `src/gb/audio.c` (GBA style) + CgbSound register driver
-   replacing the host-rate oscillators in `m4a_channel.c`; run the harness.
+3. **3a done**: `mgba_render` captures mgba's DAC stream through
+   `mAVStream.postAudioFrame` and resamples it with `plugin/m4a_blip.c`
+   (see the blip note below); `--native-resampler` keeps mgba's own output.
+   Its `--version` reports `mGBA 0.10.5+m4a_blip`, so the harness caches
+   these references apart from the native ones and the committed micro
+   FLACs were regenerated once (**reference-definition change**, ROM hash
+   unchanged, 7b2e822f7a23).  Harness after 3a: **14/38 pass**.  Every PCM
+   micro-test deepened: pcm -37.8 -> -46.3, pcm_hi -22.7 -> -47.2 (its
+   "high-key aliasing" was the sinc-vs-linear kernel, not the mixer),
+   pcm_adsr -36.1 -> -64.0, pcm_drum -27.4 -> -69.1, pcm_cmp -28.7 ->
+   -54.6, pcm_bass -41.8 -> -66.5, pan/vol/vel/bend/lfo_*/tune -36..-39 ->
+   -42..-58.  Still failing on the PCM side: pcm_reverb -10.4 and
+   pcm_chord -28.6 (unchanged; mixer-port items), vel's worst second -38.6.
+   PSG tests and songs unchanged (the PSG model has not landed yet).
+   **3b next**: the PSG model ported from mgba `src/gb/audio.c` (GBA
+   style) + CgbSound register driver replacing the host-rate oscillators
+   in `m4a_channel.c`; run the harness.
 4. **Then**: remove the analog low-pass (engine flag, `--analog-filter`,
    GUI checkbox, `analog_filter` config key, CLAP state byte kept for
    back-compat reading).  Save `baselines/<date>_output-stage.json`,

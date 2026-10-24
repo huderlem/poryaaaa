@@ -286,8 +286,9 @@ set(ACCURACY_POKEEMERALD_DIR "" CACHE PATH "pokeemerald tree used to build the a
 set(ACCURACY_MGBA_DIR "" CACHE PATH "mgba source tree containing build/libmgba-static.a")
 
 if(ACCURACY_MGBA_DIR)
-    add_executable(mgba_render test/accuracy/ref/mgba_render.c)
+    add_executable(mgba_render test/accuracy/ref/mgba_render.c plugin/m4a_blip.c)
     target_include_directories(mgba_render PRIVATE
+        ${CMAKE_SOURCE_DIR}/plugin
         ${ACCURACY_MGBA_DIR}/include
         ${ACCURACY_MGBA_DIR}/build/include
     )
