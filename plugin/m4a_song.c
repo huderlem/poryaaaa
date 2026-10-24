@@ -5,6 +5,7 @@
 #include "m4a_song.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,6 +92,8 @@ static bool builtin_symbol(const char *name, int32_t *value)
     if ((n == 3 || n == 4) && strchr("ABCDEFG", name[0]) && (name[1] == 'n' || name[1] == 's')) {
         static const int semis[7] = { 9, 11, 0, 2, 4, 5, 7 }; /* A B C D E F G */
         int octave;
+        if (name[1] == 's' && (name[0] == 'E' || name[0] == 'B'))
+            return false; /* MPlayDef.s defines no Es / Bs */
         if (n == 4 && name[2] == 'M' && (name[3] == '1' || name[3] == '2'))
             octave = -(name[3] - '0');
         else if (n == 3 && name[2] >= '0' && name[2] <= '8')
@@ -135,6 +138,7 @@ typedef struct {
     int wordCount, wordCap;
 
     char *globalName;
+    bool sawOtherInclude;
 
     char *err;
     size_t errLen;
@@ -154,7 +158,10 @@ static void fail(Parser *p, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
-    snprintf(p->err, p->errLen, "line %d: %s", p->line, msg);
+    if (p->line > 0)
+        snprintf(p->err, p->errLen, "line %d: %s", p->line, msg);
+    else
+        snprintf(p->err, p->errLen, "%s", msg);
 }
 
 static char *dupn(const char *s, size_t n)
@@ -216,7 +223,8 @@ typedef struct {
     int labelRefs;
     int32_t labelValue;
     const char *external;
-    int depth;
+    int depth;      /* .equ evaluation nesting */
+    int nest;       /* parenthesis / unary nesting */
 } Expr;
 
 static int64_t parse_sum(Expr *e);
@@ -243,7 +251,7 @@ static int64_t eval_identifier(Expr *e, const char *name)
             fail(p, "symbol '%s' is defined recursively", name);
             return 0;
         }
-        Expr sub = { p, sym->expr, 0, 0, NULL, e->depth + 1 };
+        Expr sub = { p, sym->expr, 0, 0, NULL, e->depth + 1, 0 };
         int64_t r = parse_sum(&sub);
         skip_ws(&sub);
         if (*sub.s != 0)
@@ -257,15 +265,23 @@ static int64_t eval_identifier(Expr *e, const char *name)
     }
     if (builtin_symbol(name, &v))
         return v;
-    fail(p, "undefined symbol '%s'", name);
+    fail(p, p->sawOtherInclude ? "undefined symbol '%s' (.include files other than MPlayDef.s are not read)"
+                               : "undefined symbol '%s'", name);
     return 0;
 }
 
 /* An identifier that is neither defined in the file nor built in: an
- * external symbol (the voicegroup).  It evaluates to 0; the caller decides
- * whether an external reference is acceptable in its context. */
+ * external symbol, which can only be the voicegroup (mid2agb names it
+ * voicegroup<...>; hand-written songs follow suit).  It evaluates to 0; the
+ * caller decides whether an external reference is acceptable in its context.
+ * Anything else undefined is a typo and is reported as such. */
 static int64_t eval_external(Expr *e, Symbol *sym)
 {
+    if (strncmp(sym->name, "voicegroup", 10) != 0) {
+        fail(e->p, e->p->sawOtherInclude ? "undefined symbol '%s' (.include files other than MPlayDef.s are not read)"
+                                         : "undefined symbol '%s'", sym->name);
+        return 0;
+    }
     if (e->external && strcmp(e->external, sym->name) != 0)
         fail(e->p, "expression references two undefined symbols ('%s', '%s')", e->external, sym->name);
     e->external = sym->name;
@@ -277,23 +293,35 @@ static int64_t parse_primary(Expr *e)
     skip_ws(e);
     const char *s = e->s;
 
-    if (*s == '(') {
-        e->s++;
-        int64_t v = parse_sum(e);
-        skip_ws(e);
-        if (*e->s != ')') { fail(e->p, "missing ')'"); return 0; }
-        e->s++;
+    if (*s == '(' || *s == '-' || *s == '+' || *s == '~') {
+        if (++e->nest > 64) { fail(e->p, "expression nested too deeply"); return 0; }
+        int64_t v;
+        if (*s == '(') {
+            e->s++;
+            v = parse_sum(e);
+            skip_ws(e);
+            if (*e->s != ')') { fail(e->p, "missing ')'"); return 0; }
+            e->s++;
+        } else {
+            e->s++;
+            v = parse_primary(e);
+            if (*s == '-') v = (int64_t)(0u - (uint64_t)v);
+            else if (*s == '~') v = ~v;
+        }
+        e->nest--;
         return v;
     }
-    if (*s == '-') { e->s++; return -parse_primary(e); }
-    if (*s == '+') { e->s++; return parse_primary(e); }
-    if (*s == '~') { e->s++; return ~parse_primary(e); }
 
     if (isdigit((unsigned char)*s)) {
         char *end;
-        int64_t v = (int64_t)strtoull(s, &end, 0);
+        errno = 0;
+        unsigned long long u = strtoull(s, &end, 0);
+        if (errno == ERANGE || u > 0xFFFFFFFFull) {
+            fail(e->p, "integer constant too large");
+            return 0;
+        }
         e->s = end;
-        return v;
+        return (int64_t)u;
     }
     if (isalpha((unsigned char)*s) || *s == '_' || *s == '.' || *s == '$') {
         const char *start = s;
@@ -332,8 +360,9 @@ static int64_t parse_product(Expr *e)
             return v;
         e->s++;
         int64_t r = parse_primary(e);
-        if (op == '*') v *= r;
+        if (op == '*') v = (int64_t)((uint64_t)v * (uint64_t)r);
         else if (r == 0) { fail(e->p, "division by zero"); return 0; }
+        else if (r == -1) v = (op == '/') ? (int64_t)(0u - (uint64_t)v) : 0;
         else if (op == '/') v /= r;
         else v %= r;
     }
@@ -349,18 +378,22 @@ static int64_t parse_sum(Expr *e)
             return v;
         e->s++;
         int64_t r = parse_product(e);
-        v = (op == '+') ? v + r : v - r;
+        v = (int64_t)((op == '+') ? (uint64_t)v + (uint64_t)r : (uint64_t)v - (uint64_t)r);
     }
 }
 
 /* Evaluate a complete expression string. */
 static int64_t eval_expr(Parser *p, const char *text, Expr *info)
 {
-    Expr e = { p, text, 0, 0, NULL, 0 };
+    Expr e = { p, text, 0, 0, NULL, 0, 0 };
     int64_t v = parse_sum(&e);
     skip_ws(&e);
-    if (*e.s != 0 && !p->failed)
-        fail(p, "trailing characters in expression '%s'", text);
+    if (*e.s != 0 && !p->failed) {
+        if (strchr("<>&|^!=", *e.s))
+            fail(p, "operator '%c' is not supported in expression '%s'", *e.s, text);
+        else
+            fail(p, "trailing characters in expression '%s'", text);
+    }
     if (info)
         *info = e;
     return v;
@@ -456,15 +489,22 @@ static void parse_directive(Parser *p, char *name, char *args)
         } else if (s->isLabel) {
             fail(p, "'%s' is already a label", ops[0]);
             return;
+        } else if (s->expr) {
+            fail(p, "'%s' is already defined (.equ redefinition is not supported)", ops[0]);
+            return;
         }
-        free(s->expr);
         s->expr = dupn(ops[1], strlen(ops[1]));
     } else if (strcmp(name, ".align") == 0 || strcmp(name, ".balign") == 0) {
         Expr info;
         int64_t v = eval_expr(p, args, &info);
         if (p->failed) return;
-        uint32_t align = strcmp(name, ".align") == 0 ? (1u << (unsigned)v) : (uint32_t)v;
-        if (align == 0 || align > 4096) { fail(p, "bad alignment"); return; }
+        if (info.external || info.labelRefs) { fail(p, "%s needs a constant", name); return; }
+        if (strcmp(name, ".align") == 0) {
+            if (v < 0 || v > 12) { fail(p, "bad alignment %lld", (long long)v); return; }
+            v = (int64_t)1 << v;
+        }
+        if (v <= 0 || v > 4096 || (v & (v - 1))) { fail(p, "alignment must be a power of two"); return; }
+        uint32_t align = (uint32_t)v;
         /* .rodata is zero-filled by the linker/assembler. */
         while (p->song->size % align != 0)
             if (!emit_byte(p, 0)) return;
@@ -473,7 +513,12 @@ static void parse_directive(Parser *p, char *name, char *args)
         int n = split_operands(args, ops, 4);
         if (n >= 1 && !p->globalName)
             p->globalName = dupn(ops[0], strlen(ops[0]));
-    } else if (strcmp(name, ".include") == 0 || strcmp(name, ".section") == 0
+    } else if (strcmp(name, ".include") == 0) {
+        /* The MPlayDef.s vocabulary is built in; other includes are not
+         * read, so a song that needs their symbols fails on the first use. */
+        if (!strstr(args, "MPlayDef.s"))
+            p->sawOtherInclude = true;
+    } else if (strcmp(name, ".section") == 0
                || strcmp(name, ".text") == 0 || strcmp(name, ".end") == 0
                || strcmp(name, ".syntax") == 0 || strcmp(name, ".arm") == 0
                || strcmp(name, ".thumb") == 0 || strcmp(name, ".size") == 0
@@ -484,15 +529,24 @@ static void parse_directive(Parser *p, char *name, char *args)
     }
 }
 
+static void parse_line(Parser *p, char *line);
+
 static void parse_line(Parser *p, char *line)
 {
     /* Strip comments. */
     char *at = strchr(line, '@');
     if (at)
         *at = 0;
-    at = strchr(line, ';');
-    if (at)
-        *at = 0;
+
+    /* On ARM, GAS uses ';' as a statement separator. */
+    char *semi = strchr(line, ';');
+    if (semi) {
+        *semi = 0;
+        parse_line(p, line);
+        if (!p->failed)
+            parse_line(p, semi + 1);
+        return;
+    }
 
     char *s = trim(line);
     if (*s == 0)
@@ -579,12 +633,21 @@ static void resolve_words(Parser *p)
             snprintf(song->voicegroup, sizeof(song->voicegroup), "%s", vg);
             write_u32(song->data + w->offset, 0);
         } else if (info.labelRefs == 1) {
+            int64_t addend = v - info.labelValue;
+            if (addend < -0x8000 || addend > 0x8000) {
+                fail(p, ".word expression '%s' is not label + small constant", w->expr);
+                return;
+            }
             r->offset = w->offset;
             r->target = info.labelValue;
-            r->addend = (int32_t)(v - info.labelValue);
+            r->addend = (int32_t)addend;
             song->relocCount++;
             write_u32(song->data + w->offset, (uint32_t)v);
         } else if (info.labelRefs == 0) {
+            if (v < -0x80000000ll || v > 0xFFFFFFFFll) {
+                fail(p, "value %lld out of range for .word", (long long)v);
+                return;
+            }
             write_u32(song->data + w->offset, (uint32_t)v);
         } else {
             fail(p, ".word expression references more than one label");
@@ -596,6 +659,7 @@ static void resolve_words(Parser *p)
 static void read_header(Parser *p)
 {
     M4ASong *song = p->song;
+    p->line = 0; /* header problems are not tied to a source line */
     if (!p->globalName) { fail(p, "no .global song label"); return; }
     Symbol *h = find_symbol(p, p->globalName);
     if (!h || !h->isLabel) { fail(p, "song label '%s' is not defined", p->globalName); return; }
@@ -618,7 +682,13 @@ static void read_header(Parser *p)
         return;
     }
     for (int i = 0; i < song->trackCount; i++) {
-        uint32_t off = read_u32(d + 8 + 4 * i);
+        uint32_t wordOff = song->headerOffset + 8 + 4 * i;
+        uint32_t off = read_u32(song->data + wordOff);
+        bool isLabel = false;
+        for (int r = 0; r < song->relocCount; r++)
+            if (song->relocs[r].offset == wordOff && song->relocs[r].target != M4A_SONG_RELOC_VOICEGROUP)
+                isLabel = true;
+        if (!isLabel) { fail(p, "track %d pointer is not a label", i + 1); return; }
         if (off >= song->size) { fail(p, "track %d points outside the song", i + 1); return; }
         song->trackOffsets[i] = off;
     }
@@ -656,11 +726,14 @@ M4ASong *m4a_song_parse(const char *text, size_t len, char *err, size_t errLen)
     char *buf = dupn(text, len);
     if (!buf) {
         fail(&p, "out of memory");
+    } else if (memchr(buf, 0, len)) {
+        p.line = 0;
+        fail(&p, "file contains a NUL byte; not a text song file");
     } else {
         char *cur = buf;
         p.line = 0;
-        while (*cur && !p.failed) {
-            char *nl = strchr(cur, '\n');
+        while (cur < buf + len && !p.failed) {
+            char *nl = memchr(cur, '\n', (size_t)(buf + len - cur));
             if (nl) *nl = 0;
             p.line++;
             parse_line(&p, cur);
