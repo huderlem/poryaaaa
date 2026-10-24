@@ -643,7 +643,17 @@ static bool note_on_restart_lfo_delay(M4AEngine *engine, M4ATrack *track, int tr
     track->lfoDelayC = track->lfoDelay;
     if (track->lfoDelay == 0)
         return false;
-    clear_mod_m(engine, track, trackIndex);
+    if (engine->externalSequencer) {
+        /* clear_modM only flags the track; ply_note then drops the flags
+         * (flags &= 0xF0), so older channels keep their LFO-offset pitch and
+         * any pending VOL/PAN/BEND until the next change.  Only the new
+         * note's keyM/pitM see the recentred LFO. */
+        track->modM = 0;
+        track->lfoSpeedC = 0;
+        m4a_track_vol_pit_set(track);
+    } else {
+        clear_mod_m(engine, track, trackIndex);
+    }
     return true;
 }
 
@@ -653,16 +663,20 @@ static void note_on_keys(const M4AEngine *engine, const M4ATrack *track, uint8_t
                          int32_t pcmBaseAdjust, int32_t *finalKey, int32_t *pcmKey,
                          int32_t *pcmFinalKey)
 {
+    /* ply_note clamps key + keyM at 0 only; MidiKeyToFreq saturates at 178
+     * and MidiKeyToCgbFreq at 166, the same way the per-frame pitch pass
+     * (refresh_channel_pitches) computes it, so a note does not jump at its
+     * first pitch update. */
+    (void)engine;
     int32_t fk = (int32_t)useKey + track->keyM;
     if (fk < 0) fk = 0;
-    if (fk > 127) fk = 127;
+    if (fk > 178) fk = 178;
     int32_t pk = (int32_t)useKey + pcmBaseAdjust;
     if (pk < 0) pk = 0;
     if (pk > 255) pk = 255;
     int32_t pfk = pk + track->keyM;
-    int32_t pcmFinalKeyMax = engine->respectBaseMidiKey ? 178 : 127;
     if (pfk < 0) pfk = 0;
-    if (pfk > pcmFinalKeyMax) pfk = pcmFinalKeyMax;
+    if (pfk > 178) pfk = 178;
     *finalKey = fk;
     *pcmKey = pk;
     *pcmFinalKey = pfk;
@@ -993,7 +1007,10 @@ static void refresh_channel_pitches(M4AEngine *engine, M4ATrack *track, int trac
 {
     for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
         M4APCMChannel *ch = &engine->pcmChannels[i];
-        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex && ch->wav) {
+        /* Fixed-rate (no-resample) voices advance one sample per mix sample
+         * on the GBA regardless of the frequency MPlayMain writes. */
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex && ch->wav
+            && !(ch->type & VOICE_TYPE_FIX)) {
             int32_t finalKey = (int32_t)ch->key + track->keyM;
             if (finalKey < 0) finalKey = 0;
             uint32_t freq = m4a_midi_key_to_freq(ch->wav, (uint8_t)finalKey, track->pitM);
@@ -1432,8 +1449,9 @@ static void m4a_lfo_tick(M4AEngine *engine)
                 M4APCMChannel *ch = &engine->pcmChannels[j];
                 if ((ch->status & CHN_ON) && ch->trackIndex == i) {
                     chn_vol_set(ch, track);
-                    /* Recalculate frequency for pitch mod */
-                    if (track->modT == 0 && ch->wav) {
+                    /* Recalculate frequency for pitch mod (fixed-rate voices
+                     * are immune, as in refresh_channel_pitches) */
+                    if (track->modT == 0 && ch->wav && !(ch->type & VOICE_TYPE_FIX)) {
                         int32_t finalKey = (int32_t)ch->key + track->keyM;
                         if (finalKey < 0) finalKey = 0;
                         uint32_t freq = m4a_midi_key_to_freq(ch->wav, (uint8_t)finalKey, track->pitM);

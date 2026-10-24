@@ -40,6 +40,11 @@ extern "C" {
 #define MUSICPLAYER_STATUS_TRACK 0x0000ffff
 #define MUSICPLAYER_STATUS_PAUSE 0x80000000
 
+/* Emerald's BGM player has 10 tracks (NUM_TRACKS_BGM in
+ * sound/music_player_table.inc); a mid2agb song with more tracks plays only
+ * the first 10 in the game and in the accuracy ROM. */
+#define M4A_SEQ_DEFAULT_MAX_TRACKS 10
+
 typedef struct {
     uint8_t flags;
     uint8_t wait;
@@ -62,7 +67,9 @@ typedef struct {
     uint32_t status;        /* MUSICPLAYER_STATUS_*: PAUSE when stopped/finished */
     uint32_t clock;         /* song ticks since start */
     uint8_t priority;       /* song header priority */
-    uint8_t trackCount;
+    uint8_t trackCount;     /* min(song tracks, maxTracks) */
+    uint8_t maxTracks;      /* the player's track count (MusicPlayerInfo.trackCount);
+                             * tracks beyond it are not played.  Set before start. */
     uint16_t tempoD;
     uint16_t tempoU;
     uint16_t tempoI;

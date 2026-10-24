@@ -553,6 +553,12 @@ static void track_tick(M4ASequencer *s, int i)
         uint8_t c = rd8(s, t->cmdPtr);
         if (c < 0x80) {
             c = t->runningStatus;
+            if (c < 0x80) {
+                /* A data byte before any command: the GBA indexes
+                 * gClockTable out of bounds and hangs on the same byte. */
+                ply_fine(s, i);
+                return;
+            }
         } else {
             t->cmdPtr++;
             if (c >= 0xBD)
@@ -624,6 +630,7 @@ void m4a_sequencer_init(M4ASequencer *s, M4AEngine *engine)
     s->engine = engine;
     s->status = MUSICPLAYER_STATUS_PAUSE;
     s->loopTrack = -1;
+    s->maxTracks = M4A_SEQ_DEFAULT_MAX_TRACKS;
     engine->frameHook = frame_hook;
     engine->frameHookUser = s;
     engine->externalSequencer = true;
@@ -651,7 +658,7 @@ void m4a_sequencer_start(M4ASequencer *s, const M4ASong *song)
     s->tempoI = 150;
     s->tempoU = 0x100;
     s->tempoC = 0;
-    s->trackCount = song->trackCount > M4A_SONG_MAX_TRACKS ? M4A_SONG_MAX_TRACKS : song->trackCount;
+    s->trackCount = song->trackCount > s->maxTracks ? s->maxTracks : song->trackCount;
     s->loopPasses = 0;
     s->loopTrack = -1;
     s->noteCount = 0;

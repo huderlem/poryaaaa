@@ -2783,6 +2783,137 @@ static void test_sequencer_lfo_and_engine_tick(void)
     m4a_song_free(song);
 }
 
+
+/* A looped sample so PCM voices can be used in sequencer tests. */
+static WaveData *seq_test_wave(void)
+{
+    int n = 64;
+    WaveData *wd = calloc(1, sizeof(WaveData) + n + 1);
+    wd->type = 0;
+    wd->status = 0x4000; /* loop */
+    wd->freq = 0x01000000;
+    wd->loopStart = 0;
+    wd->size = n;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    for (int i = 0; i < n; i++)
+        wd->data[i] = (int8_t)(100.0 * sin(2.0 * 3.14159265 * i / n));
+    return wd;
+}
+
+static void test_sequencer_lfo_delay_note_on(void)
+{
+    printf("Testing sequencer: LFODL note start does not touch older notes...\n");
+
+    /* ply_note with lfoDelay != 0: clear_modM flags the track, TrkVolPitSet
+     * recomputes keyM/pitM for the NEW note, then flags &= 0xF0.  Older
+     * channels keep their LFO-offset pitch and a VOL pending on the same tick
+     * is not applied to them until the next change. */
+    WaveData *wd = seq_test_wave();
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+    M4ASong *song = seq_song(
+        "\t.byte\tTEMPO , 75\n"
+        "\t.byte\t\tVOICE , 0\n"
+        "\t.byte\t\tVOL   , 100\n"
+        "\t.byte\t\tLFOS  , 40\n"
+        "\t.byte\t\tLFODL , 8\n"
+        "\t.byte\t\tMOD   , 20\n"
+        "\t.byte\t\tTIE   , Cn3 , v127\n"
+        "\t.byte\tW48\n"
+        "\t.byte\t\tVOL   , 40\n"
+        "\t.byte\t\tTIE   , Gn3 , v127\n"
+        "\t.byte\tW48\n"
+        "\t.byte\t\tPAN   , c_v+0\n"      /* a later change applies everything */
+        "\t.byte\tW12\n"
+        "\t.byte\t\tEOT   , Cn3\n"
+        "\t.byte\t\tEOT   , Gn3\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "lfodl song parses");
+    if (!song) { free(wd); return; }
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+
+    M4APCMChannel *first = NULL;
+    for (int i = 0; i < 48; i++)
+        m4a_sequencer_frame(&seq);
+    for (int i = 0; i < MAX_PCM_CHANNELS; i++)
+        if ((engine.pcmChannels[i].status & CHN_ON) && engine.pcmChannels[i].midiKey == 60)
+            first = &engine.pcmChannels[i];
+    ASSERT(first != NULL, "first note sounding");
+    if (!first) goto done;
+    ASSERT(engine.tracks[0].modM != 0, "LFO is offsetting the pitch after 48 ticks");
+    uint32_t freqBefore = first->frequency;
+    uint8_t volBefore = first->leftVolume;
+
+    m4a_sequencer_frame(&seq);  /* tick 49: VOL 40 + TIE Gn3 (LFO restart) */
+    ASSERT_EQ(engine.tracks[0].modM, 0, "LFO output recentred for the new note");
+    /* Reloaded to 8 at note start, then the same tick's LFO step (after the
+     * W48 is consumed) counts it down once, as on the GBA. */
+    ASSERT_EQ(engine.tracks[0].lfoDelayC, 7, "LFO delay reloaded and stepped once");
+    ASSERT_EQ(first->frequency, freqBefore, "older note keeps its LFO-offset pitch");
+    ASSERT_EQ(first->leftVolume, volBefore, "older note keeps the old volume (flags dropped by ply_note)");
+    M4APCMChannel *second = NULL;
+    for (int i = 0; i < MAX_PCM_CHANNELS; i++)
+        if ((engine.pcmChannels[i].status & CHN_ON) && engine.pcmChannels[i].midiKey == 67)
+            second = &engine.pcmChannels[i];
+    ASSERT(second != NULL, "second note sounding");
+    if (second)
+        ASSERT(second->leftVolume < volBefore, "new note keyed at VOL 40");
+
+    for (int i = 0; i < 48; i++)
+        m4a_sequencer_frame(&seq);  /* PAN on tick 97 flags VOLCHG: now everything updates */
+    ASSERT(first->leftVolume < volBefore, "older note picks up VOL 40 at the next volume change");
+
+done:
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+    free(wd);
+}
+
+static void test_fixed_rate_voice_ignores_pitch(void)
+{
+    printf("Testing fixed-rate (no-resample) voices ignore pitch changes...\n");
+
+    WaveData *wd = seq_test_wave();
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND_NO_RESAMPLE;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 7, 127);
+    int h = m4a_engine_note_on(&engine, 0, 60, 127);
+    ASSERT(h >= 0 && h < TOTAL_PCM_CHANNELS, "fixed-rate note started on a PCM channel");
+    if (h < 0) { m4a_engine_destroy(&engine); free(wd); return; }
+    uint32_t f0 = engine.pcmChannels[h].frequency;
+    m4a_engine_pitch_bend(&engine, 0, 4000);
+    ASSERT_EQ(engine.pcmChannels[h].frequency, f0, "pitch bend leaves a fixed-rate voice alone");
+    m4a_engine_cc(&engine, 0, 0x15, 40);
+    m4a_engine_cc(&engine, 0, 0x1, 64);
+    for (int i = 0; i < 20; i++)
+        m4a_engine_tick(&engine);
+    ASSERT_EQ(engine.pcmChannels[h].frequency, f0, "vibrato leaves a fixed-rate voice alone");
+    m4a_engine_destroy(&engine);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -2818,6 +2949,8 @@ int main(void)
     test_sequencer_deferred_volume();
     test_sequencer_flow();
     test_sequencer_lfo_and_engine_tick();
+    test_sequencer_lfo_delay_note_on();
+    test_fixed_rate_voice_ignores_pitch();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
