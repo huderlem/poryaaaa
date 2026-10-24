@@ -249,6 +249,17 @@ Findings for the next milestones:
    LFO-delay restart working there too (lfo_trem -7.5, lfo_pan -7.4, tune
    -2.3, lfo_delay -2.9 dB, from +0.7, +0.8, +0.5, -0.7).
 
+Code review (three independent reads: sequencer vs m4a_1.s/m4a.c, the
+engine diff on the MIDI path, parser robustness) found and fixed, commits
+a80b920..: the LFODL note-start leaking pending changes to older notes,
+fixed-rate voices following bends, the key-127 clamp (now saturating at
+178/166 like the GBA), the sequencer playing 16 tracks where the BGM player
+has 10, a legato-inherit MO_VOL re-arm, and 13 parser hardening items. The
+MIDI path was A/B-verified byte-identical to the parent commit. Known,
+documented gaps: hand-written-only XCMDs (xwave, xcmd_0D sample start
+offset) are consumed but not applied; memacc indices are masked to the
+16-byte area where the GBA reads out of bounds.
+
 ### Next: engine milestone 2, the output stage
 
 The plan section above stands.  The sequencer's frame hook is where the
