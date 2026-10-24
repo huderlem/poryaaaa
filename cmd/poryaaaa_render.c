@@ -777,13 +777,15 @@ typedef struct {
     int loopCount;
 } SongRenderOpts;
 
-static int grow_buffers(float **l, float **r, uint64_t *cap, uint64_t need)
+static int grow_buffers(float **l, float **r, uint64_t *cap, uint64_t need, uint64_t limit)
 {
     if (need <= *cap)
         return 0;
     uint64_t cap2 = *cap ? *cap : (1u << 20);
     while (cap2 < need)
         cap2 *= 2;
+    if (cap2 > limit)
+        cap2 = limit; /* never allocate past the render limit */
     float *nl = realloc(*l, cap2 * sizeof(float));
     float *nr = realloc(*r, cap2 * sizeof(float));
     if (!nl || !nr) {
@@ -850,7 +852,7 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
     float *l = NULL, *r = NULL;
     bool fixed = o->totalDurSeconds >= 0.0;
     uint64_t limit = fixed ? (uint64_t)(o->totalDurSeconds * rate + 0.5)
-                           : (uint64_t)(30.0 * 60.0 * rate); /* safety cap */
+                           : (uint64_t)(10.0 * 60.0 * rate); /* safety cap (~230 MB at 48 kHz) */
     if (fixed) {
         fadeStart = limit > fadeSamps ? limit - fadeSamps : 0;
         printf("  Total render: %.2f s (fadeout starts %.3f s)\n",
@@ -865,7 +867,7 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
         uint64_t n = block;
         if (total + n > limit) n = limit - total;
         if (total + n > endAt) n = endAt - total;
-        if (grow_buffers(&l, &r, &cap, total + n) != 0) {
+        if (grow_buffers(&l, &r, &cap, total + n, limit) != 0) {
             fprintf(stderr, "Out of memory allocating audio buffers\n");
             m4a_sequencer_detach(&seq);
             m4a_engine_destroy(&engine);

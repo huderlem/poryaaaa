@@ -834,10 +834,15 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
         if (voiceType == 4)
             ch->frequency |= ((uintptr_t)voice->wavePointer & 0x01) << 3;
 
-        if (portamentoInherit)
+        if (portamentoInherit) {
             ch->status = CHN_ENV_SUSTAIN;
-        else
+            /* A legato continuation must not re-arm the hardware envelope
+             * and sweep (MO_VOL on the next tick); the volume refresh that
+             * an LFO-delay restart may have run above would otherwise do so. */
+            ch->modify = 0;
+        } else {
             m4a_cgb_channel_start(ch);
+        }
 
         /* A dropped note never sounded on the GBA, so it must not become the
          * start key of a later portamento glide. */

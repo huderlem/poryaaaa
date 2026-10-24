@@ -2914,6 +2914,82 @@ static void test_fixed_rate_voice_ignores_pitch(void)
     free(wd);
 }
 
+
+static void test_midi_path_modt_tune_lfodl(void)
+{
+    printf("Testing MIDI-path MODT / TUNE / LFODL controls...\n");
+
+    WaveData *wd = seq_test_wave();
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 7, 127);
+
+    /* TUNE is c_v-centred: 64 -> 0, 127 -> +63, 0 -> -64 (one semitone down). */
+    m4a_engine_cc(&engine, 0, 0x18, 127);
+    ASSERT_EQ(engine.tracks[0].tune, 63, "TUNE 127 -> +63");
+    m4a_engine_cc(&engine, 0, 0x18, 0);
+    ASSERT_EQ(engine.tracks[0].tune, -64, "TUNE 0 -> -64");
+    ASSERT_EQ(engine.tracks[0].keyM, -1, "TUNE -64 is one semitone down in keyM");
+    ASSERT_EQ(engine.tracks[0].pitM, 0, "TUNE -64 leaves no fine remainder");
+    m4a_engine_cc(&engine, 0, 0x18, 64);
+    ASSERT_EQ(engine.tracks[0].keyM, 0, "TUNE centre");
+
+    /* MODT moves the LFO output between pitch and volume. */
+    m4a_engine_cc(&engine, 0, 0x15, 1);   /* LFOS */
+    m4a_engine_cc(&engine, 0, 0x1, 64);   /* MOD */
+    int h = m4a_engine_note_on(&engine, 0, 60, 127);
+    ASSERT(h >= 0, "note started");
+    if (h < 0) { m4a_engine_destroy(&engine); free(wd); return; }
+    M4APCMChannel *ch = &engine.pcmChannels[h];
+    uint32_t f0 = ch->frequency;
+    uint8_t v0 = ch->leftVolume;
+    for (int i = 0; i < 20; i++)
+        m4a_engine_tick(&engine);
+    ASSERT(ch->frequency != f0, "MODT 0: vibrato moves the pitch");
+    ASSERT_EQ(ch->leftVolume, v0, "MODT 0: vibrato leaves the volume alone");
+    m4a_engine_cc(&engine, 0, 0x16, 1);   /* MODT tremolo */
+    ASSERT_EQ(ch->frequency, f0, "MODT change recomputes pitch without the LFO offset");
+    for (int i = 0; i < 20; i++)
+        m4a_engine_tick(&engine);
+    ASSERT_EQ(ch->frequency, f0, "MODT 1: pitch untouched");
+    ASSERT(ch->leftVolume != v0, "MODT 1: tremolo moves the volume");
+    m4a_engine_cc(&engine, 0, 0x16, 0);
+    m4a_engine_note_off(&engine, 0, 60);
+    for (int i = 0; i < 60; i++)
+        m4a_engine_tick(&engine);
+
+    /* LFODL: a note start reloads the delay and recentres the LFO; the LFO
+     * holds for lfoDelay ticks before stepping again. */
+    m4a_engine_cc(&engine, 0, 0x1A, 10);
+    ASSERT_EQ(engine.tracks[0].lfoDelay, 10, "LFODL stored");
+    engine.tracks[0].modM = 17;     /* pretend the LFO is mid-swing */
+    engine.tracks[0].lfoSpeedC = 99;
+    h = m4a_engine_note_on(&engine, 0, 62, 127);
+    ASSERT(h >= 0, "second note started");
+    ASSERT_EQ(engine.tracks[0].modM, 0, "note start with LFODL recentres the LFO");
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 0, "note start with LFODL resets the LFO phase");
+    ASSERT_EQ(engine.tracks[0].lfoDelayC, 10, "delay counter reloaded");
+    for (int i = 0; i < 10; i++)
+        m4a_engine_tick(&engine);
+    ASSERT_EQ(engine.tracks[0].lfoDelayC, 0, "delay counted down");
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 0, "LFO held during the delay");
+    m4a_engine_tick(&engine);
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 1, "LFO steps after the delay");
+
+    m4a_engine_destroy(&engine);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -2951,6 +3027,7 @@ int main(void)
     test_sequencer_lfo_and_engine_tick();
     test_sequencer_lfo_delay_note_on();
     test_fixed_rate_voice_ignores_pitch();
+    test_midi_path_modt_tune_lfodl();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
