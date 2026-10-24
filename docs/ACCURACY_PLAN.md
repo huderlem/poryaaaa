@@ -650,6 +650,52 @@ Not a timing item but found on the way: `voicegroup_loader.c` had made
 this time.  The MIDI path (`--input midi`) still renders (lag 35-50 ms
 against the ROM as before; it is not expected to null).
 
+### Next: engine milestone 3, the mixer (handoff, 2026-10-24)
+
+Start from commit e37d52f (branch `accuracy-harness`).  Before any change
+the harness must reproduce `baselines/2026-10-24_timing-model.json`
+(27/38; `compare_reports.py`: 0 regressions, 0 improvements) and
+`build/poryaaaa_unit_tests` 973/973, `poryaaaa_blip_tests`,
+`poryaaaa_song_tests build/accuracy/rom` must pass.
+
+Scope, as defined under "Engine milestones" item 3: verbatim C translation
+of SoundMainRAM (`~/pokeemerald/src/m4a_1.s` lines 88-600: the reverb
+pass over the previous DMA buffer, the 224-sample frame, the 8-bit
+wrapping `add r6, r1, r6, ror 8` sum into packed 4-sample words, the
+fixed-frequency (`TONEDATA_TYPE_FIX`) and interpolating (`fw` / `divFreq`)
+loops, `SoundMainRAM_Unk1/Unk2` for CMP/REV samples), the game's reverb
+(`SoundMainRAM_Reverb`: `(a + b + c + d) * reverb >> 9`, rounded toward
+zero on the sign bit), with `voicegroup_loader.c` emitting exact GBA
+struct layouts (`ToneData` 12 bytes, `WaveData` header 16 bytes + data)
+with host pointers.  The PCM rate option becomes the sound-mode frequency
+enum (`gPcmSamplesPerVBlankTable`, `m4a_tables.c:102`, twelve rates,
+default `SOUND_MODE_FREQ_13379`); "mix at host rate" (pcmMixRate 0) is
+removed from the engine, CLI (`--pcm-mix-rate`), GUI combo, config key
+and CLAP state (keep loading old saves).
+
+Targets: pcm_reverb -10.4, pcm_chord -28.6, vel worst second -38.7, and
+pcm_psg -29.8 (loud PCM + PSG: likely the 8-bit sum).  Nothing in the
+timing-model baseline may regress; songs should gain on their PCM side.
+
+Constraints to carry: the plugin's MIDI path keeps rendering (`--input
+midi`); the opt-in flags keep behaving as documented in the plan and the
+memory file (respectBaseMidiKey, portamento, pwm, Golden Sun synths,
+pcmOverflowMode).  Where the verbatim port makes one meaningless (the
+8-bit wrap is now stock behaviour, so `pcmOverflowMode` "wrap" is the
+default path and "off"/"clip" become the deviations), say so here rather
+than dropping it silently.  Unit tests against hand-computed SoundMainRAM
+arithmetic (one channel, one frame; the ror-8 packing; the reverb
+rounding; a wrap case).  One commit per sub-step, harness after each.
+
+Known from this session, relevant to the port: the engine's PCM path
+today is `m4a_channel.c` (`m4a_pcm_channel_start/tick/render`, int32 mix
+with a DPCM block cache and the Golden Sun synth types), `m4a_reverb.c`,
+and `mix_pcm_frame` in `m4a_engine.c` writing int16 into the ring the DMA
+model reads (`M4AFifoWord.s[4]` is int16 so the ring can carry unwrapped
+values; the hardware is 8-bit).  PCM is already bit-exact on single-note
+tests (pcm_adsr, pcm_drum, pcm_bass -inf), so the envelope arithmetic and
+the sample-and-hold are right; the port must not move them.
+
 ### Reference: milestone 1 decisions as agreed
 
 Goal restated: `poryaaaa_render` and the harness play the **compiled** song
