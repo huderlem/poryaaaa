@@ -26,6 +26,14 @@
  *   CgbSound; the m4aSoundVSync entry relative to line 150; and every PSG
  *   register write (address low byte = value @ cycle), in order.
  *
+ * With an `nm` listing of the ROM's ELF as the symbol file (seventh
+ * argument; `arm-none-eabi-nm build/accuracy_test.elf`, which also holds the
+ * local labels the map lacks), breakpoints are set inside MPlayMain's track
+ * loop, ply_note's channel search and the VOLCHG/PITCHG pass (the `_081DD*`
+ * labels of m4a_1.s) and each one logs r3-r5 and r7, so a per-track, per-note
+ * and per-channel cost can be read from the raw log (tools/probe_mplay.py).
+ * The map still works and gives the function entries only.
+ *
  * `<out>.events` summarizes mgba's own scheduler lateness: for the timer-0
  * overflow, the audio sample event and the PSG frame-sequencer event, the
  * histogram of cyclesLate and the number of times a 65536 Hz DAC slot
@@ -44,6 +52,7 @@
 #include <mgba/internal/gba/audio.h>
 #include <mgba/internal/gba/timer.h>
 #include <mgba/internal/gba/video.h>
+#include <mgba/internal/arm/arm.h>
 #include <mgba-util/vfs.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,7 +81,7 @@ static struct mCore* gCore;
 static FILE* gOut;
 static long gFrames;
 struct Sym { uint32_t addr; const char* name; };
-static struct Sym gSyms[128]; static int gNumSyms;
+static struct Sym gSyms[256]; static int gNumSyms;
 
 #define MAX_FRAMES 4096
 #define MAX_WRITES 96
@@ -83,7 +92,7 @@ struct FrameRec {
 	int c15Before, c15After, cgbSoundCalls;
 	int numWrites;
 	struct { uint8_t reg; uint8_t value; int32_t cycle; } writes[MAX_WRITES];
-	int plyCount[64];
+	int plyCount[256];
 };
 static struct FrameRec* gFrameRecs;
 
@@ -278,7 +287,32 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 		else if (!strcmp(name, "SoundMain")) { if (fr) fr->soundMain = rel; }
 		else if (!strcmp(name, "m4aSoundVSync")) { if (fr) fr->vsync = rel + LINE160 - LINE150; }
 		else if (!strncmp(name, "ply_", 4)) {
-			if (fr) { fr->plyAll++; if (si >= 0 && si < 64) fr->plyCount[si]++; if (!strcmp(name, "ply_note")) fr->plyNote++; }
+			if (fr) { fr->plyAll++; if (si >= 0 && si < 256) fr->plyCount[si]++; if (!strcmp(name, "ply_note")) fr->plyNote++; }
+		}
+		if (!strncmp(name, "ply_", 4) && strcmp(name, "ply_note")) {
+			/* (mplayInfo, track): the track's pending flags decide the handler's path */
+			struct ARMCore* cpu = gGba->cpu;
+			fprintf(gOut, " flg=%02X", rd8(cpu->gprs[1]));
+		} else if (!strcmp(name, "ply_note")) {
+			/* (cmd, mplayInfo, track): flags, voice type and the lfoDelay that picks the clear_modM path */
+			struct ARMCore* cpu = gGba->cpu;
+			fprintf(gOut, " flg=%02X vt=%02X lfodl=%02X", rd8(cpu->gprs[2]), rd8(cpu->gprs[2] + 0x24), rd8(cpu->gprs[2] + 0x1B));
+		}
+		if (name[0] == '_' || !strncmp(name, "TrackStop_", 10) || !strcmp(name, "ply_note") || !strcmp(name, "TrackStop") || !strcmp(name, "ClearChain") || !strcmp(name, "RealClearChain") || !strcmp(name, "TrkVolPitSet")) {
+			/* r5 = track (MPlayMain, ply_note), r4 = channel, r7 = player
+			 * (MPlayMain) / chosen track (ply_note scan), r3 = loop count */
+			struct ARMCore* cpu = gGba->cpu;
+			fprintf(gOut, " r0=%08X r3=%08X r4=%08X r5=%08X r7=%08X", cpu->gprs[0], cpu->gprs[3], cpu->gprs[4], cpu->gprs[5], cpu->gprs[7]);
+			if (!strcmp(name, "RealClearChain"))   /* r0 = channel: its track / prev / next decide the unlink path */
+				fprintf(gOut, " trk=%08X prev=%08X next=%08X", rd32(cpu->gprs[0] + 0x2C), rd32(cpu->gprs[0] + 0x30), rd32(cpu->gprs[0] + 0x34));
+			else if (!strcmp(name, "_081DD938"))   /* r5 = track: wait and the LFO fields the tick tests */
+				fprintf(gOut, " wait=%02X lfos=%02X mod=%02X lfodlc=%02X", rd8(cpu->gprs[5] + 1), rd8(cpu->gprs[5] + 0x19), rd8(cpu->gprs[5] + 0x17), rd8(cpu->gprs[5] + 0x1C));
+			else if (!strcmp(name, "_081DDBC4"))   /* r4 = cgbChans, r6 = type: the target channel's status and priority */
+				fprintf(gOut, " cgb%d st=%02X prio=%02X", cpu->gprs[6], rd8(cpu->gprs[4] + (cpu->gprs[6] - 1) * 0x40), rd8(cpu->gprs[4] + (cpu->gprs[6] - 1) * 0x40 + 0x13));
+			else if (!strcmp(name, "_081DDC40"))   /* r5 = track: whether its chain is empty (the beq at _081DDC4C) */
+				fprintf(gOut, " chan=%08X", rd32(cpu->gprs[5] + 0x20));
+			else if (!strcmp(name, "TrkVolPitSet"))   /* r1 = track: the fields its C code branches on */
+				fprintf(gOut, " flg=%02X vol=%02X volX=%02X pan=%02X panX=%02X modT=%02X modM=%02X", rd8(cpu->gprs[1]), rd8(cpu->gprs[1] + 0x12), rd8(cpu->gprs[1] + 0x13), rd8(cpu->gprs[1] + 0x14), rd8(cpu->gprs[1] + 0x15), rd8(cpu->gprs[1] + 0x18), rd8(cpu->gprs[1] + 0x16));
 		}
 		fputc('\n', gOut);
 	}
@@ -326,15 +360,21 @@ int main(int argc, char** argv) {
 	gFrameRecs = calloc(MAX_FRAMES, sizeof *gFrameRecs);
 	if (argc > 6) {
 		FILE* m = fopen(argv[6], "r"); char line[512];
-		const char* want[] = { "VBlankIntr", "VCountIntr", "IntrMain", "m4aSoundMain", "m4aSoundVSync", "SoundMain", "MPlayMain", "CgbSound", "MPlayStart", "SampleFreqSet", "m4aSoundInit", "AgbMain", "SoundMainRAM_Buffer", "SoundMainBTM", "StartTest", "TrackStop", "CgbModVol", "CgbOscOff", "MidiKeyToCgbFreq", "ChnVolSetAsm", "ClearChain", NULL };
+		const char* want[] = { "VBlankIntr", "VCountIntr", "IntrMain", "m4aSoundMain", "m4aSoundVSync", "SoundMain", "MPlayMain", "CgbSound", "MPlayStart", "SampleFreqSet", "m4aSoundInit", "AgbMain", "SoundMainRAM_Buffer", "SoundMainBTM", "StartTest", "TrackStop", "CgbModVol", "CgbOscOff", "MidiKeyToCgbFreq", "ChnVolSetAsm", "ClearChain",
+		                       /* internal labels (nm listing only): MPlayMain's tick and apply loops, ply_note's search, TrackStop's loop */
+		                       "RealClearChain", "TrkVolPitSet", "Clear64byte", "clear_modM", "MidiKeyToFreq", "FadeOutBody",
+		                       "_081DD874", "_081DD87C", "_081DD886", "_081DD892", "_081DD8AE", "_081DD8B4", "_081DD8BA", "_081DD8E0", "_081DD8EC", "_081DD8F6", "_081DD90C", "_081DD92E", "_081DD938", "_081DD95A", "_081DD972", "_081DD994", "_081DD998", "_081DD9A4", "_081DD9BC",
+		                       "_081DD9C4", "_081DD9C8", "_081DD9E6", "_081DD9F6", "_081DDA14", "_081DDA28", "_081DDA46", "_081DDA52", "_081DDA58", "_081DDA62", "_081DDA6C",
+		                       "_081DDB46", "_081DDB66", "_081DDB68", "_081DDB80", "_081DDB94", "_081DDB98", "_081DDB9C", "_081DDBC4", "_081DDBEC", "_081DDBFA", "_081DDC14", "_081DDC18", "_081DDC24", "_081DDC32", "_081DDC34", "_081DDC40", "_081DDC54", "_081DDC66", "_081DDCA0", "_081DDCBC", "_081DDCCE", "_081DDCDC", "_081DDCEA",
+		                       "TrackStop_Loop", "TrackStop_1", "TrackStop_2", "TrackStop_3", "TrackStop_Done", NULL };
 		while (m && fgets(line, sizeof line, m)) {
-			unsigned long a; char name[128];
-			if (sscanf(line, " 0x%lx %127s", &a, name) == 2) {
+			unsigned long a; char name[128]; char kind;
+			if (sscanf(line, " 0x%lx %127s", &a, name) == 2 || sscanf(line, "%lx %c %127s", &a, &kind, name) == 3) {
 				int take = !strncmp(name, "ply_", 4);
 				for (int i = 0; !take && want[i]; ++i) if (!strcmp(name, want[i])) take = 1;
 				if (!strcmp(name, "gSoundInfo")) ADDR_gSoundInfo = (uint32_t) a;
 				if (!strcmp(name, "gMPlayInfo_BGM")) ADDR_gMPlayInfo_BGM = (uint32_t) a;
-				if (take && gNumSyms < 128) {
+				if (take && gNumSyms < 256) {
 					int dup = 0;
 					for (int i = 0; i < gNumSyms; ++i) if (!strcmp(gSyms[i].name, name)) dup = 1;
 					if (!dup) { gSyms[gNumSyms].addr = a; gSyms[gNumSyms].name = strdup(name); gNumSyms++; }
@@ -406,10 +446,10 @@ int main(int argc, char** argv) {
 		fputc('\n', ff);
 		/* per-handler counts, when any */
 		int any = 0;
-		for (int i = 0; i < gNumSyms && i < 64; ++i) if (r->plyCount[i]) any = 1;
+		for (int i = 0; i < gNumSyms && i < 256; ++i) if (r->plyCount[i]) any = 1;
 		if (any) {
 			fprintf(ff, "           ply:");
-			for (int i = 0; i < gNumSyms && i < 64; ++i) if (r->plyCount[i]) fprintf(ff, " %s=%d", gSyms[i].name, r->plyCount[i]);
+			for (int i = 0; i < gNumSyms && i < 256; ++i) if (r->plyCount[i]) fprintf(ff, " %s=%d", gSyms[i].name, r->plyCount[i]);
 			fputc('\n', ff);
 		}
 	}

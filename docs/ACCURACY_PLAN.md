@@ -569,6 +569,152 @@ the raw logs.  All cycles below are relative to the start of VBlank line
   256 cycles wide, puts this floor around -50 dB on songs and nowhere on
   the micro-tests; not worth modeling before the mixer.
 
+### SoundMain timing probe, step 3: inside MPlayMain (2026-10-24)
+
+`mgba_probe` now takes the ELF's `nm` listing as its symbol file
+(`arm-none-eabi-nm test/accuracy/rom/build/accuracy_test.elf >
+build/probe/syms.nm`; the map still works for the function entries) and
+sets breakpoints on the `_081DD*` local labels of m4a_1.s inside
+MPlayMain's tick loop, its VOLCHG/PITCHG pass, ply_note and TrackStop,
+logging r0/r3/r4/r5/r7 and, where a branch depends on memory, the deciding
+bytes (track flags, wait/LFO fields, the CGB channel's status, the
+channel's track/prev/next pointers, the track's chain pointer).  The
+breakpoints do not change the emulation: the `.frames` files of groudon
+and littleroot are identical to the earlier runs' column for column.
+`tools/probe_mplay.py <logs...> [frame...]` prints the breakpoint
+sequence of the BGM player's MPlayMain for the frames named and, over all
+frames and logs, the delta between consecutive breakpoints keyed on the
+deciding state.  Runs: the seven corpus songs for 300 frames each (5 s)
+and sq1, sq1_env, noise, pcm_drum, pcm_chord, vel, bend, lfo_vib,
+lfo_trem, lfo_pan, lfo_delay, lfo_psg, psg_mix, pcm_psg for 70 (about
+25,000 breakpoint deltas).  Every number below is a measured delta with a
+single value unless marked *est.* (a path the corpus never took; the
+estimate is the measured neighbouring path plus or minus the instruction
+difference, with the rule, seen throughout the data, that a taken Thumb
+branch in ROM costs about 4 more than a not-taken one).  Sporadic +18
+(ply_vol, keysh, xiecv, MidiKeyToCgbFreq once each) are the FIFO DMA
+stalling the CPU, not code paths; the model ignores them.
+
+**Frame skeleton.**  MPlayMain calls the next player in the chain before
+its own body, so the BGM player (last of six) does its work first: its
+entry is at +566 (first MPlayMain +291, five idle entries 55 apart), then
+FadeOutBody at +96, `_081DD9BC` (tempoC test) +54 later.  Paused player:
+entry to `_081DDA6C` 71.  Exit: `_081DDA6C` five more times 63 apart (the
+idle players unwinding), CgbSound 55 after the last.  So 1007 paused and,
+playing, 566 + 150 + (body) + 370.
+
+**No-tick path** (`_081DD9BC` -> `_081DD9C4` 12 -> `_081DD9C8` 4), then
+the VOLCHG/PITCHG loop over *all* `MusicPlayerInfo.trackCount` tracks
+(10 for the BGM player, not only the song's): a track without
+MPT_FLG_EXIST 14 (`_081DD9C8` -> `_081DDA62`), with EXIST and no flags 20,
+next track `_081DDA62` -> `_081DD9C8` 16, after the last `_081DDA62` ->
+`_081DDA6C` 10.  (1396 + 6 E of step 1 is 566 + 150 + 16 + 10 x 30 - 6 +
+370 and + 6 per existing track: confirmed as a sum.)
+
+**Tick** (tempoC >= 150): `_081DD9BC` -> `_081DD874` 14 -> `_081DD87C` 8;
+per track of trackCount: no EXIST 16 (`_081DD87C` -> `_081DD998`); EXIST
+14 to `_081DD886`, then 12 to the chain walk (`_081DD892`) or 18 straight
+to `_081DD8BA` with an empty chain.  Chain walk per channel: ON with gate
+0: 20; ON, gate decremented to nonzero: 26; ON, gate reaching 0 (SF_STOP
+set): 34; dead (SF_ON clear): 14 to `_081DD8AE`, 12 to ClearChain, 33 to
+RealClearChain, then to `_081DD8B4` 54 (prev 0, next 0), 50 (prev 0, next
+set), 56 (prev set, next 0), *est.* 52 (both set); from `_081DD8B4` 12 to
+the next channel or 6 to `_081DD8BA` at the end.  `_081DD8BA` ->
+`_081DD938` 14 without MPT_FLG_START; with it 20 to Clear64byte, 33 to
+SoundMainBTM, 68 to `_081DD938` (121, replaces the 264 "track start" of
+step 2, which also held the start frame's command dispatches).  At
+`_081DD938` with wait != 0: 28 to `_081DD994` when lfoSpeed != 0 and mod
+== 0 (every track after start; lfoSpeed == 0 *est.* 23), 40 when the LFO
+is delayed (lfoDelayC != 0, decremented), LFO step: 34 to `_081DD95A`, 24
+to `_081DD972` on the falling half (lfoSpeedC - 0x40 negative) or 26 on
+the rising half, then 20 when modM is unchanged, 38 when it changes with
+modT 0 (PITCHG), 36 with modT 1/2 (VOLCHG).  `_081DD994` -> `_081DD998` 4;
+`_081DD998` -> `_081DD87C` 18 (next track) or -> `_081DD9A4` 10 (last);
+`_081DD9A4` -> `_081DD9BC` 22; a second tick in the same frame repeats
+from the 14.
+
+**Command dispatch** (wait == 0): `_081DD938` -> `_081DD8E0` 12; an
+explicit command byte 21 to `_081DD8EC` then 10 to `_081DD8F6` (byte <
+0xBD) or 14 (>= 0xBD, running status stored); running status (data byte
+first) 25 straight to `_081DD8F6`.  Note (>= 0xCF): 34 to ply_note.
+Other commands: 10 to `_081DD90C`, then 40 to the handler (table call),
+or a W## wait: 10 to `_081DD92E` and 26 back to `_081DD938` (89 for an
+explicit wait byte; step 2 charged 0 and had absorbed it elsewhere).
+Handler entry to `_081DD938` (handler, return, the flags test): tempo 91,
+keysh 89, voice 184, vol 89, pan 91, bend 91, bendr 89, lfos 69, lfodl
+81, mod 69 (value != 0) or 51 + clear_modM 58 = 109 (value 0), modt 91
+(unchanged) / 95 (changed), xcmd 61 to the sub-handler + xiecv/xiecl 49,
+goto 110 (2 + 108), patt 30 + goto 140, pend 12 + 22 = 34 (18 + 22 at
+pattern level 0, *est.* from the taken branch).  Not executed by the
+corpus in 5 s (*est.* 90, the median of the measured one-byte handlers):
+tune, rept, memacc, prio, endtie, fine, port, the other xcmd
+sub-commands.  ply_note exit `_081DDCEA` -> `_081DD938` 30.
+
+**ply_note.**  Entry to `_081DDB46`: 78 with no data bytes (running
+key/velocity), 97 with a key byte, 114 with key and velocity, *est.* 129
+with a gate-extension byte too (none in the corpus).  Voice resolution to
+`_081DDB9C`: plain voice 26 (22 + 4); keysplit 92 (45 + 35 + 12: the
+table and sub-voice are read from ROM); drum (rhythm) 111 (30 + 2 + 35 +
+27 + 17).  Then 48 to `_081DDBC4` (CGB) or 40 to `_081DDBEC` (DirectSound;
+47 when the voice came from a keysplit/drum table in ROM, which also adds
+25 to TrkVolPitSet below for the type/wav/attack reads).  CGB channel
+test `_081DDBC4` -> `_081DDC40`: 20 when the channel is free (status 0),
+26 when it has SF_STOP; a sounding channel taken by priority *est.* 32,
+by equal priority and track order *est.* 40; a rejected note *est.* 34
+(priority) / 42 (track order) to `_081DDCEA`.  DirectSound scan:
+`_081DDBEC` -> `_081DDBFA` 14, then per channel: free -> `_081DDC40` 14
+(scan ends); ON+STOP as the first stopping candidate 32 + 2; ON+STOP with
+a stopping candidate already 24 to `_081DDC18`; ON without STOP 20 to
+`_081DDC14`, then 10 to `_081DDC34` when a stopping candidate exists or 4
+to `_081DDC18`; `_081DDC18` -> `_081DDC24` 12 (priority >= best; strictly
+lower priority *est.* 16 straight to `_081DDC32`, never taken); `_081DDC24`
+-> `_081DDC32` 16 (equal priority, later track) / 18 (equal priority,
+same track), -> `_081DDC34` 22 (equal priority, earlier track), higher
+priority *est.* 8; `_081DDC32` -> `_081DDC34` 2; `_081DDC34` -> `_081DDBFA`
+12 (next), -> `_081DDC40` 12 (candidate chosen after the last channel),
+*est.* 14 to `_081DDCEA` with none.  Channel setup: `_081DDC40` ->
+ClearChain 12, 33 to RealClearChain, RealClearChain -> `_081DDC54` by the
+channel's links: track 0 (already dropped from a chain) 44; in a chain
+with prev 0/next 0 68, prev 0/next set 64, prev set/next 0 70, both set
+66; **+4 to each when the new track's chain is empty after the unlink**
+(the taken `beq _081DDC54`; this is the 44/48 and 68/72 split).
+`_081DDC54` -> `_081DDC66` 18 (lfoDelay 0) or 24 + clear_modM 36 = 60;
+`_081DDC66` -> TrkVolPitSet 14; TrkVolPitSet -> ChnVolSetAsm 100 + 82
+with VOLSET (+4 when modT == 1) + 50 with PITSET (-2 when modT != 0) + 25
+for a keysplit/drum voice; ChnVolSetAsm -> `_081DDCA0` 78; CGB: 28 to
+`_081DDCBC` (*est.* +16 for a drum/keysplit CGB voice, length and sweep
+from ROM), 30 to MidiKeyToCgbFreq, 190 to `_081DDCDC` (noise 98);
+DirectSound: 12 to `_081DDCCE`, 20 to MidiKeyToFreq, 235 to `_081DDCDC`;
+`_081DDCDC` -> `_081DDCEA` 14.  A note on a free DirectSound channel 0
+with a plain voice and no flags therefore costs 81 + 114 + 26 + 40 + 14 +
+14 + 12 + 33 + 44 + 18 + 14 + 100 + 78 + 12 + 20 + 235 + 14 + 30 = 899
+from `_081DD938` back to `_081DD938`.
+
+**VOLCHG/PITCHG pass**, a flagged existing track: `_081DD9C8` ->
+TrkVolPitSet 30; TrkVolPitSet -> `_081DD9E6` 62 + 82 with VOLSET (+4 when
+modT == 1) + 50 with PITSET (144 / 112 / 194 measured for flags 83 / 8C /
+8F), or 6 more to `_081DDA58` when the chain is empty (150 / 118 / 200).
+Per chained channel: `_081DD9E6` -> `_081DD9F6` 14 (ON); with VOLCHG 24
+to ChnVolSetAsm and 72 (DirectSound) / 74 (CGB, MO_VOL set) to
+`_081DDA14`, without 20; with PITCHG 24 to `_081DDA28`, then CGB 32 to
+MidiKeyToCgbFreq and 200 to `_081DDA52` (noise *est.* 108), DirectSound
+10 + 16 to MidiKeyToFreq and 237; without PITCHG 14 to `_081DDA52`;
+`_081DDA52` -> `_081DDA58` 6 after the last channel (*est.* 10 back to
+`_081DD9E6` for the next: no flagged track in the corpus had two channels
+sounding); a dead channel in this pass *est.* 14 + 12 + 33 + 54 + 6 (not
+observed: the tick's walk drops it first).  `_081DDA58` -> `_081DDA62`
+10.  Step 2's "376 per channel" was 14 + 24 + 74 + 24 + 32 + 200 + 6 = 374
+for a CGB channel with both flags.
+
+**TrackStop.**  Only MPlayStart calls it in the corpus, before any
+channel sounds, so no write is placed by it; its loop was instrumented
+(TrackStop_Loop/_1/_2/_3) but never ran with a chained channel.  Left as
+the SoundMain-stamped writes of step 2.
+
+**m4aSoundMain's other work**: the CgbSound entry also moves with
+`SoundMainBTM`'s 68 only on a track's start tick, nothing else in the
+frame varies with song state before CgbSound.
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`
