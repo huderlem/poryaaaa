@@ -1403,7 +1403,12 @@ static WaveData *load_wav_from_path(const char *absoluteWavPath)
     }
 
     free(rawData);
-    wd->data[size] = (size > 0) ? wd->data[size - 1] : 0;
+    /* The byte after the data, which the mixer's look-ahead reads at the
+     * last sample.  The sample converter writes one extra sample after the
+     * data: the loop-start sample for a looped sound, 0 otherwise (checked
+     * against the accuracy test ROM: sc88pro_flute / pizzicato / fretless
+     * bass carry data[loopStart], sd90_solo_snare carries 0). */
+    wd->data[size] = (loopEnabled && smplLoopStart < size) ? wd->data[smplLoopStart] : 0;
     return wd;
 }
 
@@ -1611,7 +1616,8 @@ static WaveData *load_aif_from_path(const char *absoluteAifPath)
     }
     fclose(f);
 
-    wd->data[size] = (size > 0) ? wd->data[size - 1] : 0;
+    /* The converter's extra sample after the data: see load_wav_from_path. */
+    wd->data[size] = (loopEnabled && loopStart < size) ? wd->data[loopStart] : 0;
     return wd;
 }
 
@@ -1704,11 +1710,14 @@ static WaveData *load_wave_data(const char *projectRoot, const char *relativePat
     wd->size = size;
     wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
 
-    size_t bytesRead = fread(wd->data, 1, dataSize, f);
-    if (bytesRead < dataSize) {
-        memset(wd->data + bytesRead, 0, dataSize - bytesRead);
+    /* Read the converter's extra sample after the data too (the mixer's
+     * look-ahead at the last sample reads it; the loop-start sample for a
+     * looped sound, 0 otherwise -- see load_wav_from_path).  A short file
+     * leaves it 0. */
+    size_t bytesRead = fread(wd->data, 1, dataSize + 1, f);
+    if (bytesRead < dataSize + 1) {
+        memset(wd->data + bytesRead, 0, dataSize + 1 - bytesRead);
     }
-    wd->data[dataSize] = wd->data[dataSize - 1];
 
     fclose(f);
     return wd;
