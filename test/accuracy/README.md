@@ -118,7 +118,7 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   (mus_littleroot, from VBlank 60) are plan step 12 (slice 9a, ground
   truth only; the cry over music steals a releasing BGM channel on its
   start frame).  poryaaaa plays the same with `poryaaaa_render --song <.s>
-  [--player se1|se2|se3] --cry2 N --cry2-start-frame F` (slice 9b-i: cry
+  [--player bgm|se1|se2|se3] --cry2 N --cry2-start-frame F` (slice 9b-i: cry
   player 0 chained after the song's player -- BGM -> cry 0 on engine tracks
   10..11, SE1 -> cry 0 on 3..4 -- its body after the song's on the same
   frame, the cross-player steal unlinking the stolen channel from the

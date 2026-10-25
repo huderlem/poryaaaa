@@ -151,11 +151,12 @@ void m4a_sequencer_init(M4ASequencer *seq, M4AEngine *engine);
 /* A second player on the same engine, run in SoundMain's chain after
  * `inner` (its body after inner's, from inner's _081DDA6C), on engine
  * tracks [trackBase, trackBase + its track count).  Installs no hook:
- * inner's hook runs the chain.  Select its player with
- * m4a_sequencer_set_player (it must be a higher M4A_PLAYER_* than inner's)
- * and its voicegroup with m4a_sequencer_set_voicegroup.  Returns 0, or -1
- * when inner already has an outer player or trackBase overlaps inner's
- * tracks, which changes nothing. */
+ * inner's hook runs the chain.  Selects the next player up the chain
+ * (inner's + 1: cry 1 after cry 0); its voicegroup with
+ * m4a_sequencer_set_voicegroup.  Returns 0, or -1 when inner is cry
+ * player 1 (nothing is opened after it), already has an outer player, or
+ * trackBase overlaps inner's tracks or its player's tracks do not fit,
+ * which changes nothing. */
 int m4a_sequencer_init_chained(M4ASequencer *seq, M4ASequencer *inner, int trackBase);
 
 /* The same with the player named: a chain may skip players (BGM -> cry 0

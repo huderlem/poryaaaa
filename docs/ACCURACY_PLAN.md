@@ -1883,6 +1883,9 @@ player's handlers): the stolen note is audible in the PCM mix alone (the
 `build/scratch` renders, for 9b).
 
 **What slice 9b needs -- structural statement only, nothing implemented.**
+(Historical since slice 9b-i, 2026-10-25: its "today" sentences about
+`init_chained`, `set_player` and `chainOwner[]` describe the code before
+that slice; see "Done: milestone 4 slice 9b-i".)
 (1) `MAX_TRACKS` 16 in `plugin/m4a_engine.h` holds both chains: BGM (10) ->
 cry 0 (2) with trackBase 10 (engine tracks 10..11), SE1 (3) -> cry 0 with
 trackBase 3 (tracks 3..4); a BGM -> SE1 -> cry 0 chain is 10 + 3 + 2 = 15
@@ -4036,7 +4039,64 @@ flags from the keys as its cry line has them; two rows, `cry_over_se`
 (se_exp, id2 0, start_frame2 30, 3 s; expected the gate-c -55.0 / -52.7)
 and `cry_over_bgm` (mus_littleroot, id2 0, start_frame2 60, 3 s, or 4 s to
 cover the EOT 202; -49.6 / -46.4 at 3 s); the baseline with the two new
-rows, the 64 existing identical.
+rows, the 64 existing identical; and `claim_check.sh`'s probe-name rule
+(`case $n in cry_*)` resolves a `cry_*` probe log against `type == "cry"`
+entries only), so rows named `cry_over_*` of type se / song need that case
+or other names.
+
+**Code review of slice 9b-i (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: MPlayOpen's order and MPlayMain's call-before-body
+against `m4a_sequencer_frame`'s gap term, each paused player charged once
+for BGM -> cry 0 and SE1 -> cry 0 and the lone / cry 0 -> cry 1 paths
+unchanged, the constructors operand by operand against the pre-diff
+`init_chained`; `_081DDC40`'s ClearChain / RealClearChain stores in the
+four prev / next cases against `chain_owner_of` + `unlink_cost` on the
+owner, the clearing moment, the raw f63 steal line for line (prev
+0x03001080 / next 0x03000FC0 -> 66 + the taker's empty chain 4 = 70), the
+CGB path reaching the same take, the uniqueness of a channel's holder
+(every store of a nonzero `chainOwner` first clears any holder), every
+consumer of the former owner's state (walk, apply, fine, stop, endtie,
+`player_free`), the track-address order of `gMPlayTrack_BGM` 0x03000040 <
+SE1 0x03000360 < SE2 < SE3 < `gPokemonCryTracks` 0x03002258 against the
+engine index order of every accepted chain and the scan's `bls` / `bcc` /
+`bcs`, `MAX_TRACKS` and `set_player`'s range check, the hook's frameCount
+arithmetic, `m4a_cry_choose_player` over {cry 0, NULL} against
+`SetPokemonCryTone`, the refusals, the `--cry --cry2` path, writers,
+`finished`, `sCry2`'s lifetime, detach order and frees; reviewer 2: the
+composition of every frame kind for both chains from `set_player`'s
+formulas against steps 4 / 5 / 11 / 12, no constant or `cyc()` added, the
+two 176-value tables recomputed from the `.frames` files with 0
+mismatches and the row comments, the steal's registers and
+(0x03000090 - 0x03000040) / 0x50 = track 1 from the map, the 50 new
+assertions, the CLI checks and messages against `print_usage`, the error
+paths' frees, every number of the plan section, the "what 9b-ii needs"
+paragraph against `accuracy.py`'s loader branches and `claim_check.sh`,
+the README / skill text, stale sentences).  **No divergence; every
+measured number confirmed; no constant derived or changed.**  Acted on
+(docs and one header comment, no code behaviour change; `claim_check`
+after: 57 diffed, 0 moved, 55/64, 0 regressions, every row 0.0, unit
+1521/1521, blip 49112/0, songs 561/561): the `init_chained` header comment
+(it selects inner's + 1 itself and refuses cry player 1 as inner), the
+README's player list (bgm included), a historical note on step 12's
+"today" sentences, `claim_check.sh`'s `cry_*` name rule in the 9b-ii
+paragraph above.  Recorded, not acted on: a dead channel (status 0,
+`SCAN_FREE`) still held by another player's chain is now unlinked from
+that owner at once with the measured unlink cost, as the GBA's
+RealClearChain does through `channel->track` (before 9b-i it would have
+been charged `UNLINK_NONE` and dropped by the owner's walk) -- the GBA
+behaviour, unexercised by the two runs; `init_chained_player`'s `trackBase
+>= MAX_TRACKS` test and `render_sequenced`'s `player > SE3` test are
+redundant with `set_player`'s range check and `main`'s check; the
+two-cry form's "Second cry: StartCry ..." line now prints before the
+sCry2 stores (stdout order only); the unit test's `on == 5` loop is the
+engine's default `maxPcmChannels` 5 hard-coded; the test skips both runs
+with a message, not a counted skip, when `build/accuracy/rom/songs` or
+`~/pokeemerald` is absent (the existing pattern; the constructor
+assertions still run), and reads the song path relative to the repo root
+as `claim_check.sh` runs it; `CryOverRun.eot` uses 0 for "past the run"
+where `stolenFromTrack` uses -1; `m4a_sequencer_frame`'s head comment
+cites the two-cry statement only; `track_apply`'s dead branch against the
+GBA's `_081DD9C8` pass was not re-checked by this review (pre-existing).
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
