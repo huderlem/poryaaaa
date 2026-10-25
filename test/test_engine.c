@@ -4424,6 +4424,8 @@ static void test_pcm_start_offset(void)
         memset(&ch, 0, sizeof(ch));
         m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
         ASSERT(ch.currentPointer == wd->data && ch.count == 8, "offset: start without an offset is offset 0");
+        m4a_pcm_channel_start_at(&ch, wd, VOICE_DIRECTSOUND, 1000);
+        ASSERT(ch.currentPointer == wd->data + 8 && ch.count == 0, "offset: an offset past the sample is clamped to its end (no host read past the data)");
         free(wd);
     }
 

@@ -1836,7 +1836,7 @@ the 48 previous tests are unchanged to the decimal (`compare_reports.py
 2026-10-24_cry.json 2026-10-24_cry-variants.json`: 0 regressions, 0
 improvements, every -inf still -inf, every row 0.0; cry_pidgey, cry_jynx
 and se_rain_stop FAIL on the documented floor as before).
-`poryaaaa_unit_tests` 1220/1220 (45 new), `poryaaaa_blip_tests` 49112/0,
+`poryaaaa_unit_tests` 1221/1221 (46 new), `poryaaaa_blip_tests` 49112/0,
 `poryaaaa_song_tests` 561/561.  `claim_check.sh`: 44 probed tests (the
 three variants added), 0 moved writes.
 
@@ -1900,6 +1900,39 @@ array, the channel stopping after size - offset samples) and
 into the channel, persistence across notes, the reset at the track's
 start).  `--cry-progress` reaches `M4ACryParams.progress` from the CLI
 (four lines; no reference can check it since the ROM's StartCry passes 0).
+
+**Code review of the variants slice (2026-10-24).**  Two independent
+reviews (the setters' arithmetic for the three value sets, ply_endtie's
+walk conditions and cost, the 0x0D port against m4a_1.s ply_note /
+SoundMainRAM / Unk1 / Unk2 and m4a.c, decoding the probe logs themselves;
+the probe and renderer argument plumbing against struct AccParams,
+songs.json's keys through the runner and claim_check, the template bytes
+against the ROM at 0x08002F20 for each variant), then `claim_check.sh` on
+the adopted batch.  Neither found a divergence: both confirm the five
+bytes per variant from the ROM template, the 54 / 82 endtie stamps and
+the +70 FINE / +20 walk that make 1928, the LE word and cmdPtr += 4 of
+ply_xcmd_0D, the SF_START conversion for uncompressed / DPCM / reversed
+samples (Unk1 reading the pointer back as the index, so an in-block offset
+decodes its block), that nothing on the GBA reads `count` between ply_note
+and the pass, that `unk_3C` is inside Clear64byte's 0x00..0x3F and written
+nowhere else, that `midiKey` is the raw track key, and that the probe logs
+show the patched values (`vol=5A`, `pan=3F`, MidiKeyToFreq 8746 / 11426 /
+10512).  **Adopted, cosmetic** (one claim_check for the batch): an offset
+past the sample is clamped to its end in `m4a_pcm_channel_start_at` (the
+GBA reads past the data before its signed count check stops it; the port
+would have read host memory; `--cry-progress` is the only way to reach it,
+unit-tested); `claim_check.sh` skips a cry entry without an `"id"` as the
+runner does instead of dropping every cry; `poryaaaa_render` notes when a
+`--cry-*` flag is given without `--cry`; the runner's inline comment.
+**Not acted on**: `_SKIP` 18 stays est. (a hand count of the pass-over
+path gives 18..24; only a two-note cry probe can settle it, and no game
+cry has two channels on one track); the persistent `gPokemonCrySong`'s
+`a = tuneValue2 - tuneValue` after a chorus cry (slice 2's R1#2; it can
+never reach a one-track cry's output); the probe's raw `fN` stamps are one
+ahead of the `.frames` rows and the plan's frame numbers (the EOT frame
+143 is `f144` in the raw log); the summary line prints the raw
+`--cry-volume` before the setter's `& 0x7F`.  Baseline refreshed from the
+batch's claim_check run.
 
 The work, in order (commits on `accuracy-harness` after d2a7086): the
 probe arguments and step 6; the engine (0x0D, the CLI flags, the unit

@@ -128,8 +128,9 @@ def build_tests(args):
             name = s["name"]
             kind = s.get("type", "song")       # "song": vanilla music; "se": a sound effect; "cry": a Pokemon cry
             if kind == "cry":
-                # StartCry in the ROM (--type cry --id N), the cry song
-                # template on cry player 0 in poryaaaa_render (--cry N).
+                # StartCry in the ROM (--type cry --id N [--pitch/--pan/--volume]),
+                # the cry song template on cry player 0 in poryaaaa_render
+                # (--cry N [--cry-pitch/--cry-pan/--cry-volume]).
                 if "id" not in s:
                     print(f"warning: {name}: a cry needs its gCryTable index as \"id\", skipping", file=sys.stderr)
                     continue

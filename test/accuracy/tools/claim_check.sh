@@ -41,7 +41,7 @@ fi
 cries=$(python3 -c '
 import json
 for s in json.load(open("test/accuracy/songs.json")):
-    if s.get("type") == "cry":
+    if s.get("type") == "cry" and "id" in s:
         extra = " ".join("--cry-%s %d" % (k, s[k]) for k in ("pitch", "pan", "volume") if k in s)
         print(s["name"], "--cry %d %s" % (s["id"], extra))')
 moved=0; checked=0

@@ -1135,6 +1135,7 @@ int main(int argc, char *argv[])
     const char *songPath      = NULL;
     int         cryId         = -1;
     M4ACryParams cryParams;
+    bool        cryParamsSet  = false;
     m4a_cry_params_default(&cryParams);
     bool        songVolumeSet = false;
     bool        reverbSet     = false;
@@ -1187,6 +1188,7 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "Error: %s takes %lld..%lld (got '%s')\n", flag, lo, hi, argv[i]);
                 return 1;
             }
+            cryParamsSet = true;
             if (strcmp(flag, "--cry-pitch") == 0)         cryParams.pitch = (int16_t)v;
             else if (strcmp(flag, "--cry-pan") == 0)      cryParams.pan = (int8_t)v;
             else if (strcmp(flag, "--cry-volume") == 0)   cryParams.volume = (uint8_t)v;
@@ -1263,6 +1265,8 @@ int main(int argc, char *argv[])
     }
     if (cryId >= 0 && vgName)
         fprintf(stderr, "Note: --cry ignores the <voicegroup> argument (the cry's sample is its voicegroup)\n");
+    if (cryId < 0 && cryParamsSet)
+        fprintf(stderr, "Note: --cry-pitch / --cry-pan / --cry-volume / --cry-progress only apply to --cry\n");
     if (midiPath && !vgName) {
         fprintf(stderr, "Error: --midi needs a <voicegroup> argument\n\n");
         print_usage(argv[0]);

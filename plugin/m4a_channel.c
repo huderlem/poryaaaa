@@ -45,6 +45,10 @@ void m4a_pcm_channel_start_at(M4APCMChannel *ch, WaveData *wav, uint8_t type,
      * are set up by SoundMainRAM_Unk1 on their first mix (CHN_SPECIAL):
      * a compressed voice reads the pointer back as the sample index, so an
      * offset inside a DPCM block decodes that block and starts mid-way. */
+    if (startOffset > wav->size)
+        startOffset = wav->size;    /* host-memory guard: the GBA would read past the
+                                     * sample before its signed count check stopped it;
+                                     * here the channel stops on its first step instead */
     ch->currentPointer = wav->data + startOffset;
     ch->count = (int32_t)(wav->size - startOffset);
     ch->fw = 0;
