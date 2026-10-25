@@ -2,7 +2,7 @@
 """Per-segment MPlayMain costs from an mgba_probe raw log recorded with the
 ELF's nm listing as the symbol file (internal labels + registers).
 
-    probe_mplay.py [--player BGM|SE1|SE2|SE3|<hex addr>] build/probe/groudon.txt [more logs ...] [frame ...]
+    probe_mplay.py [--player BGM|SE1|SE2|SE3|CRY0|CRY1|<hex addr>] build/probe/groudon.txt [more logs ...] [frame ...]
 
 With frame numbers: prints the breakpoint sequence of the selected player's
 (default BGM) MPlayMain run for those engine frames (cycle relative to the MPlayMain
@@ -22,7 +22,8 @@ CPF = 280896
 L160 = 160 * 1232
 BGM = 0x03002008
 # gMPlayInfo_* of the 2026-10-24 ROM (test/accuracy/rom/build/accuracy_test.map)
-PLAYERS = {"BGM": 0x03002008, "SE1": 0x030021D8, "SE2": 0x03002218, "SE3": 0x030023DC}
+PLAYERS = {"BGM": 0x03002008, "SE1": 0x030021D8, "SE2": 0x03002218, "SE3": 0x030023DC,
+           "CRY0": 0x03001F88, "CRY1": 0x03001FC8}   # gPokemonCryMusicPlayers[0..1]
 LINE = re.compile(r"^\s*(\d+) f(\d+) v\s*(\d+) ([BW]) ([0-9A-F]{8}) ?(.*)$")
 REG = re.compile(r"r0=([0-9A-F]+) r3=([0-9A-F]+) r4=([0-9A-F]+) r5=([0-9A-F]+) r7=([0-9A-F]+)")
 

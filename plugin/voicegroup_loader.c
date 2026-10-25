@@ -2944,6 +2944,88 @@ fail:
     return NULL;
 }
 
+LoadedVoiceGroup *voicegroup_load_cry(const char *projectRoot, const char *sampleSymbol,
+                                      const VoicegroupLoaderConfig *config)
+{
+    vg_log("voicegroup_load_cry: start root='%s' sample='%s'", projectRoot, sampleSymbol);
+    LoadedVoiceGroup *vg = calloc(1, sizeof(LoadedVoiceGroup));
+    ProjectDiscovery *disc = calloc(1, sizeof(ProjectDiscovery));
+    if (!vg || !disc) {
+        free(disc);
+        voicegroup_free(vg);
+        return NULL;
+    }
+    discover_project(projectRoot, config, disc);
+    WaveCache waveCache;
+    wave_cache_init(&waveCache);
+    SymbolMap dsMap;
+    symbol_map_init(&dsMap);
+    parse_all_direct_sound_data(disc, projectRoot, &dsMap);
+
+    /* The `cry` macro's voice (parse_voicegroup_file's cry path). */
+    vg_set_voice_name(vg, 0, sampleSymbol);
+    ToneData *td = &vg->voices[0];
+    td->type = VOICE_CRY;
+    td->key = 60;
+    td->attack = 0xFF;
+    td->decay = 0;
+    td->sustain = 0xFF;
+    td->release = 0;
+    WaveData *wd = resolve_and_load_compressed_sample(projectRoot, sampleSymbol, &dsMap, disc, vg, &waveCache);
+    if (wd) {
+        td->wav = wd;
+        /* SoundMainRAM_Unk1 mixes nothing for a CMP-typed voice whose data
+         * is not compressed (see parse_voicegroup_file). */
+        if (wd->type == 0)
+            td->type &= (uint8_t)~VOICE_TYPE_CMP;
+    }
+
+    symbol_map_free(&dsMap);
+    discovery_free_label_index(disc);
+    free(disc);
+    if (!wd) {
+        fprintf(stderr, "voicegroup_loader: cannot find cry sample '%s'\n", sampleSymbol);
+        voicegroup_free(vg);
+        return NULL;
+    }
+    vg_log("voicegroup_load_cry: done OK");
+    return vg;
+}
+
+int voicegroup_cry_table_symbol(const char *projectRoot, int index, char *out, size_t outLen)
+{
+    char path[MAX_PATH_LEN];
+    build_path(path, sizeof(path), projectRoot, "sound/cry_tables.inc");
+    FILE *f = fopen(path, "r");
+    if (!f || index < 0)
+        return -1;
+    char line[512];
+    int inTable = 0, n = 0, rc = -1;
+    while (fgets(line, sizeof(line), f)) {
+        char *t = line;
+        while (*t == ' ' || *t == '\t') t++;
+        rtrim(t);
+        if (!inTable) {
+            inTable = strncmp(t, "gCryTable::", 11) == 0;
+            continue;
+        }
+        if (strncmp(t, "cry ", 4) == 0 || strncmp(t, "cry\t", 4) == 0) {
+            if (n == index) {
+                t += 4;
+                while (*t == ' ' || *t == '\t') t++;
+                snprintf(out, outLen, "%s", t);
+                rc = 0;
+                break;
+            }
+            n++;
+        } else if (*t && *t != '@' && *t != '.') {
+            break;      /* the next label (gCryTable_Reverse) ends the table */
+        }
+    }
+    fclose(f);
+    return rc;
+}
+
 LoadedSampleSet *voicegroup_load_samples(
     const char *projectRoot, const char *const *sampleSymbols, int sampleCount,
     const char *const *waveSymbols, int waveCount,

@@ -60,6 +60,12 @@ typedef struct {
 
     M4ASongReloc *relocs;
     int relocCount;
+
+    /* Where the ROM keeps the data.  0: ROM, as every .s song (the
+     * parser's default); 1: IWRAM, as gPokemonCrySongs (m4a_cry.c).  The
+     * sequencer's timing model charges M4A_CYC_ROM_BYTE per song-data byte
+     * MPlayMain reads from ROM. */
+    uint8_t dataInRam;
 } M4ASong;
 
 /* Parse song text.  On failure returns NULL and, when err is non-NULL, writes

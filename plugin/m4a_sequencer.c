@@ -152,6 +152,15 @@ static inline uint8_t next_byte(M4ASequencer *s, M4ASeqTrack *t)
     return rd8(s, t->cmdPtr++);
 }
 
+/* The timing model's M4A_CYC_* handler costs are ROM-song measurements; a
+ * song whose data the ROM keeps in IWRAM (the cry song) saves
+ * M4A_CYC_ROM_BYTE per song-data byte the handler reads (plan, "SoundMain
+ * timing probe, step 5").  Negative: the correction for n reads. */
+static inline int ram_bytes(const M4ASequencer *s, int n)
+{
+    return (s->song && s->song->dataInRam) ? -n * M4A_CYC_ROM_BYTE : 0;
+}
+
 /* ------------------------------------------------------------------------
  * Engine track helpers
  * ------------------------------------------------------------------------ */
@@ -611,16 +620,19 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
     t->gateTime = gClockTable[cmd];
 
     int entry = M4A_CYC_NOTE_ENTRY;
+    int reads = 1;                      /* each test of the next byte is a song-data read */
     uint8_t b = rd8(s, t->cmdPtr);
     if (b < 0x80) {
         t->key = b;
         t->cmdPtr++;
         entry += M4A_CYC_NOTE_KEY_BYTE;
+        reads++;
         b = rd8(s, t->cmdPtr);
         if (b < 0x80) {
             t->velocity = b;
             t->cmdPtr++;
             entry += M4A_CYC_NOTE_VEL_BYTE;
+            reads++;
             b = rd8(s, t->cmdPtr);
             if (b < 0x80) {
                 t->gateTime = (uint8_t)(t->gateTime + b);
@@ -629,7 +641,7 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
             }
         }
     }
-    cyc(s, entry);
+    cyc(s, entry + ram_bytes(s, reads));
 
     /* The work ply_note does before and after the engine's note-on, costed
      * from the state the GBA tests at each branch.  Voice resolution: */
@@ -730,29 +742,84 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
 /* A handler's cost from its entry back to _081DD938 (the handler, its
  * return and MPlayMain's flags test); the table dispatch before it is
  * M4A_CYC_CMD_TABLE.  Unmeasured handlers take the default. */
-static int cmd_cycles(const M4ASequencer *s, int i, uint8_t cmd)
+static int xcmd_cycles(const M4ASequencer *s, const M4ASeqTrack *t)
+{
+    uint8_t sub = rd8(s, t->cmdPtr);
+    switch (sub) {
+    case 0x08: case 0x09:                         /* xiecv xiecl */
+        return M4A_CYC_XCMD_SUB + M4A_CYC_XIEC + ram_bytes(s, 2);
+    case 0x07:                                    /* xrele */
+        return M4A_CYC_XCMD_SUB + M4A_CYC_XRELE + ram_bytes(s, 2);
+    case 0x0D:                                    /* xcmd_0D */
+        return M4A_CYC_XCMD_SUB + M4A_CYC_XCMD_0D + ram_bytes(s, 5);
+    case 0x0C: {                                  /* xwait: the tick it expires on is cheaper */
+        uint16_t len = (uint16_t)(rd8(s, t->cmdPtr + 1) | (rd8(s, t->cmdPtr + 2) << 8));
+        return M4A_CYC_XCMD_SUB + (t->timer < len ? M4A_CYC_XWAIT : M4A_CYC_XWAIT_DONE) + ram_bytes(s, 3);
+    }
+    case 0x01:                                    /* xwave (est.: as xiec with four bytes) */
+        return M4A_CYC_XCMD_SUB + M4A_CYC_XIEC + ram_bytes(s, 5);
+    default:                                      /* xtype xatta xdeca xsust xleng xswee (est.: as xiec) */
+        return M4A_CYC_XCMD_SUB + M4A_CYC_XIEC + ram_bytes(s, 2);
+    }
+}
+
+/* ply_endtie's walk over the track's chain, newest first (m4a_1.s
+ * _081DDD22): stops at the first channel that is ON, not STOP and holds
+ * the key.  Costed before the handler runs, from the same state. */
+static int endtie_cycles(M4ASequencer *s, int i)
+{
+    const M4ASeqTrack *t = &s->tracks[i];
+    M4AEngine *e = s->engine;
+    uint8_t b = rd8(s, t->cmdPtr);
+    bool keyByte = b < 0x80;
+    uint8_t key = keyByte ? b : t->key;
+    int c = M4A_CYC_ENDTIE + (keyByte ? M4A_CYC_ENDTIE_KEY : 0) + ram_bytes(s, 1);
+    int chain[CHAN_COUNT];
+    int n = chain_list(s, i, chain);
+    for (int k = 0; k < n; k++) {
+        int h = chain[k];
+        uint8_t st = *chan_status(e, h);
+        uint8_t midiKey = chan_is_pcm(h) ? e->pcmChannels[h].midiKey
+                                         : e->cgbChannels[h - TOTAL_PCM_CHANNELS].midiKey;
+        if ((st & (CHN_START | CHN_ENV_MASK)) && !(st & CHN_STOP) && midiKey == key) {
+            c += M4A_CYC_ENDTIE_MATCH;
+            break;
+        }
+        c += M4A_CYC_ENDTIE_SKIP;
+    }
+    return c;
+}
+
+static int cmd_cycles(M4ASequencer *s, int i, uint8_t cmd)
 {
     const M4ASeqTrack *t = &s->tracks[i];
     const M4ATrack *et = &s->engine->tracks[i];
+    /* ROM-song measurements (step 3); ram_bytes() takes off the song-data
+     * reads for a song in IWRAM (step 5: measured on tune, goto, voice, vol,
+     * pan, xcmd and TIE; the others follow the same per-byte rule, est.). */
     switch (cmd) {
-    case 0xB2: return 110;   /* goto */
-    case 0xB3: return 140;   /* patt (30 + goto) */
+    case 0xB2: return 110 + ram_bytes(s, 4);   /* goto */
+    case 0xB3: return 140 + ram_bytes(s, 4);   /* patt (30 + goto) */
     case 0xB4: return t->patternLevel != 0 ? 40 : 34;   /* pend 18 + 22; level 0 (the taken beq) 12 + 22 */
-    case 0xBB: return 91;    /* tempo */
-    case 0xBC: return 89;    /* keysh */
-    case 0xBD: return 184;   /* voice */
-    case 0xBE: return 89;    /* vol */
-    case 0xBF: return 91;    /* pan */
-    case 0xC0: return 91;    /* bend */
-    case 0xC1: return 89;    /* bendr */
-    case 0xC2: return rd8(s, t->cmdPtr) != 0 ? 69 : 109;   /* lfos; value 0 branches to clear_modM like mod 0 (est.: the same 51 + 58) */
-    case 0xC3: return 81;    /* lfodl */
-    case 0xC4: return rd8(s, t->cmdPtr) != 0 ? 69 : 109;   /* mod; 51 + clear_modM 58 for 0 */
-    case 0xC5: return rd8(s, t->cmdPtr) != et->modT ? 95 : 91;   /* modt */
-    case 0xCD: return 110;   /* xcmd 61 + xiecv / xiecl 49 (other sub-commands est.) */
-    case 0xCE: return rd8(s, t->cmdPtr) < 0x80 ? 95 : 89;   /* endtie with / without a key byte (rg_vs_trainer, one instance each) */
+    case 0xB5: return M4A_CYC_CMD_DEFAULT + ram_bytes(s, 1);   /* rept */
+    case 0xB9: return M4A_CYC_CMD_DEFAULT + ram_bytes(s, 3);   /* memacc */
+    case 0xBB: return 91 + ram_bytes(s, 1);    /* tempo */
+    case 0xBC: return 89 + ram_bytes(s, 1);    /* keysh */
+    case 0xBD: return 184 + ram_bytes(s, 1);   /* voice */
+    case 0xBE: return 89 + ram_bytes(s, 1);    /* vol */
+    case 0xBF: return 91 + ram_bytes(s, 1);    /* pan */
+    case 0xC0: return 91 + ram_bytes(s, 1);    /* bend */
+    case 0xC1: return 89 + ram_bytes(s, 1);    /* bendr */
+    case 0xC2: return (rd8(s, t->cmdPtr) != 0 ? 69 : 109) + ram_bytes(s, 1);   /* lfos; value 0 branches to clear_modM like mod 0 (est.: the same 51 + 58) */
+    case 0xC3: return 81 + ram_bytes(s, 1);    /* lfodl */
+    case 0xC4: return (rd8(s, t->cmdPtr) != 0 ? 69 : 109) + ram_bytes(s, 1);   /* mod; 51 + clear_modM 58 for 0 */
+    case 0xC5: return (rd8(s, t->cmdPtr) != et->modT ? 95 : 91) + ram_bytes(s, 1);   /* modt */
+    case 0xC8: return 91 + ram_bytes(s, 1);    /* tune: 84 measured on the cry (RAM, step 5); ROM est. 84 + one byte */
+    case 0xCC: return M4A_CYC_CMD_DEFAULT + ram_bytes(s, 2);   /* port */
+    case 0xCD: return xcmd_cycles(s, t);       /* xcmd */
+    case 0xCE: return endtie_cycles(s, i);     /* endtie */
     case 0xB1: return 0;     /* fine: charged by ply_fine itself (M4A_CYC_FINE_*: 44 with an empty chain, 114 with one channel) */
-    default:   return M4A_CYC_CMD_DEFAULT;   /* tune, rept, memacc, prio, port */
+    default:   return M4A_CYC_CMD_DEFAULT + ram_bytes(s, 1);   /* prio */
     }
 }
 
@@ -893,7 +960,7 @@ static void track_tick(M4ASequencer *s, int i)
             return;
         }
 
-        cyc(s, M4A_CYC_CMD_FETCH);
+        cyc(s, M4A_CYC_CMD_FETCH + ram_bytes(s, 1));   /* _081DD8E0's ldrb of the command byte */
         uint8_t c = rd8(s, t->cmdPtr);
         if (c < 0x80) {
             cyc(s, M4A_CYC_CMD_RUNNING);
@@ -1055,12 +1122,13 @@ void m4a_sequencer_init(M4ASequencer *s, M4AEngine *engine)
     engine->externalSequencer = true;
 }
 
-void m4a_sequencer_set_player(M4ASequencer *s, int player)
+int m4a_sequencer_set_player(M4ASequencer *s, int player)
 {
-    /* NUM_TRACKS_BGM / SE1 / SE2 / SE3 in pokeemerald sound/music_player_table.inc */
-    static const uint8_t trackCounts[M4A_PLAYER_COUNT] = { 10, 3, 9, 1 };
+    /* NUM_TRACKS_BGM / SE1 / SE2 / SE3 in pokeemerald sound/music_player_table.inc;
+     * the cry players' 2 is MPlayOpen's argument in m4aSoundInit (m4a.c). */
+    static const uint8_t trackCounts[M4A_PLAYER_COUNT] = { 10, 3, 9, 1, 2, 2 };
     if (player < 0 || player >= M4A_PLAYER_COUNT)
-        player = M4A_PLAYER_BGM;
+        return -1;
     s->player = (uint8_t)player;
     s->maxTracks = trackCounts[player];
     /* Chain order (MPlayOpen appends to the head; MPlayMain calls the next
@@ -1071,7 +1139,9 @@ void m4a_sequencer_set_player(M4ASequencer *s, int player)
      * before the M4A_CYC_MP_TAIL to CgbSound.  Measured (plan, "milestone 4
      * slice 1"): _081DD9BC at 716 / 779 / 842 / 905, _081DDA6C -> CgbSound
      * 370 / 307 / 244 / 181 for BGM / SE1 / SE2 / SE3; every paused frame
-     * 1007 whichever player is selected. */
+     * 1007 whichever player is selected.  Cry 0 (step 5, four cries): body
+     * at SE3's _081DDA6C 826, _081DD9BC 968, exit 118; cry 1 by the same
+     * rule (unmeasured): 889 / 1031 / 55. */
     if (player == M4A_PLAYER_BGM) {
         s->mpEntry = M4A_CYC_MP_BGM_ENTRY;
         s->mpHead = M4A_CYC_MP_HEAD;
@@ -1082,6 +1152,7 @@ void m4a_sequencer_set_player(M4ASequencer *s, int player)
         s->mpPaused = M4A_CYC_MP_IDLE;
     }
     s->mpExit = (int16_t)((M4A_CYC_MP_CHAIN - 1 - player) * M4A_CYC_MP_IDLE + M4A_CYC_MP_TAIL);
+    return 0;
 }
 
 void m4a_sequencer_detach(M4ASequencer *s)

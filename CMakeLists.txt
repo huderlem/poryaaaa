@@ -90,6 +90,7 @@ set(ENGINE_SOURCES
     plugin/m4a_psg.c
     plugin/m4a_song.c
     plugin/m4a_sequencer.c
+    plugin/m4a_cry.c
     plugin/voicegroup_loader.c
 )
 

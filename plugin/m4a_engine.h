@@ -512,6 +512,10 @@ struct M4AEngine {
 #define M4A_CYC_MP_TAIL            55    /* the last player's _081DDA6C -> CgbSound */
 #define M4A_CYC_MP_CHAIN           6     /* players in the chain */
 #define M4A_CYC_MP_EXIT            (5 * M4A_CYC_MP_IDLE + M4A_CYC_MP_TAIL)   /* BGM: 370 */
+/* The cry players (gPokemonCryMusicPlayers, two tracks each) follow SE3 in
+ * the chain: cry 0 starts its body at SE3's _081DDA6C 826 and exits in
+ * 63 + 55 = 118, measured on four cries (plan, "step 5"); cry 1 (entry
+ * 889, exit 55) follows from the same rule, unmeasured. */
 #define M4A_CYC_TICK_ALL_DONE      24    /* _081DD9A4 -> _081DDA6C when no track exists any more (clock++, status = PAUSE) */
 /* The VOLCHG/PITCHG pass over the player's trackCount tracks (also the
  * no-tick frame's only work). */
@@ -578,6 +582,36 @@ struct M4AEngine {
 #define M4A_CYC_CMD_TABLE          50    /* _081DD8F6 -> _081DD90C 10 -> the ply_* handler 40 */
 #define M4A_CYC_CMD_WAIT           46    /* a W## byte: _081DD8F6 -> _081DD90C 10 -> _081DD92E 10 -> _081DD938 26 */
 #define M4A_CYC_CMD_DEFAULT        90    /* an unmeasured handler to _081DD938 (est.: the one-byte handlers' median) */
+/* Song data in IWRAM (gPokemonCrySongs: the cry song, M4ASong.dataInRam):
+ * every song-data byte MPlayMain reads costs this less than from ROM
+ * (WS0 3/1 with prefetch).  Measured on seven label pairs, ROM song vs
+ * cry (plan, "SoundMain timing probe, step 5"): the command fetch 21 / 14,
+ * ply_vol 89 / 82, ply_pan 91 / 84, ply_voice 184 / 177, ply_goto 110 / 82
+ * (four bytes), ply_xcmd -> sub-handler 61 / 54, ply_note with key and
+ * velocity 114 / 93 (three reads).  The M4A_CYC_* handler costs are ROM
+ * values; the sequencer subtracts this per byte read for a RAM song. */
+#define M4A_CYC_ROM_BYTE           7
+/* ply_xcmd's sub-commands (m4a.c, compiled C).  xiecv / xiecl were measured
+ * on ROM songs (step 3); the others on the cry (RAM) and are given here as
+ * ROM values est. from the measured RAM cost + M4A_CYC_ROM_BYTE per byte
+ * read: xrele 48 + 7, xcmd_0D 120 + 28, xwait 108 / 102 + 14. */
+#define M4A_CYC_XCMD_SUB           61    /* ply_xcmd -> the sub-command handler (reads the sub-command byte) */
+#define M4A_CYC_XIEC               49    /* ply_xiecv / ply_xiecl -> _081DD938 (one byte) */
+#define M4A_CYC_XRELE              55    /* ply_xrele -> _081DD938 (one byte; RAM 48 measured) */
+#define M4A_CYC_XCMD_0D            148   /* ply_xcmd_0D -> _081DD938 (four bytes; RAM 120 measured) */
+#define M4A_CYC_XWAIT              122   /* ply_xwait -> _081DD938 while timer < length (two bytes; RAM 108 measured) */
+#define M4A_CYC_XWAIT_DONE         116   /* ... on the tick the wait expires (RAM 102 measured) */
+/* ply_endtie: the byte test, then the track's chain walked newest-first
+ * until a channel that is ON, not STOP and holds the key.  ROM songs (step
+ * 3, rg_vs_trainer): 89 without a key byte and 95 with one, each with one
+ * chained channel that matched; the cry (RAM, step 5): 54 without a key
+ * byte and an empty chain.  So 61 = 54 + one byte for the empty walk,
+ * 28 for the matching channel (89 - 61), 6 for the key byte (95 - 89); a
+ * chained channel that does not match is est. (eight instructions). */
+#define M4A_CYC_ENDTIE             61    /* ply_endtie -> _081DD938, no key byte, empty chain */
+#define M4A_CYC_ENDTIE_KEY         6     /* ... a key byte consumed */
+#define M4A_CYC_ENDTIE_MATCH       28    /* ... the chained channel holding the key gets SF_STOP (ends the walk) */
+#define M4A_CYC_ENDTIE_SKIP        18    /* ... a chained channel tested and passed over (est.) */
 /* ply_fine (measured on the SE corpus, milestone 4 slice 1): the handler
  * returns to the flags test, which finds the track gone and takes the
  * `beq _081DD994`, so its cost ends at _081DD994 instead of _081DD938. */

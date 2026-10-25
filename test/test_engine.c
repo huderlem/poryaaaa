@@ -8,6 +8,7 @@
 #include "m4a_tables.h"
 #include "m4a_song.h"
 #include "m4a_sequencer.h"
+#include "m4a_cry.h"
 
 /*
  * Unit tests for the m4a engine.
@@ -4010,17 +4011,21 @@ static void test_sequencer_players(void)
     printf("Testing sequencer music players (chain position, track counts)...\n");
     ToneData voices[128];
     seq_test_voices(voices);
-    static const int tracks[4] = { 10, 3, 9, 1 };
-    static const int bc[4] = { 716, 779, 842, 905 };      /* _081DD9BC */
-    static const int exits[4] = { 370, 307, 244, 181 };   /* _081DDA6C -> CgbSound */
-    for (int p = 0; p < 4; p++) {
+    /* BGM, SE1, SE2, SE3 from the SE probes; cry 0 from the four cry probes
+     * (step 5: _081DD9BC 968, exit 118); cry 1 by the chain rule (not
+     * measured: no run starts two cries). */
+    static const int tracks[M4A_PLAYER_COUNT] = { 10, 3, 9, 1, 2, 2 };
+    static const int bc[M4A_PLAYER_COUNT] = { 716, 779, 842, 905, 968, 1031 };      /* _081DD9BC */
+    static const int exits[M4A_PLAYER_COUNT] = { 370, 307, 244, 181, 118, 55 };     /* _081DDA6C -> CgbSound */
+    ASSERT_EQ(M4A_PLAYER_COUNT, 6, "sequencer: six players in the chain");
+    for (int p = 0; p < M4A_PLAYER_COUNT; p++) {
         M4AEngine engine;
         m4a_engine_init(&engine, 48000.0f);
         m4a_engine_set_voicegroup(&engine, voices);
         M4ASequencer seq;
         m4a_sequencer_init(&seq, &engine);
         ASSERT_EQ(seq.maxTracks, 10, "sequencer: init selects the BGM player");
-        m4a_sequencer_set_player(&seq, p);
+        ASSERT_EQ(m4a_sequencer_set_player(&seq, p), 0, "sequencer: a valid player is accepted");
         ASSERT_EQ(seq.player, p, "sequencer: player selected");
         ASSERT_EQ(seq.maxTracks, tracks[p], "sequencer: the player's track count");
         ASSERT_EQ(seq.mpEntry + seq.mpHead, bc[p], "sequencer: _081DD9BC position of the player");
@@ -4036,8 +4041,11 @@ static void test_sequencer_players(void)
         m4a_engine_set_voicegroup(&engine, voices);
         M4ASequencer seq;
         m4a_sequencer_init(&seq, &engine);
-        m4a_sequencer_set_player(&seq, 99);
-        ASSERT_EQ(seq.player, M4A_PLAYER_BGM, "sequencer: out-of-range player falls back to BGM");
+        m4a_sequencer_set_player(&seq, M4A_PLAYER_SE2);
+        ASSERT_EQ(m4a_sequencer_set_player(&seq, 99), -1, "sequencer: out-of-range player is an error");
+        ASSERT_EQ(m4a_sequencer_set_player(&seq, -1), -1, "sequencer: negative player is an error");
+        ASSERT_EQ(seq.player, M4A_PLAYER_SE2, "sequencer: an out-of-range player changes nothing");
+        ASSERT_EQ(seq.maxTracks, 9, "sequencer: ... nor the track count");
         m4a_sequencer_detach(&seq);
         m4a_engine_destroy(&engine);
     }
@@ -4161,6 +4169,146 @@ static void test_sequencer_cycles_se2(void)
     m4a_song_free(song);
 }
 
+/* The cry song (m4a_cry.c) against the ROM: gPokemonCrySongTemplate's bytes
+ * (0x08002F20 in the 2026-10-24 accuracy ROM) with the setters applied as
+ * the ROM's StartCry / PlayCryInternal apply them (volume 120, pan 0,
+ * pitch 15360, length 140, progress 0, release 0, chorus 0, priority 10),
+ * the pointer words as SetPokemonCryTone patches them (offsets here). */
+static void test_cry_song(void)
+{
+    printf("Testing the cry song template...\n");
+    /* The template as the ROM holds it (tone word = voicegroup_dummy, zeroed here). */
+    static const uint8_t romTemplate[M4A_CRY_SONG_SIZE] = {
+        0x01, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0xC8, 0x40, 0xB2, 0x00, 0x00, 0x00, 0x00, 0xC8, 0x50, 0xBD, 0x00, 0xBE, 0x7F, 0xCD, 0x0D,
+        0x00, 0x00, 0x00, 0x00, 0xCD, 0x07, 0x00, 0xBF, 0x40, 0xCF, 0x3C, 0x7F, 0xCD, 0x0C, 0x3C, 0x00,
+        0xCE, 0xB1, 0x00, 0x00 };
+    ASSERT_EQ(memcmp(gM4ACrySongTemplate, romTemplate, M4A_CRY_SONG_SIZE), 0,
+              "cry: the template equals the ROM's gPokemonCrySongTemplate");
+
+    /* After StartCry's setters and SetPokemonCryTone (hand-applied to the
+     * ROM bytes): trackCount 1, priority 10, part0 at 0x11, part1 at 0x18,
+     * TUNE c_v, GOTO cont (0x1A), TUNE c_v+16, VOICE 0, VOL 120, XCMD 0D 0,
+     * XCMD RELE 0, PAN c_v, TIE Cn3 v127, XCMD WAIT 140, EOT, FINE. */
+    static const uint8_t expected[M4A_CRY_SONG_SIZE] = {
+        0x01, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+        0x00, 0xC8, 0x40, 0xB2, 0x1A, 0x00, 0x00, 0x00, 0xC8, 0x50, 0xBD, 0x00, 0xBE, 0x78, 0xCD, 0x0D,
+        0x00, 0x00, 0x00, 0x00, 0xCD, 0x07, 0x00, 0xBF, 0x40, 0xCF, 0x3C, 0x7F, 0xCD, 0x0C, 0x8C, 0x00,
+        0xCE, 0xB1, 0x00, 0x00 };
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    ASSERT_EQ(p.volume, 120, "cry: default volume CRY_VOLUME");
+    ASSERT_EQ(p.pitch, 15360, "cry: default pitch (PlayCryInternal, CRY_MODE_NORMAL)");
+    ASSERT_EQ(p.length, 140, "cry: default length");
+    ASSERT_EQ(p.priority, 10, "cry: default priority CRY_PRIORITY_NORMAL");
+    M4ASong *song = m4a_cry_song_new(&p);
+    ASSERT(song != NULL, "cry: song built");
+    if (!song) return;
+    ASSERT_EQ(song->size, M4A_CRY_SONG_SIZE, "cry: sizeof(PokemonCrySong) bytes");
+    int bad = -1;
+    for (int i = 0; i < M4A_CRY_SONG_SIZE; i++)
+        if (song->data[i] != expected[i]) { bad = i; break; }
+    if (bad >= 0)
+        printf("  byte 0x%02X: engine %02X, ROM %02X\n", bad, song->data[bad], expected[bad]);
+    ASSERT_EQ(bad, -1, "cry: the defaults give the ROM's gPokemonCrySongs[0] bytes");
+    ASSERT_EQ(song->trackCount, 1, "cry: one track without chorus");
+    ASSERT_EQ(song->priority, 10, "cry: header priority");
+    ASSERT_EQ(song->reverb, 0, "cry: no reverb bit");
+    ASSERT_EQ(song->trackOffsets[0], 0x11, "cry: part0 at 0x11");
+    ASSERT_EQ(song->trackOffsets[1], 0x18, "cry: part1 at 0x18");
+    ASSERT_EQ(song->dataInRam, 1, "cry: the data lives in IWRAM (gPokemonCrySongs)");
+    ASSERT_EQ(song->relocCount, 4, "cry: tone, part0, part1 and the GOTO target are pointers");
+    /* The ROM image: gPokemonCrySongs[0] at 0x03001F20 with gCryTable[0] as the tone. */
+    uint8_t img[M4A_CRY_SONG_SIZE];
+    m4a_song_relocate(song, 0x03001F20, 0x0802AF7C, img);
+    ASSERT_EQ(img[4] | (img[5] << 8) | (img[6] << 16) | ((uint32_t)img[7] << 24), 0x0802AF7Cu, "cry: tone word");
+    ASSERT_EQ(img[8] | (img[9] << 8) | (img[10] << 16) | ((uint32_t)img[11] << 24), 0x03001F31u, "cry: part[0] = &part0");
+    ASSERT_EQ(img[12] | (img[13] << 8) | (img[14] << 16) | ((uint32_t)img[15] << 24), 0x03001F38u, "cry: part[1] = &part1");
+    ASSERT_EQ(img[0x14] | (img[0x15] << 8) | (img[0x16] << 16) | ((uint32_t)img[0x17] << 24), 0x03001F3Au, "cry: gotoTarget = &cont");
+    m4a_song_free(song);
+
+    /* The setters' arithmetic (m4a.c): pitch 15600 (CRY_MODE_DOUBLES's
+     * first), pan -32, chorus 4 (two tracks, the second TUNE c_v+chorus). */
+    p.pitch = 15600; p.pan = -32; p.chorus = 4; p.volume = 0xFF; p.length = 0x1234; p.release = 7; p.progress = 0x11223344;
+    song = m4a_cry_song_new(&p);
+    ASSERT(song != NULL, "cry: song built (chorus)");
+    if (!song) return;
+    ASSERT_EQ(song->data[0x2A], (15600 + 0x80) >> 8, "cry: pitch -> TIE key 61");
+    ASSERT_EQ(song->data[0x12], ((15600 + 0x80) >> 1) & 0x7F, "cry: pitch -> TUNE");
+    ASSERT_EQ(song->data[0x19], (4 + (((15600 + 0x80) >> 1) & 0x7F)) & 0x7F, "cry: chorus -> second TUNE = chorus + tune");
+    ASSERT_EQ(song->data[0x00], 2, "cry: chorus -> two tracks");
+    ASSERT_EQ(song->trackCount, 2, "cry: header track count follows");
+    ASSERT_EQ(song->data[0x28], (-32 + 0x40) & 0x7F, "cry: pan -> PAN c_v + pan");
+    ASSERT_EQ(song->data[0x1D], 0x7F, "cry: volume & 0x7F");
+    ASSERT_EQ(song->data[0x2E], 0x34, "cry: length low byte");
+    ASSERT_EQ(song->data[0x2F], 0x12, "cry: length high byte");
+    ASSERT_EQ(song->data[0x26], 7, "cry: release");
+    ASSERT_EQ(song->data[0x20], 0x44, "cry: progress word (little-endian)");
+    ASSERT_EQ(song->data[0x23], 0x11, "cry: progress word high byte");
+    m4a_song_free(song);
+}
+
+/* One cry, frame by frame, against its probe: Cry_Pidgey (gCryTable 15,
+ * 1902 DPCM samples at 10512 Hz) on cry player 0, build/probe/cry_pidgey.txt
+ * (plan, "SoundMain timing probe, step 5").  The engine's mixer plays a
+ * stand-in sample of the same length and rate, so the channel dies on the
+ * same frame as mgba's (14) and the tick's chain walk, the EOT at tick 141
+ * (frame 143, the sample long gone) and the finished tick follow. */
+static void test_sequencer_cycles_cry(void)
+{
+    printf("Testing sequencer CgbSound entry on a cry (cry_pidgey probe)...\n");
+    static int8_t decoded[1902 + 2 * M4A_DPCM_BLOCK_SAMPLES];
+    WaveData *wd = make_dpcm_wave(1902, 0, 0, decoded);
+    wd->freq = 10512u << 10;            /* every cry sample's rate */
+    static ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_CRY;         /* `cry` macro: compressed, key 60, 255 / 0 / 255 / 0 */
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].decay = 0;
+    voices[0].sustain = 0xFF;
+    voices[0].release = 0;
+
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    M4ASong *song = m4a_cry_song_new(&p);
+    ASSERT(song != NULL, "cry cycles: song built");
+    if (!song) { free(wd); return; }
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&seq, M4A_PLAYER_CRY0), 0, "cry cycles: cry player 0");
+    m4a_engine_boot(&engine, false);
+    m4a_sequencer_start(&seq, song);
+    ASSERT_EQ(seq.trackCount, 1, "cry cycles: one track on the two-track player");
+
+    /* mgba's CgbSound entry, frames 3..145 (cry_pidgey.txt.frames). */
+    static float outL[4096], outR[4096];
+    int mismatches = 0;
+    for (int k = 3; k <= 145; k++) {
+        int expected = k == 3 ? 4077 : k < 14 ? 1596 : k == 14 ? 1689 : k < 143 ? 1576
+                     : k == 143 ? 1810 : k == 144 ? 1192 : 1007;
+        advance_frames(&engine, 1, outL, outR);
+        if (seq.frameCycles != expected) {
+            if (mismatches++ < 5)
+                printf("  frame %d: engine %d, mgba %d\n", k, seq.frameCycles, expected);
+        }
+    }
+    ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the cry_pidgey probe on frames 3..145 (cry 0)");
+    ASSERT(m4a_sequencer_finished(&seq), "sequencer: the cry finished");
+    ASSERT_EQ(seq.noteCount, 1, "sequencer: one TIE");
+    ASSERT_EQ(seq.clock, 142, "sequencer: 142 ticks (the start tick, 140 xwait ticks, the EOT tick)");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -4208,6 +4356,8 @@ int main(void)
     test_sequencer_track_stop_chain();
     test_sequencer_players();
     test_sequencer_cycles_se2();
+    test_cry_song();
+    test_sequencer_cycles_cry();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

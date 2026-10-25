@@ -27,6 +27,7 @@
 #include "m4a_engine.h"
 #include "m4a_reverb.h"
 #include "m4a_song.h"
+#include "m4a_cry.h"
 #include "m4a_sequencer.h"
 #include "voicegroup_loader.h"
 
@@ -721,6 +722,7 @@ static void print_usage(const char *prog)
     fprintf(stderr,
         "Usage: %s <project_root> <voicegroup> --midi <file.mid> [options]\n"
         "       %s <project_root> [<voicegroup>] --song <file.s> [options]\n"
+        "       %s <project_root> --cry <id> [options]\n"
         "\n"
         "Required:\n"
         "  <project_root>              Path to pokeemerald/pokefirered project root\n"
@@ -731,6 +733,10 @@ static void print_usage(const char *prog)
         "                              MPlayMain sequencer port.  Master volume, reverb\n"
         "                              and the voicegroup are baked into the .s file, so\n"
         "                              --song-volume / --reverb are ignored on this path.\n"
+        "  --cry <id>                  a Pokemon cry: gCryTable[id] (sound/cry_tables.inc)\n"
+        "                              played as the game does (PlayCryInternal's\n"
+        "                              CRY_MODE_NORMAL defaults: volume 120, pan 0, pitch\n"
+        "                              15360, length 140, priority 10) on cry player 0\n"
         "\n"
         "Output (at least one required):\n"
         "  --output <file.wav>         Write rendered audio to WAV file\n"
@@ -750,10 +756,12 @@ static void print_usage(const char *prog)
         "  --tail <seconds>            Silence after last event, no loop markers (default: 3.0)\n"
         "\n"
         "Compiled-song options (--song):\n"
-        "  --player <bgm|se1|se2|se3>  the music player the song plays on, as the game's\n"
+        "  --player <bgm|se1|se2|se3|cry0|cry1>\n"
+        "                              the music player the song plays on, as the game's\n"
         "                              song table names it (default: bgm; a sound\n"
         "                              effect's player has 3 / 9 / 1 tracks and its own\n"
-        "                              position in SoundMain's MPlayMain chain)\n"
+        "                              position in SoundMain's MPlayMain chain; --cry\n"
+        "                              plays on cry0 unless told otherwise)\n"
         "  --psg-log <file>            log every PSG register write with its CPU cycle\n"
         "  --seq-log <file>            log each frame's modeled CgbSound entry cycle\n"
         "\n"
@@ -767,7 +775,7 @@ static void print_usage(const char *prog)
         "                                (fadeout occupies the final --fadeout seconds)\n"
         "  (with --song, loop-count counts passes through the song's GOTO; the song's\n"
         "   FINE ends the render after --tail seconds)\n",
-        prog, prog);
+        prog, prog, prog);
 }
 
 /* ========================================================================
@@ -778,7 +786,8 @@ static void print_usage(const char *prog)
 typedef struct {
     const char *projectRoot;
     const char *voicegroup;      /* NULL: use the song header's */
-    const char *songPath;
+    const char *songPath;        /* --song, or NULL with --cry */
+    int cry;                     /* --cry: gCryTable index, or -1 */
     bool respectBaseMidiKey, portamento, pwm;
     int maxChannels;
     double sampleRate;
@@ -790,10 +799,11 @@ typedef struct {
     int player;                  /* --player: M4A_PLAYER_* the song plays on */
 } SongRenderOpts;
 
-/* --player bgm|se1|se2|se3 -> M4A_PLAYER_*, or -1 */
+/* --player bgm|se1|se2|se3|cry0|cry1 -> M4A_PLAYER_*, or -1 */
+static const char *const kPlayerNames[M4A_PLAYER_COUNT] = { "bgm", "se1", "se2", "se3", "cry0", "cry1" };
 static int parse_player(const char *name)
 {
-    static const char *const names[M4A_PLAYER_COUNT] = { "bgm", "se1", "se2", "se3" };
+    const char *const *names = kPlayerNames;
     for (int i = 0; i < M4A_PLAYER_COUNT; i++)
         if (strcmp(name, names[i]) == 0)
             return i;
@@ -831,34 +841,11 @@ static int grow_buffers(float **l, float **r, uint64_t *cap, uint64_t need, uint
     return 0;
 }
 
-static int render_song(const SongRenderOpts *o, float **outL, float **outR,
-                       uint64_t *outTotal, uint64_t *outFadeStart)
+/* Play a loaded song through the sequencer on the chosen player.  Takes
+ * ownership of `song` and `vg`. */
+static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceGroup *vg,
+                            float **outL, float **outR, uint64_t *outTotal, uint64_t *outFadeStart)
 {
-    char err[256];
-    printf("Parsing song file: %s\n", o->songPath);
-    M4ASong *song = m4a_song_load(o->songPath, err, sizeof(err));
-    if (!song) {
-        fprintf(stderr, "Failed to parse %s: %s\n", o->songPath, err);
-        return -1;
-    }
-    printf("  %s: %u tracks, %u bytes, priority %u, reverb %s%u, voicegroup %s\n",
-           song->name, song->trackCount, song->size, song->priority,
-           (song->reverb & 0x80) ? "" : "(unset) ", song->reverb & 0x7F, song->voicegroup);
-
-    const char *vgName = o->voicegroup ? o->voicegroup : song->voicegroup;
-    if (o->voicegroup && strcmp(o->voicegroup, song->voicegroup) != 0)
-        printf("  Voicegroup override: %s (song says %s)\n", o->voicegroup, song->voicegroup);
-
-    printf("Loading voicegroup '%s' from %s...\n", vgName, o->projectRoot);
-    fflush(stdout);
-    LoadedVoiceGroup *vg = voicegroup_load(o->projectRoot, vgName, NULL);
-    if (!vg) {
-        fprintf(stderr, "Failed to load voicegroup '%s'\n", vgName);
-        m4a_song_free(song);
-        return -1;
-    }
-    printf("Voicegroup loaded successfully.\n");
-
     M4AEngine engine;
     m4a_engine_init(&engine, (float)o->sampleRate);
     m4a_engine_set_voicegroup(&engine, vg->voices);
@@ -871,9 +858,15 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
 
     M4ASequencer seq;
     m4a_sequencer_init(&seq, &engine);
-    m4a_sequencer_set_player(&seq, o->player);
+    if (m4a_sequencer_set_player(&seq, o->player) != 0) {
+        fprintf(stderr, "Error: no music player %d\n", o->player);
+        m4a_engine_destroy(&engine);
+        voicegroup_free(vg);
+        m4a_song_free(song);
+        return -1;
+    }
     if (o->player != M4A_PLAYER_BGM)
-        printf("  Music player: SE%d (%u tracks)\n", o->player, seq.maxTracks);
+        printf("  Music player: %s (%u tracks)\n", kPlayerNames[o->player], seq.maxTracks);
     if (song->trackCount > seq.maxTracks)
         printf("  Note: the player has %u tracks; the song's other %u are not played\n",
                seq.maxTracks, song->trackCount - seq.maxTracks);
@@ -973,6 +966,70 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
     return 0;
 }
 
+static int render_song(const SongRenderOpts *o, float **outL, float **outR,
+                       uint64_t *outTotal, uint64_t *outFadeStart)
+{
+    char err[256];
+    printf("Parsing song file: %s\n", o->songPath);
+    M4ASong *song = m4a_song_load(o->songPath, err, sizeof(err));
+    if (!song) {
+        fprintf(stderr, "Failed to parse %s: %s\n", o->songPath, err);
+        return -1;
+    }
+    printf("  %s: %u tracks, %u bytes, priority %u, reverb %s%u, voicegroup %s\n",
+           song->name, song->trackCount, song->size, song->priority,
+           (song->reverb & 0x80) ? "" : "(unset) ", song->reverb & 0x7F, song->voicegroup);
+
+    const char *vgName = o->voicegroup ? o->voicegroup : song->voicegroup;
+    if (o->voicegroup && strcmp(o->voicegroup, song->voicegroup) != 0)
+        printf("  Voicegroup override: %s (song says %s)\n", o->voicegroup, song->voicegroup);
+
+    printf("Loading voicegroup '%s' from %s...\n", vgName, o->projectRoot);
+    fflush(stdout);
+    LoadedVoiceGroup *vg = voicegroup_load(o->projectRoot, vgName, NULL);
+    if (!vg) {
+        fprintf(stderr, "Failed to load voicegroup '%s'\n", vgName);
+        m4a_song_free(song);
+        return -1;
+    }
+    printf("Voicegroup loaded successfully.\n");
+    return render_sequenced(o, song, vg, outL, outR, outTotal, outFadeStart);
+}
+
+/* --cry: gCryTable[id] through the cry song template (m4a_cry.h), as the
+ * ROM's StartCry / the game's PlayCryInternal play it. */
+static int render_cry(const SongRenderOpts *o, float **outL, float **outR,
+                      uint64_t *outTotal, uint64_t *outFadeStart)
+{
+    char symbol[128];
+    if (voicegroup_cry_table_symbol(o->projectRoot, o->cry, symbol, sizeof(symbol)) != 0) {
+        fprintf(stderr, "Error: no gCryTable entry %d in %s/sound/cry_tables.inc\n", o->cry, o->projectRoot);
+        return -1;
+    }
+    printf("Cry %d: %s\n", o->cry, symbol);
+    fflush(stdout);
+    LoadedVoiceGroup *vg = voicegroup_load_cry(o->projectRoot, symbol, NULL);
+    if (!vg) {
+        fprintf(stderr, "Failed to load cry sample '%s'\n", symbol);
+        return -1;
+    }
+    const WaveData *wd = vg->voices[0].wav;
+    printf("  %s: %u samples at %u Hz, %s%s\n", symbol, wd->size, wd->freq >> 10,
+           (vg->voices[0].type & VOICE_TYPE_CMP) ? "DPCM" : "uncompressed (no built .bin: plays as DirectSound)",
+           (wd->status & 0x4000) ? ", loops" : "");
+    M4ACryParams cp;
+    m4a_cry_params_default(&cp);
+    M4ASong *song = m4a_cry_song_new(&cp);
+    if (!song) {
+        voicegroup_free(vg);
+        return -1;
+    }
+    printf("  %s: volume %u, pan %d, pitch %d, length %u, priority %u, %u track%s\n",
+           song->name, cp.volume, cp.pan, cp.pitch, cp.length, cp.priority,
+           song->trackCount, song->trackCount == 1 ? "" : "s");
+    return render_sequenced(o, song, vg, outL, outR, outTotal, outFadeStart);
+}
+
 /* Loop-expansion bookkeeping: which notes are keyed on (note-on emitted, no
  * note-off yet), per engine track and key, so each loop wrap can release the
  * ones whose note-off lies beyond the loop end.  keyedEv keeps the note-on
@@ -1069,6 +1126,7 @@ int main(int argc, char *argv[])
     int         firstOpt      = vgName ? 3 : 2;
     const char *midiPath      = NULL;
     const char *songPath      = NULL;
+    int         cryId         = -1;
     bool        songVolumeSet = false;
     bool        reverbSet     = false;
     const char *outputPath    = NULL;
@@ -1089,12 +1147,19 @@ int main(int argc, char *argv[])
     const char *psgLogPath    = NULL;
     const char *seqLogPath    = NULL;
     int         player        = M4A_PLAYER_BGM;
+    bool        playerSet     = false;
 
     for (int i = firstOpt; i < argc; i++) {
         if (strcmp(argv[i], "--midi") == 0 && i + 1 < argc) {
             midiPath = argv[++i];
         } else if (strcmp(argv[i], "--song") == 0 && i + 1 < argc) {
             songPath = argv[++i];
+        } else if (strcmp(argv[i], "--cry") == 0 && i + 1 < argc) {
+            cryId = atoi(argv[++i]);
+            if (cryId < 0) {
+                fprintf(stderr, "Error: --cry takes a gCryTable index\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
             outputPath = argv[++i];
         } else if (strcmp(argv[i], "--play") == 0) {
@@ -1135,9 +1200,10 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--player") == 0 && i + 1 < argc) {
             player = parse_player(argv[++i]);
             if (player < 0) {
-                fprintf(stderr, "Error: --player must be bgm, se1, se2 or se3\n");
+                fprintf(stderr, "Error: --player must be bgm, se1, se2, se3, cry0 or cry1\n");
                 return 1;
             }
+            playerSet = true;
         } else if (strcmp(argv[i], "--tail") == 0 && i + 1 < argc) {
             tailSeconds = atof(argv[++i]);
             if (tailSeconds < 0.0) tailSeconds = 0.0;
@@ -1159,11 +1225,13 @@ int main(int argc, char *argv[])
         }
     }
 
-    if ((midiPath == NULL) == (songPath == NULL)) {
-        fprintf(stderr, "Error: exactly one of --midi or --song is required\n\n");
+    if ((midiPath != NULL) + (songPath != NULL) + (cryId >= 0) != 1) {
+        fprintf(stderr, "Error: exactly one of --midi, --song or --cry is required\n\n");
         print_usage(argv[0]);
         return 1;
     }
+    if (cryId >= 0 && vgName)
+        fprintf(stderr, "Note: --cry ignores the <voicegroup> argument (the cry's sample is its voicegroup)\n");
     if (midiPath && !vgName) {
         fprintf(stderr, "Error: --midi needs a <voicegroup> argument\n\n");
         print_usage(argv[0]);
@@ -1180,12 +1248,14 @@ int main(int argc, char *argv[])
     if (midiPath && player != M4A_PLAYER_BGM)
         fprintf(stderr, "Note: --player only applies to --song (the MIDI path has no music player)\n");
 
-    if (songPath) {
+    if (songPath || cryId >= 0) {
         if (songVolumeSet || reverbSet)
-            fprintf(stderr, "Note: --song-volume / --reverb are ignored with --song "
-                            "(the .s file carries its own master volume and reverb)\n");
+            fprintf(stderr, "Note: --song-volume / --reverb are ignored with --song / --cry "
+                            "(the song data carries its own volume and reverb)\n");
+        if (cryId >= 0 && !playerSet)
+            player = M4A_PLAYER_CRY0;      /* SetPokemonCryTone from silence */
         SongRenderOpts o = {
-            .projectRoot = projectRoot, .voicegroup = vgName, .songPath = songPath,
+            .projectRoot = projectRoot, .voicegroup = vgName, .songPath = songPath, .cry = cryId,
             .respectBaseMidiKey = respectBaseMidiKey,
             .portamento = portamento, .pwm = pwm, .maxChannels = maxChannels,
             .sampleRate = sampleRate, .pcmFreqMode = pcmFreqMode,
@@ -1197,7 +1267,8 @@ int main(int argc, char *argv[])
         };
         float *sl, *sr;
         uint64_t sTotal, sFade;
-        if (render_song(&o, &sl, &sr, &sTotal, &sFade) != 0)
+        if ((cryId >= 0 ? render_cry(&o, &sl, &sr, &sTotal, &sFade)
+                        : render_song(&o, &sl, &sr, &sTotal, &sFade)) != 0)
             return 1;
         printf("Rendering complete.\n");
         int rc = output_audio(sl, sr, sTotal, sampleRateHz, outputPath, doPlay);

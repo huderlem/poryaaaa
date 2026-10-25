@@ -1,6 +1,7 @@
 #ifndef VOICEGROUP_LOADER_H
 #define VOICEGROUP_LOADER_H
 
+#include <stddef.h>
 #include "m4a_engine.h"
 
 #define VOICEGROUP_SIZE 128
@@ -123,6 +124,26 @@ LoadedSampleSet *voicegroup_load_samples(
     int keysplitCount, const VoicegroupLoaderConfig *config);
 
 void voicegroup_free_samples(LoadedSampleSet *set);
+
+/*
+ * A Pokemon cry's voicegroup: voice 0 is the `cry <sampleSymbol>` voice
+ * exactly as a voicegroup line would load it (voice_directsound_compressed
+ * 60, 0, sample, 255, 0, 255, 0: the DPCM .bin when the project is built,
+ * else the uncompressed source with the CMP bit cleared); the other voices
+ * are empty.  This is what SetPokemonCryTone hands MPlayStart as the cry
+ * song's tone (m4a_cry.h).  Free with voicegroup_free().  NULL when the
+ * symbol does not resolve.
+ */
+LoadedVoiceGroup *voicegroup_load_cry(const char *projectRoot, const char *sampleSymbol,
+                                      const VoicegroupLoaderConfig *config);
+
+/*
+ * The sample symbol of gCryTable[index] from <projectRoot>/sound/cry_tables.inc
+ * (the `cry` lines after the `gCryTable::` label, in order).  Returns 0 and
+ * writes the symbol (e.g. "Cry_Bulbasaur") to `out`, or -1 when the file or
+ * the entry is missing.
+ */
+int voicegroup_cry_table_symbol(const char *projectRoot, int index, char *out, size_t outLen);
 
 /*
  * Set an optional file path for diagnostic logging inside the voicegroup loader.

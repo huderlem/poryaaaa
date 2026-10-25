@@ -43,12 +43,17 @@ extern "C" {
 /* Emerald's music players (sound/music_player_table.inc, gMPlayTable order;
  * the `ms` field of a song_table.inc entry): the BGM player has 10 tracks,
  * SE1 3, SE2 9, SE3 1.  A song with more tracks than its player plays only
- * the first ones (MPlayStart), in the game and in the accuracy ROM. */
+ * the first ones (MPlayStart), in the game and in the accuracy ROM.  The
+ * two cry players (gPokemonCryMusicPlayers, m4aSoundInit, two tracks
+ * each) are opened after SE3; SetPokemonCryTone picks the first one whose
+ * track is free, cry 0 from silence (m4a_cry.h). */
 enum {
     M4A_PLAYER_BGM = 0,
     M4A_PLAYER_SE1 = 1,
     M4A_PLAYER_SE2 = 2,
     M4A_PLAYER_SE3 = 3,
+    M4A_PLAYER_CRY0 = 4,
+    M4A_PLAYER_CRY1 = 5,
     M4A_PLAYER_COUNT
 };
 #define M4A_SEQ_DEFAULT_MAX_TRACKS 10
@@ -128,8 +133,8 @@ void m4a_sequencer_detach(M4ASequencer *seq);
 /* Select the music player (M4A_PLAYER_*; the song table's `ms` field):
  * sets the track count and the MPlayMain chain position the timing model
  * charges.  Call before m4a_sequencer_start; init selects the BGM player.
- * An out-of-range value selects the BGM player. */
-void m4a_sequencer_set_player(M4ASequencer *seq, int player);
+ * Returns 0, or -1 for an out-of-range value, which changes nothing. */
+int m4a_sequencer_set_player(M4ASequencer *seq, int player);
 
 /* MPlayStart: begin playing `song` (which must outlive playback).  Applies the
  * header's reverb when its SOUND_MODE_REVERB_SET bit is set.  The engine's
