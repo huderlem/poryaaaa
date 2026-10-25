@@ -3549,6 +3549,60 @@ return at once); a future `songs.json` key for the second cry needs
 a 4.0 s rung for the 240-frame probe; step 11's heading sentence "the
 engine runs one sequencer per render" is historical.
 
+### Done: milestone 4 slice 8b-ii, the two-cry corpus rows (2026-10-25)
+
+The runner, `songs.json`, `claim_check.sh` and the baseline only: no engine,
+plugin, `poryaaaa_render`, ROM or `test_engine.c` change; the two runs of
+slice 8b-i gate c become corpus rows.
+
+**The keys.**  A cry entry may carry `"id2"` and `"start_frame2"` (both or
+neither; the runner skips an entry with one of them with a warning), named
+as `mgba_render` names them: the second cry's gCryTable index, played at
+CRY_MODE_NORMAL's defaults, and the VBlank (1..255, the ROM's `u8
+startFrame2`) its `StartCry` runs on -- its start tick on engine frame
+`start_frame2 + 2`.  **The runner lines**: `mgba_render ... --id2 N
+--start-frame2 F` (AccParams bytes 12..14 through the existing patcher) and
+`poryaaaa_render --cry N ... --cry2 N --cry2-start-frame F` (after the
+`--cry-*` parameters; cry player 1 chained after cry 0's, slice 8b-i);
+`--input midi` skips the entry with the cry message as before.  The
+reference frame count is the runner's existing `seconds -> ceil(seconds *
+cpu / frame) + 2`: 182 for 3.0 s (gate c's count) and **241 for 4.0 s where
+gate c used 242**; the comparison truncates to the shorter file, the 4.0 s
+poryaaaa render (192000 samples against the 241-frame reference's 192996),
+so the 241- and 242-frame references give the same null to full precision
+(-45.3057 dB on both, checked with `metrics.compare_files`; the rule stays).
+`claim_check.sh`'s cry line adds `--cry2 / --cry2-start-frame` from the
+keys and a 4.0 s rung for a probe over 200 frame lines (the 240-frame
+jynx_wailord probe has 239), so the two `build/probe/cry_second_*.txt` logs
+are diffed: 0 mgba writes against 0 engine writes each (cries write no PSG
+register), counted among the diffed tests.
+
+**The two rows** (`songs.json`, named after the probe logs):
+`cry_second_bulbasaur_pidgey` (id 0, id2 15, start_frame2 20, 3.0 s) and
+`cry_second_jynx_wailord` (id 123, id2 381, start_frame2 60, 4.0 s).
+**Gate a**: (a) null **-60.4 dB**, worst 1 s **-59.9** (at 0.2 s), lag 0.0,
+gain 1.00001, ref / test -28.8 dBFS; (b) null **-45.3 dB**, worst **-42.6**
+(at 0.1 s), lag 0.0, gain 0.99998, -22.1 dBFS -- gate c's numbers to the
+digit, both PASS at -40; the residual the PCM scheduler-lateness floor at
+the `.events` crossings (3 / 24 `timer0 slot_crossed`, attributed run by
+run in slice 8b-i's gate c).  The 62 existing rows identical to
+`2026-10-25_second-cry-rom.json` in every `report.json` field
+(`compare_reports.py` 0 regressions, every row 0.0, the two new rows "only
+in after").  **Gate b**: `claim_check.sh` against the previous baseline --
+57 tests diffed (55 + the two new logs), 0 moved; harness 55/64; unit
+1471/1471 (unchanged), blip 49112/0, songs 561/561.  **Gate c, the
+baseline**: `test/accuracy/baselines/2026-10-25_two-cry-rows.json` / `.txt`
+from the full default run, 64 rows, **55/64** at -40 dB (the nine
+documented FAILs unchanged: se_rain_stop, cry_pidgey, cry_jynx,
+cry_bulbasaur_howl, cry_pidgey_quiet, cry_bulbasaur_reverse,
+cry_pidgey_echo_start, cry_pidgey_echo_start_chorus, cry_jynx_high_pitch).
+
+**What comes next**: the next ground-truth probe is a cry over music (BGM
+and a cry player in one chain, the latent cross-player steal of slice
+8b-i's review reachable) or a cry while an SE plays -- a probe step and a
+ROM parameter first, not an engine change; a second cry while both cry
+players are busy (the `maxClock` replacement) stays refused.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

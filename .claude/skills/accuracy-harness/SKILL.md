@@ -322,7 +322,16 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   engine index, 2 / 3 for cry 1).  The two probed runs are `--cry 0
   --cry2 15 --cry2-start-frame 20` (3 s, `cry_second_bulbasaur_pidgey`)
   and `--cry 123 --cry2 381 --cry2-start-frame 60` (4 s,
-  `cry_second_jynx_wailord`); no corpus entry yet (slice 8b-ii).
+  `cry_second_jynx_wailord`), the corpus entries of the same names
+  (slice 8b-ii): a cry entry's optional `"id2"` / `"start_frame2"` pair
+  (both or neither, as `mgba_render` names them) is the second cry's
+  gCryTable index at the defaults and the VBlank it starts on; the runner
+  passes `--id2 N --start-frame2 F` to `mgba_render` and `--cry2 N
+  --cry2-start-frame F` to `poryaaaa_render`, the reference frame count
+  stays `seconds -> frames + 2` (182 / 241), `--input midi` skips it like
+  any cry, and `claim_check.sh` adds the two flags to its cry line and
+  renders a 240-frame probe for 4 s.  Their residual is the one-cry
+  rows' floor (-60 / -45 dB, every run a one-sample slot crossing).
   Optional `"pitch"`, `"pan"`, `"volume"`, `"length"`, `"release"`,
   `"chorus"` keys (SetPokemonCryPitch / Panpot / Volume / Length / Release
   / Chorus's arguments; take the values from `PlayCryInternal`'s modes in
