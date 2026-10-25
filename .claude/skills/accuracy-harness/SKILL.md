@@ -281,7 +281,7 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
 - Cry: `{"name": "cry_<species>", "type": "cry", "id": N, "seconds": S}`,
   N the gCryTable index (the `cry` lines of `sound/cry_tables.inc` from
   0, then the `cry_reverse` lines after `gCryTable_Reverse::` continuing
-  the count: 388 + species is the reversed cry, type 0x30 = CMP | REV,
+  the count: 388 + the forward cry index is the reversed cry, type 0x30 = CMP | REV,
   the same sample played backwards; the ROM's one block holds both
   labels, `voicegroup_cry_table_entry` reads it the same way and
   `poryaaaa_render --cry N` prints "reversed").  The ROM's `StartCry` plays `gCryTable[N]` with `PlayCryInternal`'s

@@ -1125,7 +1125,7 @@ cry_pidgey_roar2 1 (2304512).
 inside the block `sound/cry_tables.inc` assembles (`gCryTable::`, 388 `cry`
 lines, `gCryTable_Reverse::`, 388 `cry_reverse` lines), so the test ROM's
 `StartCry(index)` with `&gCryTable[index]` reaches the reversed entries at
-388 + species: the map has `gCryTable` 0x0802afac and `gCryTable_Reverse`
+388 + the forward index (Bulbasaur's forward cry is index 0, its reverse 388): the map has `gCryTable` 0x0802afac and `gCryTable_Reverse`
 0x0802c1dc, 0x1230 = 388 * 12 apart.  The runner's `"id"` stays the linear
 index.  The 12-byte entries read from the ROM (type, key, _, pan, wav,
 attack, decay, sustain, release):
@@ -1145,7 +1145,13 @@ Key 60, pan 0, envelope 255 / 0 / 255 / 0 on all six, as
 samples are the forward ones byte for byte: 16-byte headers
 `01 00 00 00 00 40 a4 00 00 00 00 00 <size LE>` (type 1 = DPCM, freq
 10764288 = 10512 Hz, loopStart 0; sizes 8183 / 1902 / 23524), the data
-`size / 64 + 1` blocks of 0x21 bytes.
+`size / 64` full blocks of 0x21 bytes and a partial last block holding only
+the nibbles the remaining samples need (the next sample's header follows 4
+/ 6 / 12 bytes before a full block's end); the loader allocates
+`size / 64 + 1` full blocks zero-filled, and since Unk2 always decodes 33
+bytes the GBA's decode of the last block reads those few header bytes
+where the port reads zeros -- for sample indices >= size only, which
+neither direction outputs (the review below).
 
 **The loader.**  `voicegroup_cry_table_symbol` stopped at the
 `gCryTable_Reverse::` label, so no index past 387 resolved and every cry
@@ -2404,6 +2410,44 @@ loader fix, its unit test and probe step 8; the corpus, the unit tests
 (the variants rows, `test_pcm_dpcm_reverse_walk`,
 `test_sequencer_cycles_cry_growl1_reverse`), README and skill; the
 baseline and this section; then the review paragraph below.
+
+**Code review of the reverse-cry slice (2026-10-25).**  Two independent
+reviews (reviewer 1: SoundMainRAM_Unk1's SF_SPECIAL flip and CMP index
+conversion, the `_081DD3C0` reversed walk crossing by crossing (lr == 1 and
+lr > 1, the `bic`, the signed `ble`, the word cadence, the `add r3, 2`
+exit, the `_081DD4F4` partial-word stop), Unk2's decoder and block address,
+the shared sDecodingBuffer across channel orders, the FIX step, the
+release / IEC / stop path's type-independence, ply_note's fields and the
+SF_START placement, every unit-test expectation re-derived from the
+source arithmetic; reviewer 2: the table lookup line by line against the
+781-line cry_tables.inc, the macros' bytes, the six ROM entries read
+again byte for byte plus the last pair (387 / 775) and the data after
+776, StartCry's `ldrh` index and `idx * 12` from the disassembly, the
+AccParams layout against crt0 and both patchers' bytes (id 511 as a
+u16), the three entries' template bytes by hand and the modes' fields
+against sound.c, the runner / claim_check plumbing, a grep for stale
+type-0x20 or index-below-388 assumptions, the docs against the sources).
+Everything the slice relies on is confirmed.  **One divergence, both
+reviews independently, not adopted here**: the look-behind of sample 0
+at the end of a completed reverse walk (Unk2 with r3 = -1, block
+0x3FFFFFF at `wav + 0x83FFFFEF`, open bus) decodes to a non-zero value on
+the GBA and to 0 in the port -- the run attributed and measured above
+(-inf with mgba's 33 bytes), a mixer change deferred to its own slice
+and review by the task's rule.  **Pre-existing, unreached**: the
+start-offset clamp for an offset past the sample end (slice 3's
+host-memory guard; the GBA mixes bytes past the sample to the first
+crossing, the port the extra block's; `SetPokemonCryProgress(0)` is the
+only caller).  **Cosmetic, left**: the port presets `xpi` at note-on
+where ply_note does not (Unk1 resets it on every call before any read);
+the loader's `cry_uncomp` / `cry_reverse_uncomp` spellings are not in
+vanilla music_voice.inc (eventide's; harmless).  **Cosmetic, adopted**:
+"388 + species" read "388 + the forward index" (Bulbasaur's forward cry is
+index 0, `SpeciesToCryId(species - 1)`) in the help text, README, skill
+and plan; the step-8 sentence that said the ROM holds `size / 64 + 1`
+full blocks (that is the loader's allocation; the ROM's last block is
+partial, see above).  No code changed after the baseline, so
+`2026-10-25_cry-reverse.json` stands as saved (its own `claim_check.sh`
+run: 50/57, 50 diffed, 0 moved writes, 1328/1328, blip 0, songs 561/561).
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

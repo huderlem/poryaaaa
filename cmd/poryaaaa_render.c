@@ -734,7 +734,7 @@ static void print_usage(const char *prog)
         "                              and the voicegroup are baked into the .s file, so\n"
         "                              --song-volume / --reverb are ignored on this path.\n"
         "  --cry <id>                  a Pokemon cry: gCryTable[id] (sound/cry_tables.inc; the cry_reverse\n"
-        "                              entries continue the count after the cry lines: 388 + species)\n"
+        "                              entries continue the count after the cry lines: 388 + the forward index)\n"
         "                              played as the game does (PlayCryInternal's\n"
         "                              CRY_MODE_NORMAL defaults: volume 120, pan 0, pitch\n"
         "                              15360, length 140, priority 10) on cry player 0\n"
