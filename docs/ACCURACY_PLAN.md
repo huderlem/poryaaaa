@@ -1589,7 +1589,122 @@ frame costs: its start tick on its frame, the steady tick, the whole-frame
 CgbSound entry with both playing, the death / unlink frames and any
 `_081DCFB0` stamps are read from the probe below, not predicted.
 
-**Probe runs**: recorded below after the runs.
+**The probe runs** (type 1, the new ROM's `syms.nm`; each run twice, with
+`gPokemonCryMusicPlayers` and with `gPokemonCryMusicPlayers[1]` as the
+eighth argument -- the two raw logs are identical in every cycle, only the
+MPlayMain-entry annotation of the selected player differs, so the `_p1`
+`.frames` files carry cry player 1's track flags and tempoC;
+`build/probe/cry_second_bulbasaur_pidgey.txt` / `_p1` and
+`cry_second_jynx_wailord.txt` / `_p1`; the `cry_` prefix without a songs.json
+entry makes `claim_check.sh` skip them).  (a) Cry_Bulbasaur (gCryTable 0) at
+the defaults from VBlank 1 and Cry_Pidgey (15) at the defaults from VBlank
+**20**, 180 frames (`... 15360 0 120 140 0 0 15 20`); (b) Cry_Jynx (123) then
+Cry_Wailord (381) from VBlank **60**, 240 frames (`... 381 60`).  Cycles
+from VBlank line 160.  **Frame convention**: `startFrame2` N gives the
+second cry's start tick on engine frame **N + 2** (22 / 62), as `startFrame`
+1 gives the first's on frame 3.
+
+**Which player**: cry player **1**, as stated above.  r7 at `_081DD9BC` is
+0x03001FC8 on 283 frames of each run (0x03001F88 on the other 283); the
+second cry's `ply_note` runs with r5 = 0x030022F8 (cry 1's track 0) and
+takes **channel 1**, r4 = 0x03001000 at `_081DDC40` / `_081DDC54` (frame 22,
+cycle 6224222 in (a); frame 62, 17460062 in (b)); the first cry's channel is
+0x03000FC0 on track 0x03002258 (frame 3, cycle 886476, both runs).
+
+**Entry positions with both players live** (the same on every such frame of
+both runs, by state): the six MPlayMain entries at 291 / 346 / 401 / 456 /
+511 / 566 every frame, as always; the paused BGM / SE1 / SE2 / SE3 at
+`_081DDA6C` 637 / 700 / 763 / 826; cry 0 playing: FadeOutBody **914**,
+`_081DD9BC` **968**, its `_081DDA6C` at 1478 on a steady tick (body 510);
+cry 1 playing resumes **88** after cry 0's `_081DDA6C` (FadeOutBody 1566),
+`_081DD9BC` **54** later (1620), its body **510** on a steady tick (the same
+as cry 0's), its own `_081DDA6C` 2130 and CgbSound **55** after it (2185).
+Cry 1 alone (cry 0 paused, (a) frames 145..163, (b) 145..203): cry 0's paused
+`_081DDA6C` at **889** (= 826 + 63), FadeOutBody **977**, `_081DD9BC`
+**1031**, exit **55** -- step 5's est. row to the cycle.  So a playing cry
+player costs the frame 79 + its body whichever of the two it is (the 142
+head against the paused 63, the 55 tail), and the frame is **1007 + the sum
+over playing players of (79 + body)**: 1596 with one, 2185 with two.
+
+| player | state | body starts at | FadeOutBody | `_081DD9BC` | `_081DDA6C` -> CgbSound |
+|---|---|---|---|---|---|
+| cry 0 | playing | 826 | 914 | 968 | 118 (cry 1 paused) or cry 1's 142 + body + 55 |
+| cry 1 | playing, cry 0 paused | 889 | 977 | 1031 | 55 |
+| cry 1 | playing, cry 0 playing | cry 0's `_081DDA6C` (1478 steady) | +88 | +142 | 55 |
+
+**The frame skeleton** (CgbSound entry).  (a): 3 **4077** (the first start
+tick, as alone), 4..21 **1596**, 22 **4736** (the second cry's start tick =
+1596 + 79 + 3061), 23..32 **2185** (both alive), 33 **2278** (Pidgey's
+unlink tick on cry 1: + 93, `RealClearChain` under 0x03001FC8 at 1727),
+34..49 **2165** (cry 1's dead track - 20), 50 **2258** (Bulbasaur's unlink on
+cry 0, + 93, `RealClearChain` at 1075 -- the same frame as alone), 51..142
+**2145**, 143 **2379** (cry 0's EOT on an empty chain: `ply_endtie` ->
+`_081DD938` 54, `ply_fine` -> `_done` 16 -> `_081DD994` 28; + 234 as the
+one-cry 1810 = 1576 + 234), 144 **1761** (cry 0's finished tick 185 on cry
+1's 1576), 145..161 **1576** (cry 1 alone, dead track), 162 **1810** (cry 1's
+EOT, 22 + 140), 163 **1192**, 164 on **1007**.  (b): 3 4077, 4..61 1596, 62
+**4736**, 63..136 **2185**, 137 **2278** (Jynx's unlink on cry 0, as alone),
+138..142 **2165**, 143 **2399** (cry 0's EOT with cry 1's channel still alive:
+2165 + 234), 144 **1781** (= 1596 + 185), 145..180 **1596**, 181 **1689**
+(Wailord's unlink on cry 1: 62 + 119, the 59 frames after its start tick that
+it takes alone, 3 -> 122), 182..201 **1576**, 202 **1810** (cry 1's EOT, 62 +
+140), 203 1192, 204 on 1007.  The second player's steady tick is cry 0's
+to the cycle on every label (`_081DD9BC` -> `_081DD892` 48 -> `_081DD8B4` 20
+-> `_081DD8BA` 6 -> `_081DD938` 14, xcmd 54 + xwait 108, the wait path,
+`_081DD9A4` -> `_081DD9BC` 22, -> `_081DDA6C` 76); its EOT walk on 162 /
+202 is the one-track empty-chain walk (54, 16, 28).
+
+**The second start tick**: body **3061** against the first cry's 2991 (frame
+3 of cry_bulbasaur), **+70**, all of it in `ply_note`'s channel scan passing
+over channel 0: `_081DDBFA` -> `_081DDC14` **20** (ON, no STOP) ->
+`_081DDC18` **4** (no stopping candidate) -> `_081DDC24` **12** (equal
+priority, r0 = 0x0A against the note's 10) -> `_081DDC34` **22** (channel 0's
+track 0x03002258 below the note's 0x030022F8: the taken `bls`, the taken
+`bcc`, no candidate recorded) -> `_081DDBFA` **12** -> `_081DDC40` **14**
+(channel 1 free), then the first cry's sequence from `ClearChain` on, label
+for label (the RAM template's command costs of step 5).  The engine's
+existing constants compose it exactly: `M4A_CYC_SCAN_ON` 20 + `SCAN_ON_CMP` 4
++ `SCAN_CMP` 12 + `SCAN_EARLIER_TRACK` 22 + `SCAN_NEXT` 12 = 70, then
+`SCAN_FREE` 14 -- the pass-over the songs measured; nothing new.
+
+**Deaths and unlinks**: every channel of both runs ends through the count
+path -- **no `_081DCFB0` stamp** in either log, and every EOT finds an empty
+chain (`_081DD938` r3 = 0x3C after each `ply_endtie`, the track's `chan` 0;
+`ply_fine` -> `_done` 16).  (a) Pidgey (cry 1, channel 1) unlinks on frame
+**33** = 22 + 11 (alone 3 -> 14), Bulbasaur (cry 0, channel 0) on **50** as
+alone; (b) Jynx (cry 0) on **137** as alone, Wailord (cry 1) on **181** = 62 +
+119.  Length against pitch at the defaults (key 60, TUNE 0, 10512 Hz):
+Jynx's 23524 samples run 2.238 s, about 134 frames from frame 3, and
+Wailord's 20846 run 1.983 s, about 119 frames from frame 62, so both end
+before their EOTs (143 / 202); the release is 0 anyway.  The task's
+expectation of stamps on (b)'s EOT frames does not hold at the defaults;
+nothing is cut.  Deaths are the unlink frames.
+
+**Two channels on one track's chain: never.**  Each cry song is one track
+(chorus 0), each track's `chan` holds its one channel (`RealClearChain` prev
+0 / next 0 at all four unlinks), and the two live channels sit on different
+tracks of different players.  `_SKIP` 18 stays est.
+
+**Scheduler-lateness floor** (`.events` `L timer0`): (a) 3 crossings at
+3428099, 4551683, 5675267 = 0.2043, 0.2713, 0.3383 s; (b) 24 at 3428099,
+4551683, 5675267, 6798851, 7922435, 9046017, 11293187, 12416771, 13540355,
+14663939, 15787523, 16911107, 25899776, 27035906, 28159491, 29283075,
+30406659, 31530243, 32653827, 34900995, 36024579, 37148163, 39382790,
+41629952 = 0.2043, 0.2713, 0.3383, 0.4052, 0.4722, 0.5392, 0.6731, 0.7401,
+0.8071, 0.8740, 0.9410, 1.0080, 1.5437, 1.6115, 1.6784, 1.7454, 1.8124,
+1.8793, 1.9463, 2.0803, 2.1472, 2.2142, 2.3474, 2.4813 s.
+
+**Decomposition**: every measured frame of both runs is the sum of the
+existing per-player terms (the 1007 idle frame, 79 + body per playing
+player in SoundMain's order with cry 1's body after cry 0's) and the
+existing per-track and per-command terms inside each body (step 5's RAM
+template costs, the unlink + 93 and dead-track - 20, the empty-chain EOT +
+234, the finished tick 185, the scan pass-over 70).  Nothing in the two logs
+falls outside that model; no constant is derived, fitted or changed here.
+What the engine lacks is structural: one sequencer per render (one
+frameHook), so it cannot run cry player 1's body after cry player 0's on
+the same frame -- slice 8b.
+
 
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 

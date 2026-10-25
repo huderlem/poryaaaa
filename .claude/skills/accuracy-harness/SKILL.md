@@ -152,29 +152,38 @@ the `CgbSound_*` addresses appended for the compiled CgbSound:
 ```sh
 arm-none-eabi-nm build/accuracy/rom/accuracy_test.elf > build/probe/syms.nm
 cat >> build/probe/syms.nm <<'EOF2'
-0800106c t CgbSound_loop
-08001082 t CgbSound_active
-080010fc t CgbSound_step2
-08001114 t CgbSound_start
-080011f2 t CgbSound_nostart
-08001216 t CgbSound_oscoff
-08001264 t CgbSound_step
-08001278 t CgbSound_modvol
-08001358 t CgbSound_stepdone
-0800136a t CgbSound_envdone
-08001374 t CgbSound_pit
-080013ec t CgbSound_vol
-08001468 t CgbSound_done
-0800146c t CgbSound_next
+080010ac t CgbSound_loop
+080010c2 t CgbSound_active
+0800113c t CgbSound_step2
+08001154 t CgbSound_start
+08001232 t CgbSound_nostart
+08001256 t CgbSound_oscoff
+080012a4 t CgbSound_step
+080012b8 t CgbSound_modvol
+08001398 t CgbSound_stepdone
+080013aa t CgbSound_envdone
+080013b4 t CgbSound_pit
+0800142c t CgbSound_vol
+080014a8 t CgbSound_done
+080014ac t CgbSound_next
 EOF2
 ```
-(addresses of the 2026-10-25 ROM with the cry chorus parameter, CgbSound
-at 0x800103c: the slice 6 StartCry / StartTest grew main.c by 0x1c bytes
-and every ROM symbol after it moved by +0x1c with the bodies unchanged --
-the 2026-10-24 ROM with the length / release parameters had CgbSound at
-0x8001020 and each label 0x1c lower, the one before that 0x8000ff0.
+(addresses of the 2026-10-25 ROM with the second-cry parameters, CgbSound
+at 0x800107c: slice 8a's StartTest grew main.c by 0x40 bytes and every ROM
+symbol from AgbMain on moved by +0x40 with the bodies unchanged -- the
+2026-10-25 ROM with the cry chorus parameter had CgbSound at 0x800103c and
+each label 0x40 lower, the 2026-10-24 ROM with the length / release
+parameters 0x8001020, the one before that 0x8000ff0.
 Re-derive from `arm-none-eabi-objdump -d` of CgbSound if m4a.c, main.c or
-the toolchain changes -- the header of mgba_probe.c names each one.  The
+the toolchain changes -- the header of mgba_probe.c names each one.
+**Changing the ROM**: keep `AgbMain`'s boot path and per-frame loop
+instruction-identical (the second-cry wait lives in `StartTest` for that
+reason); two extra prologue instructions once moved the timer-0 start by 6
+cycles and, through mgba's ordering of a timer overflow against the DAC
+slot it coincides with, every DirectSound reference -- while the probe's
+`.frames` and lateness stayed put.  Before the harness, render pcm,
+pcm_cmp and cry_bulbasaur with `mgba_render` on the new ROM and `cmp` them
+against the current references (plan, probe step 11).  The
 ELF and map the CMake target writes are `build/accuracy/rom/accuracy_test.elf`
 / `.map`; `test/accuracy/rom/build/` is only a stale hand build if it
 exists, do not read symbols from it.)  The map still works for the function
@@ -295,6 +304,17 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   one: `mgba_probe ... 180 1 N build/probe/syms.nm gPokemonCryMusicPlayers`
   (type 1 = cry) and `probe_mplay.py --player CRY0 ...`; render with
   `--cry N` for the entry / cmd / track diffs (cries have no PSG writes).
+  A second cry while the first plays (ground truth only so far, slice 8a:
+  the engine runs one sequencer per render): `mgba_render --id2 N
+  --start-frame2 F` / the probe's fifteenth and sixteenth arguments after
+  the six cry parameters (`... 15360 0 120 140 0 0 N F`) start gCryTable[N]
+  at the defaults on VBlank F (start tick on engine frame F + 2); it takes
+  cry player 1 (`SetPokemonCryTone`'s first free player) and the next free
+  channel in index order; `gPokemonCryMusicPlayers[1]` as the eighth
+  argument (`symbol[N]` = N * 0x40 past the symbol) makes the `.frames`
+  summary read that player, `probe_mplay.py --player CRY1` prints its run.
+  Frame with both playing = 1007 + (79 + body) per playing player, cry 1's
+  body after cry 0's (plan, step 11).
   Optional `"pitch"`, `"pan"`, `"volume"`, `"length"`, `"release"`,
   `"chorus"` keys (SetPokemonCryPitch / Panpot / Volume / Length / Release
   / Chorus's arguments; take the values from `PlayCryInternal`'s modes in
