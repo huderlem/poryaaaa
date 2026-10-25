@@ -1590,6 +1590,121 @@ patched), and the probe's player argument already takes
 `baselines/2026-10-24_se.json` (43/44; 0 regressions, 0 improvements) and
 the three test binaries must pass as above.
 
+### Done: milestone 4 slice 2, cries at the defaults (2026-10-24)
+
+Four cries join the corpus as test type `cry` (`songs.json`, `"type":
+"cry"`, `"id"` = the gCryTable index; `accuracy.py --tests cry`): the ROM
+plays `gCryTable[id]` through `StartCry` with `PlayCryInternal`'s
+CRY_MODE_NORMAL values (volume 120, pan 0, pitch 15360 = key 60 at c_v,
+length 140, release 0, progress 0, chorus 0, priority 10), and the runner
+passes `--cry id` to `poryaaaa_render`, which plays the cry song template
+(`plugin/m4a_cry.c`: `gPokemonCrySongTemplate` with the `SetPokemonCry*`
+setters applied in PlayCryInternal's order, the pointer words as
+`SetPokemonCryTone` patches them, `dataInRam` set) with the cry's DPCM
+sample as voice 0 (`voicegroup_load_cry`: the `cry` macro's voice, the
+built .bin preferred as in a voicegroup) on cry player 0
+(`M4A_PLAYER_CRY0`, the one `SetPokemonCryTone` takes from silence).
+`--input midi` skips cries with a message.  Baseline
+`baselines/2026-10-24_cry.json` / `.txt`: **45/48 pass at -40 dB**; the 44
+previous tests are unchanged to the decimal (`compare_reports.py
+2026-10-24_se.json 2026-10-24_cry.json`: 0 regressions, 0 improvements,
+every -inf still -inf; se_rain_stop's documented FAIL as before).
+`poryaaaa_unit_tests` 1170/1170 (61 new), `poryaaaa_blip_tests` 49112/0,
+`poryaaaa_song_tests` 561/561.  `claim_check.sh`: 41 probed tests, 0 moved
+writes -- tune_psg's "expected 1-cycle DAC rounding" exception is gone: it
+was the TUNE cost (below), now 0 on its 16 writes.
+
+| test | gCryTable | sample | null | worst 1 s | ref dBFS |
+|---|---|---|---|---|---|
+| cry_pidgey | 15 | 1902 samples, 0.18 s (the shortest) | -43.0 | -38.4 (FAIL) | -33.4 |
+| cry_bulbasaur | 0 | 8183 samples, 0.78 s | -54.9 | -51.9 | -28.1 |
+| cry_wailord | 381 | 20846 samples, 1.98 s | -48.1 | -46.9 | -22.4 |
+| cry_jynx | 123 | 23524 samples, 2.24 s (the longest) | -41.1 | -38.2 (FAIL) | -26.2 |
+
+**Residual attribution** (skill, "Attributing a residual below -40 dB"):
+the sequencer is exact on every frame of all four (below), so the whole
+residual is in the samples.  Every run of differing output samples above
+20 int16 LSB (0.1 PCM LSB) starts within 1.5 ms of a timer-0 slot crossing
+the probe's raw log records (`L timer0 ... FIFO sample lands one DAC slot
+later`; the `.events` count): pidgey 1 crossing, 1 run; bulbasaur 9
+crossings, 5 runs (the other four crossings differ by less); wailord 19
+crossings, 16 runs; jynx 19 crossings, 16 runs; no run anywhere else.  The
+first crossing is at cycle 3428099 (0.2043 s) in every run, as on
+pcm_cmp.  That is item 1c, mgba's scheduler lateness, and nothing in the
+engine moves it.  The cries show it harder than the songs and SEs because
+a DPCM cry waveform jumps by several LSB per sample, so one sample landing
+a DAC slot late differs by up to 8 (pidgey, wailord) or 12 (jynx) PCM LSB
+where a song's smooth mix differs by 1 or 2: cry_pidgey's single crossing
+falls inside its 0.18 s of sound and alone puts the worst second at -38.4;
+cry_jynx's 12-LSB crossing at 1.343 s does the same.  Both fail the
+worst-second gate on the floor, like se_rain_stop; the full-file nulls
+pass.  They stay in the corpus for the same reason (swapping them for
+cries that dodge a crossing would hide the floor, not fix it).
+
+**Measured cry-player constants** (probe section, step 5): cry 0 starts
+its body at SE3's `_081DDA6C` **826** (= 566 + 71 + 3 x 63), FadeOutBody
+88 later, `_081DD9BC` at **968** (the SE head 142), exit **118** (cry 1's
+idle 63 + the tail 55); every paused frame 1007; `SetPokemonCryTone` from
+silence takes cry 0 on all four.  `m4a_sequencer_set_player` derives them
+from the step-4 constants with `M4A_PLAYER_CRY0` / `_CRY1` (track count 2
+each, `MPlayOpen`'s argument in `m4aSoundInit`) and now returns -1 for an
+out-of-range player instead of selecting BGM (`poryaaaa_render` errors).
+Cry 1 playing (entry 889, exit 55) is unmeasured: no run starts two cries.
+
+**The song data is in IWRAM**: `gPokemonCrySongs` is RAM, so MPlayMain's
+song-data reads are cheaper than a ROM song's by **7 cycles per byte read**
+(`M4A_CYC_ROM_BYTE`, seven pairs in the probe section, including
+ply_goto's 28 for four bytes and TIE's 21 for three reads).  `M4ASong.dataInRam`
+(set by `m4a_cry_song_new`, 0 for every parsed .s) makes the sequencer take
+it off the ROM-measured handler costs (`ram_bytes()` in `cmd_cycles`,
+`ply_note` and the command fetch).  Handlers costed for the first time:
+`ply_xcmd_0D` 120, `ply_xrele` 48, `ply_xwait` 108 / 102 (expiry) with the
+sub-command dispatch 54 (RAM; ROM est. + 7 per byte, unreachable by any
+vanilla song), `ply_endtie` 54 with no key byte and an empty chain -- which
+splits step 3's 89 / 95 into `M4A_CYC_ENDTIE` 61 (ROM est. 54 + 7) + 28 for
+the chained channel that holds the key (`_MATCH`) + 6 for a key byte
+(`_KEY`), with 18 est. for a chained channel passed over (`_SKIP`); the walk
+is now costed from the chain state as m4a_1.s walks it, and rg_vs_trainer's
+4262 writes stayed at 0.  **ply_tune** is 84 from RAM, so its ROM cost is
+**91** (est. 84 + 7) where step 3 used the 90 default: tune_psg's 1-cycle
+write residual, excused since the timing model landed, is 0.
+
+**Per-cry sequencer residual**: `entry_diff.py` 0 on all 177 frames of
+each of the four (the probe's incomplete frame 179 excepted), `cmd_diff.py`
+0 command-position divergences (the xcmd sub-handlers added to its filter
+list), `track_diff.py` 0, on each; cries have no PSG writes, so no write
+diff.  Before the TUNE correction the start frame was -1 from GOTO on;
+the player position matched on every frame from the first render.
+
+**Verified against the ROM**: `gPokemonCrySongTemplate` at 0x08002F20
+(`01 00 FF 00 | 8C 2F 00 08 | 0 x 8 | 00 | C8 40 | B2 0 | C8 50 | BD 00 |
+BE 7F | CD 0D 0 | CD 07 00 | BF 40 | CF 3C 7F | CD 0C 3C 00 | CE B1`) equals
+`gM4ACrySongTemplate` byte for byte (unit test, the voicegroup_dummy word
+zeroed); the setters applied by hand give `test_cry_song`'s expected
+bytes (priority 0A, VOL 78, PAN 40, TIE 3C 7F with TUNE 40 / 50, xWAIT 8C
+00), and `m4a_song_relocate` at 0x03001F20 with gCryTable[0] 0x0802AF7C
+gives the pointer words `SetPokemonCryTone` stores.  Every gCryTable entry
+is `20 3C 00 00 <wav> FF 00 FF 00`; every cry sample is type 1, status 0
+(none loops), 10512 Hz, 1902..23524 samples: no cry is cut by the 140-tick
+EOT at pitch 15360 (the task's "one cut by the length" does not exist in
+vanilla Emerald; a pitch variant would make one).
+
+The work, in order (commits on `accuracy-harness` after 884be8e): the
+probe section (step 5); the engine (`m4a_cry.c`, the players, the RAM
+costs, `voicegroup_load_cry` / `voicegroup_cry_table_symbol`, `--cry`,
+unit tests `test_cry_song`, the players test's six players and error
+return, `test_sequencer_cycles_cry`: cry_pidgey's frames 3..145 through
+the real mixer with a stand-in DPCM sample of its length and rate, the
+channel dying on frame 14 as in mgba); the corpus, runner, `claim_check.sh`
+cry case, README and skill; this section and the baseline.
+
+Not in this slice (next): the pitch / pan / volume / length variants
+(`PlayCryInternal`'s other modes, `--pitch` etc. on both sides),
+`CRY_MODE_*` with chorus (two tracks) and the reverse cries
+(`gCryTable_Reverse`, `TONEDATA_TYPE_REV` on DPCM), a cry-sample DPCM
+audit against the ROM bytes, a second cry while one plays (cry 1's
+position, `SetPokemonCryTone`'s clock rule), and a cry over music.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
