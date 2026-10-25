@@ -2071,7 +2071,7 @@ Baseline `baselines/2026-10-24_cry-modes.json` / `.txt`: **49/54 pass at
 0 regressions, 0 improvements, every -inf still -inf, every row 0.0;
 cry_pidgey, cry_jynx, se_rain_stop, cry_bulbasaur_howl and cry_pidgey_quiet
 FAIL on the documented floor as before).  `poryaaaa_unit_tests`
-1260/1260 (39 new), `poryaaaa_blip_tests` 49112/0, `poryaaaa_song_tests`
+1270/1270 (49 new, the review's gate test included), `poryaaaa_blip_tests` 49112/0, `poryaaaa_song_tests`
 561/561.  `claim_check.sh`: 47 probed tests (the three new ones added), 0
 moved writes.
 
@@ -2129,10 +2129,60 @@ crossings land on quieter stretches (cry_pidgey_roar2's single crossing is
 at 0.137 s against cry_pidgey's at 0.204 s: the key-61 sample has moved on
 by then).
 
+**Code review of the length / release slice (2026-10-24).**  Two
+independent reviews (reviewer 1: SoundMainRAM's SF_STOP release step and
+stop pass against `m4a_pcm_channel_tick` / `m4a_sound_main_ram`, the
+volume products' multiplier (SoundInfo byte 7 = masterVolume 12 via the
+`o_SoundChannel_release` offset alias), `ply_endtie`'s conditions,
+`ply_fine` / TrackStop on a releasing channel, the tick walk's ON test,
+the setters and `ply_xrele` / `ply_xwait`, `ply_note`'s release copy, the
+unit tests' sequences against the source arithmetic and the probe stamps;
+reviewer 2: `struct AccParams` against crt0's block, both patchers and
+the ROM bytes (`StartTest`'s `ldrh [r5,#16]` / `ldrb [r5,#18]`), the
+rebuild's byte-level effect (every ROM symbol from AgbMain on +0x30,
+StartTest +0x24, 17943 differing bytes all ROM pointers +0x30 plus the one
+`bl StartTest` offset; IWRAM / EWRAM identical; the cry samples and the
+template byte-identical), the 14 CgbSound labels each on the instruction
+its name describes, the `_081DCFB0` relocation, the runner / claim_check
+keys, the template bytes of the three entries from the ROM template).
+Both confirm everything the slice relies on; the release envelope and the
+stop pass match to the instruction.  **One divergence, adopted,
+harness-neutral** (`claim_check.sh` against `2026-10-24_cry-modes.json`
+with the fix alone: the 54 rows identical in every field, 47 diffed with 0
+moved writes, unit 1270/1270): `ply_fine`'s RealClearChain nulls
+`channel->track` (m4a_1.s `str r0, [r4, o_SoundChannel_track]` with r0 =
+0) while the port kept `trackIndex`, so a channel still releasing after
+FINE stayed selectable by the same track index's later VOLCHG / PITCHG
+pass (`apply_track_volumes` / `refresh_channel_pitches`), by a later
+`ply_fine` on that index, and kept its track rank in `ply_note`'s
+equal-priority tie-break where the GBA's null pointer ranks lowest.  The
+game case is a cry with a release tail followed by another cry on the same
+player, or any song started after a FINE with a tail; no corpus test
+restarts a track inside a tail, hence neutral.  Fixed in `ply_fine`
+(`chan_clear_track` -> `M4A_NO_TRACK` = -1 on each chained channel, the
+SF_STOP flagging folded into the same chain walk as `ply_fine_loop`),
+gated by `test_sequencer_fine_orphan` (a releasing square after FINE has
+no track; a VOL 10 / PAN song restarted on the same index leaves its
+volumes alone; the test fails on the old code in three places).
+**Cosmetic, adopted**: crt0.s's "32 bytes" comment (the block is and was
+28 bytes; the patchers' 32 is a bounds check).  **Not acted on**:
+`mgba_render` / `mgba_probe` take the cry arguments with `atoi` and no
+range check (pre-existing style, they feed the ROM's u16 / u8 directly);
+the port's XCMD xTYPE / xATTA / xDECA / xSUST / xLENG / xSWEE sub-commands
+skip their operand where the source writes `track->tone` fields, and
+sub-commands >= 0x0E map to `ply_fine` where the GBA calls past the table
+-- no vanilla song or cry template uses them (a slice of its own if one
+turns up); the GUI's channel label prints `trackIndex + 1`, so an orphan
+reads "T0" (and a poly event recorded from one 255 -> guarded by `<
+MAX_TRACKS`); the plan's step-6 "ninth / tenth / eleventh" wording stays
+as history.  Baseline refreshed from the fix's claim_check run (identical
+to the first).
+
 The work, in order (commits on `accuracy-harness` after 3a7f8b3): the ROM
 / probe / mgba_render and the neutrality check (step 7); the CLI flags,
-runner, corpus, unit tests, README and skill; this section and the
-baseline.  The two reviews follow below.
+runner, corpus, unit tests, README and skill; the baseline and this
+section; the review's fix, its gate test, the paragraph above and the
+refreshed baseline.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

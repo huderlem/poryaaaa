@@ -92,6 +92,12 @@ extern "C" {
 #define CHN_ENV_RELEASE 0x00
 #define CHN_ON          (CHN_START | CHN_STOP | CHN_IEC | CHN_ENV_MASK)
 
+/* A channel's trackIndex after RealClearChain nulled SoundChannel.track:
+ * no track's VOLCHG / PITCHG pass or ply_fine selects it, and it ranks
+ * below every track in ply_note's equal-priority tie-break (a null pointer
+ * compares lowest on the GBA). */
+#define M4A_NO_TRACK    (-1)
+
 /* WaveData header (matches GBA binary format) */
 typedef struct {
     uint16_t type;
@@ -222,7 +228,8 @@ typedef struct {
      * this channel's last decode (0xFF000000 = none). */
     uint32_t xpi;
 
-    /* Owner */
+    /* Owner (SoundChannel.track): M4A_NO_TRACK once ply_fine's RealClearChain
+     * has released it from its track while it still sounds. */
     int trackIndex;
     /* Started by a host audition (engine->auditionNote at note-on): stays
      * audible in the polyphony-overflow invert mode. */

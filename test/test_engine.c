@@ -3767,6 +3767,57 @@ static void test_sequencer_track_stop_chain(void)
     m4a_song_free(restSong);
 }
 
+/* ply_fine's RealClearChain nulls channel->track (m4a_1.s): a channel
+ * still releasing after FINE belongs to no track, so a song restarted on
+ * the same track index must not rewrite its volume / pitch in its VOLCHG /
+ * PITCHG pass (which walks the new track's chain on the GBA) and ply_fine
+ * must not re-flag it.  Slice 4's review found the port keeping
+ * trackIndex; a cry with a release tail followed by another cry on the
+ * same player is the game case. */
+static void test_sequencer_fine_orphan(void)
+{
+    printf("Testing sequencer FINE: the released channel leaves its track...\n");
+    ToneData voices[128];
+    seq_test_voices(voices);
+    voices[0].release = 1;                     /* a long software release */
+    M4ASong *fineSong = seq_song("\t.byte\tVOICE , 0\n\t.byte\tVOL , 127*t_mvl/mxv\n\t.byte\tN02 , Cn3 , v127\n\t.byte\tW02\n\t.byte\tFINE\n");
+    M4ASong *quietSong = seq_song("\t.byte\tVOICE , 0\n\t.byte\tVOL , 10*t_mvl/mxv\n\t.byte\tPAN , c_v-40\n\t.byte\tW96\n\t.byte\tFINE\n");
+    ASSERT(fineSong && quietSong, "fine-orphan songs parse");
+    if (!fineSong || !quietSong) return;
+
+    M4AEngine engine;
+    float outL[1024], outR[1024];
+    engine_init_booted(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    M4ACGBChannel *sq = &engine.cgbChannels[0];
+
+    m4a_sequencer_start(&seq, fineSong);
+    advance_frames(&engine, 2, outL, outR);
+    ASSERT((sq->status & CHN_ON) && !(sq->status & CHN_STOP), "fine-orphan: the note sounds on track 0");
+    ASSERT_EQ(sq->trackIndex, 0, "fine-orphan: owned by track 0 while chained");
+    advance_frames(&engine, 4, outL, outR);
+    ASSERT((sq->status & CHN_ON) && (sq->status & CHN_STOP), "fine-orphan: releasing after FINE");
+    ASSERT_EQ(seq.chainOwner[TOTAL_PCM_CHANNELS], 0, "fine-orphan: unchained");
+    ASSERT_EQ(sq->trackIndex, M4A_NO_TRACK, "fine-orphan: RealClearChain nulled channel->track");
+    uint8_t right = sq->rightVolume, left = sq->leftVolume;
+    ASSERT(right != 0 || left != 0, "fine-orphan: the release still carries the note's volume");
+
+    /* The same track index restarted while the orphan releases: its VOL /
+     * PAN pass walks its own (empty) chain and leaves the orphan alone. */
+    m4a_sequencer_start(&seq, quietSong);
+    advance_frames(&engine, 2, outL, outR);
+    ASSERT((sq->status & CHN_ON) && (sq->status & CHN_STOP), "fine-orphan: still releasing after the restart (TrackStop kills chained channels only)");
+    ASSERT(sq->rightVolume == right && sq->leftVolume == left, "fine-orphan: the new track's VOL 10 / PAN pass did not rewrite the orphan's volumes");
+    ASSERT_EQ(sq->trackIndex, M4A_NO_TRACK, "fine-orphan: still no track");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(fineSong);
+    m4a_song_free(quietSong);
+}
+
 /* The sound FIFO's refill DMA stalls the CPU 18 cycles every 16 samples
  * (20064 cycles at 13379 Hz), counted on the cycle spans the timing model
  * charges. */
@@ -4867,6 +4918,7 @@ int main(void)
     test_sequencer_lfo_untruncated_sum();
     test_sequencer_cycles_poly_invert();
     test_sequencer_track_stop_chain();
+    test_sequencer_fine_orphan();
     test_sequencer_players();
     test_sequencer_cycles_se2();
     test_cry_song();

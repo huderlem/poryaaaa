@@ -42,6 +42,17 @@ static inline int chan_track(M4AEngine *e, int h)
     return chan_is_pcm(h) ? e->pcmChannels[h].trackIndex : e->cgbChannels[h - TOTAL_PCM_CHANNELS].trackIndex;
 }
 
+/* channel->track = 0 (RealClearChain / TrackStop): the channel no longer
+ * belongs to any track, so the track's later VOLCHG / PITCHG pass and
+ * ply_fine leave it alone and ply_note's tie-break ranks it lowest. */
+static inline void chan_clear_track(M4AEngine *e, int h)
+{
+    if (chan_is_pcm(h))
+        e->pcmChannels[h].trackIndex = M4A_NO_TRACK;
+    else
+        e->cgbChannels[h - TOTAL_PCM_CHANNELS].trackIndex = M4A_NO_TRACK;
+}
+
 static inline uint8_t chan_midi_key(M4AEngine *e, int h)
 {
     return chan_is_pcm(h) ? e->pcmChannels[h].midiKey : e->cgbChannels[h - TOTAL_PCM_CHANNELS].midiKey;
@@ -259,17 +270,19 @@ static void ply_fine(M4ASequencer *s, int i)
     int n = chain_list(s, i, chain);
     cyc(s, n == 0 ? M4A_CYC_FINE_EMPTY : M4A_CYC_FINE_LOOP);
     for (int k = 0; k < n; k++) {
-        s->chainOwner[chain[k]] = 0;
-        cyc(s, M4A_CYC_FINE_CHAN + M4A_CYC_FINE_UNLINK_CALL + M4A_CYC_FINE_UNLINK_LAST);
-    }
-    cyc(s, M4A_CYC_FINE_DONE);
-    for (int h = 0; h < CHAN_COUNT; h++) {
-        if (!chan_is_real(h) || chan_track(e, h) != i)
-            continue;
+        /* ply_fine_loop: SF_STOP if the channel is on (m4a_1.s 0xC7 test),
+         * then RealClearChain: unlink and channel->track = 0.  The channel
+         * keeps releasing on its own (SoundMainRAM / CgbSound only test
+         * SF_ON), owned by no track. */
+        int h = chain[k];
         uint8_t *st = chan_status(e, h);
         if (*st & CHN_ON)
             *st |= CHN_STOP;
+        chan_clear_track(e, h);
+        s->chainOwner[h] = 0;
+        cyc(s, M4A_CYC_FINE_CHAN + M4A_CYC_FINE_UNLINK_CALL + M4A_CYC_FINE_UNLINK_LAST);
     }
+    cyc(s, M4A_CYC_FINE_DONE);
     s->tracks[i].flags = 0;
 }
 

@@ -25,7 +25,7 @@ RomHeaderMakerCode:
 	.byte 0         @ complement check (gbafix)
 	.space 2
 
-@ ---- Parameter block (0x080000C0, 32 bytes) ----
+@ ---- Parameter block (0x080000C0, 28 bytes: struct AccParams in main.c) ----
 	.global gAccParams
 	.align 2, 0
 gAccParams:
