@@ -489,6 +489,8 @@ static void sound_main(M4AEngine *engine)
     if (counter - 1 > 0)
         offset = (engine->pcmDmaPeriod - (counter - 1)) * engine->pcmSamplesPerVBlank;
     m4a_sound_main_ram(engine, offset, counter);
+    if (engine->frameEndHook)
+        engine->frameEndHook(engine, engine->frameEndHookUser);
 }
 
 /* PSG level at one DAC slot, in mgba's PSG units before the SOUNDCNT_H

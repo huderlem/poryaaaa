@@ -164,6 +164,19 @@ target_include_directories(poryaaaa_test PRIVATE
 
 target_link_libraries(poryaaaa_test PRIVATE m)
 
+# ---- mid2agb (pokeemerald's converter as a library; third_party/mid2agb/README.md) ----
+# poryaaaa_render --gba-tempo-grid converts the MIDI it plays to the song the
+# ROM would play, for the SoundMain timing model's CgbSound entry.
+add_library(mid2agb STATIC
+    third_party/mid2agb/agb.cpp
+    third_party/mid2agb/midi.cpp
+    third_party/mid2agb/tables.cpp
+    third_party/mid2agb/error.cpp
+    third_party/mid2agb/mid2agb_lib.cpp
+)
+target_include_directories(mid2agb PUBLIC third_party/mid2agb)
+set_target_properties(mid2agb PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
 # ---- Standalone Renderer ----
 add_executable(poryaaaa_render
     cmd/poryaaaa_render.c
@@ -171,7 +184,7 @@ add_executable(poryaaaa_render
     ${ENGINE_SOURCES}
 )
 target_include_directories(poryaaaa_render PRIVATE plugin third_party)
-target_link_libraries(poryaaaa_render PRIVATE m)
+target_link_libraries(poryaaaa_render PRIVATE m mid2agb)
 if(UNIX AND NOT APPLE)
     target_link_libraries(poryaaaa_render PRIVATE pthread dl)
 endif()
@@ -179,7 +192,7 @@ if(APPLE)
     target_link_libraries(poryaaaa_render PRIVATE "-framework CoreAudio" "-framework AudioToolbox" "-framework CoreFoundation")
 endif()
 if(WIN32)
-    target_link_libraries(poryaaaa_render PRIVATE -static-libgcc)
+    target_link_libraries(poryaaaa_render PRIVATE -static-libgcc -static-libstdc++)
 endif()
 
 # ---- Unit Tests ----

@@ -142,11 +142,35 @@ struct M4ASequencer {
     /* Optional trace: one line per frame, "<frame> <CgbSound entry cycles from
      * VBlank line 160>", comparable to mgba_probe's .frames column.  NULL = off. */
     void *traceFile;            /* FILE * */
+    /* Timing mode (m4a_sequencer_init_timing): MPlayMain run for its timing
+     * only.  Channel and track accesses go to these copies instead of the
+     * engine's; tmStatus is the engine's real channels' status as of the end
+     * of the last SoundMain, with this MPlayMain's note starts and stops
+     * applied since; the rest is its own (what ply_note stored). */
+    bool timingOnly;
+    uint8_t tmStatus[TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS];
+    uint8_t tmGate[TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS];
+    uint8_t tmPriority[TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS];
+    int8_t tmTrack[TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS];
+    uint8_t tmMidiKey[TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS];
+    uint8_t tmKey[TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS];
+    M4ATrack tmTracks[M4A_SONG_MAX_TRACKS];
 };
 
 /* Attach to an engine: installs the frame hook and takes over the per-tick
  * work the engine otherwise does itself (gate times, tempo, LFO). */
 void m4a_sequencer_init(M4ASequencer *seq, M4AEngine *engine);
+
+/* Attach in timing mode, for the SoundMain timing model of an engine driven
+ * some other way (the MIDI path): every frame the sequencer runs MPlayMain
+ * over its song exactly as m4a_sequencer_init's does, cost for cost, and
+ * publishes engine->cgbEntryCycles, but starts, stops and changes no engine
+ * channel or track -- its handlers work on its own copies, and the channel
+ * liveness its branches test is the engine's as of the end of each
+ * SoundMain (the frame-end hook, installed with the frame hook).  The
+ * engine keeps doing its own per-tick work (externalSequencer stays false)
+ * and the header's reverb is not applied.  Takes the first snapshot now. */
+void m4a_sequencer_init_timing(M4ASequencer *seq, M4AEngine *engine);
 
 /* A second player on the same engine, run in SoundMain's chain after
  * `inner` (its body after inner's, from inner's _081DDA6C), on engine

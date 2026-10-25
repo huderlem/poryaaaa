@@ -518,11 +518,16 @@ struct M4AEngine {
     M4AFrameHook frameHook;
     void *frameHookUser;
     bool externalSequencer;
+    /* Runs at the end of every SoundMain, after SoundMainRAM (a timing-only
+     * sequencer's channel snapshot, m4a_sequencer_init_timing). */
+    M4AFrameHook frameEndHook;
+    void *frameEndHookUser;
 
     /* SoundMain timing model: CPU cycles from the SoundMain entry to the
      * CgbSound entry this frame.  The sequencer's frame hook sets it from
-     * the work MPlayMain did (M4A_CYC_* below); without a sequencer the
-     * steady one-track value applies.  See docs/ACCURACY_PLAN.md,
+     * the work MPlayMain did (M4A_CYC_* below), a timing-only sequencer's
+     * (m4a_sequencer_init_timing) from the work MPlayMain would do for its
+     * song; without either the steady one-track value applies.  See docs/ACCURACY_PLAN.md,
      * "SoundMain timing probe". */
     int32_t cgbEntryCycles;
     int64_t soundMainStamp;      /* cycle of the current SoundMain (-1 outside one) */

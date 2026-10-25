@@ -49,11 +49,11 @@ out): each MIDI tick on the frame MPlayMain's tempoC / 150 plays it.
 **The midi-input reports are their own baseline family**
 (`baselines/<date>_midi-path-*.json`, the report's `"input"` field says
 `midi`; `"midi_quantize"`, `"gba_start_delay"` and `"gba_tempo_grid"` say
-which form).  **The midi baseline is the lfo-order set** (slice 4):
-`2026-10-25_midi-path-lfo-order.json` / `-lfo-order-latch.json` for the
-runner's default, `-lfo-order-aligned` / `-lfo-order-aligned-latch` for
-`--no-gba-tempo-grid`; the earlier `midi-path-start`, `-aligned`,
-`-tempo-grid` and `-lfo-grid` pairs are history.  Never compare a midi
+which form).  **The midi baseline is the cgb-entry set** (slice 5):
+`2026-10-25_midi-path-cgb-entry.json` / `-cgb-entry-latch.json` for the
+runner's default (35/44), `-cgb-entry-aligned` / `-cgb-entry-aligned-latch`
+for `--no-gba-tempo-grid` (12/44); the earlier `midi-path-start`,
+`-aligned`, `-tempo-grid`, `-lfo-grid` and `-lfo-order` sets are history.  Never compare a midi
 report against a song-input baseline with `compare_reports.py`, and
 never save a midi run as the song-input baseline.  What the MIDI path's
 flags remove: the time origin (`--gba-start-delay`; without it an event
@@ -63,26 +63,33 @@ groudon, which does not correlate; slice 3b also puts the engine's own
 LFO clock on that grid -- a TEMPO counts from the next frame's add, as
 ply_tempo's -- which needs the start delay too).  Without a sequencer the
 engine runs the frame's LFO steps, portamento and PWM before CgbSound,
-as SoundMain does (slice 4, the plugin included).  What is left, each
-against the row's own `--song` render: the PCM micro rows are
-bit-identical to it but vol and lfo_delay (ply_fine, below) -- bend and
-lfo_vib / lfo_trem / lfo_pan -inf too, pcm_cmp / pcm_chord at their -55
-floor; the PSG writes match `--song`'s register,
-value and frame on every row logged so far (sq1, lfo_psg, littleroot,
-groudon, mt_chimney), offset only by the **fixed CgbSound entry**
-(`cgbEntryCycles`, the one-track no-tick value, where the ROM's moves
-with MPlayMain's work: -2667 on frame 3, -464 .. -472 on tick frames,
--830 / -960 on LFO frames, up to -24157 on a song's frame 3) -- the next
-lever; per-tick command batching (a VOL before a note reaches every
+as SoundMain does (slice 4, the plugin included).  With
+`--gba-tempo-grid` the renderer also converts the MIDI with mid2agb
+itself (`third_party/mid2agb`, `-E`, text identical to the harness's
+`.s` on all 560 MIDIs) and runs a **timing-only sequencer**
+(`m4a_sequencer_init_timing`) over that song: MPlayMain cost for cost on
+the MIDI engine's channel liveness, published as the CgbSound entry --
+the ROM's on every frame of all 44 rows (slice 5); `--player` and
+`--seq-log` then apply on `--midi` too (entry_diff etc. read it).
+Without the grid (the aligned pair, the plugin, by decision) the entry
+stays the fixed one-track no-tick value.  What is left, each against
+the row's own `--song` render: every PSG write of every row is on its
+`--song` cycle, register and value (all PSG micro rows, groudon,
+se_exp, se_faint, se_truck_unload, se_low_health -inf or at their
+`--song` value); the PCM micro rows are bit-identical to it but vol and
+lfo_delay (ply_fine, below); per-tick command batching (a VOL before a note reaches every
 channel on the MIDI path, only the new note on the GBA; ply_fine's unlink
 keeps a FINE tick's VOL and the LFO from the releasing note: vol -47.2,
 lfo_delay -20.3, se_rain_stop, se_contest_place); and in a frame with two
 ticks the ROM steps tick n's LFO before tick n + 1's commands
-(rg_vs_trainer frames 904 .. 944).  `--psg-log` works with `--midi`:
+(rg_vs_trainer frames 904 .. 944) -- the DirectSound side of littleroot,
+vs_wild, mt_chimney, rg_vs_trainer, vs_trainer, credits and
+se_contest_place is what keeps them from passing.  `--psg-log` works
+with `--midi`:
 log both renders and compare them **frame by frame** (each frame's
 ordered (register, value) list); a whole-log sequence match pairs
 repetitive vibrato writes frames apart.  Plan, "Milestone 5 slice 1"
-through "slice 4".
+through "slice 5".
 
 Output: a table on stdout and `build/accuracy/report.json`. poryaaaa WAVs and
 logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-mgba>/`.

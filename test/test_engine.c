@@ -6489,6 +6489,291 @@ static void test_lfo_cgbsound_order(void)
     m4a_song_free(song);
 }
 
+/* Every PSG write of one engine, with its cycle (the renderer's --psg-log). */
+#define CGB_ENTRY_LOG_MAX 4096
+typedef struct {
+    const M4AEngine *engine;
+    int n;
+    int64_t cycle[CGB_ENTRY_LOG_MAX];
+    uint16_t regVal[CGB_ENTRY_LOG_MAX];
+} CgbEntryLog;
+
+static void cgb_entry_log_cb(void *user, uint32_t reg, uint32_t value)
+{
+    CgbEntryLog *log = (CgbEntryLog *)user;
+    if (log->n >= CGB_ENTRY_LOG_MAX)
+        return;
+    log->cycle[log->n] = log->engine->gba.now;
+    log->regVal[log->n] = (uint16_t)((reg & 0xFF) << 8 | (value & 0xFF));
+    log->n++;
+}
+
+/* A MIDI-path event for test_cgb_entry_midi_path: at song tick `tick`, on
+ * engine track `track`: a note-on (b > 0) / note-off (b == 0) of key a, a CC
+ * a = b (kind 'c') or a program change a (kind 'p'). */
+typedef struct { int tick; char kind; int track, a, b; } CgbEntryEvent;
+
+static void cgb_entry_dispatch(M4AEngine *e, const CgbEntryEvent *ev)
+{
+    switch (ev->kind) {
+    case 'n':
+        if (ev->b > 0) m4a_engine_note_on(e, ev->track, (uint8_t)ev->a, (uint8_t)ev->b);
+        else m4a_engine_note_off(e, ev->track, (uint8_t)ev->a);
+        break;
+    case 'c': m4a_engine_cc(e, ev->track, (uint8_t)ev->a, (uint8_t)ev->b); break;
+    case 'p': m4a_engine_program_change(e, ev->track, (uint8_t)ev->a); break;
+    }
+}
+
+/* The material through both paths: engine 0 the MIDI path (the renderer's
+ * calls with --gba-start-delay --gba-tempo-grid: MPlayStart's seed at the
+ * origin, the TEMPO held to the next add, each event before the SoundMain
+ * of its tick's frame) with a timing-only sequencer over `text`; engine 1 a
+ * sequencer playing `text`.  Both booted with their output, as the renderer
+ * does.  Returns the number of frames 3 .. 2 + nFrames whose CgbSound entry
+ * or PSG writes (register, value and cycle) differ; entry[] gets engine 0's
+ * entries from line 160 (SoundMain + 197).  `tempoI`: the song's. */
+static int cgb_entry_pair(const char *text, const ToneData *voices, const CgbEntryEvent *evs, int nEvs,
+                          int tempoI, bool latch, int nFrames, int *entry, int *writes, int *firstBad)
+{
+    M4ASong *song = parse_song_text(text);
+    if (!song)
+        return -1;
+    static M4AEngine pair[2];
+    static CgbEntryLog log[2];
+    M4ASequencer seq[2];
+    for (int k = 0; k < 2; k++) {
+        m4a_engine_init(&pair[k], 48000.0f);
+        m4a_engine_set_voicegroup(&pair[k], (ToneData *)voices);
+        log[k].engine = &pair[k];
+        log[k].n = 0;
+        pair[k].psg[0].writeLog = cgb_entry_log_cb;
+        pair[k].psg[0].writeLogUser = &log[k];
+        m4a_engine_boot(&pair[k], true);
+    }
+    m4a_engine_set_quantize_events(&pair[0], latch);
+    m4a_sequencer_init_timing(&seq[0], &pair[0]);
+    m4a_sequencer_set_voicegroup(&seq[0], voices);
+    m4a_sequencer_init(&seq[1], &pair[1]);
+    m4a_sequencer_start(&seq[1], song);                    /* first tick on frame 3 */
+    int s0 = (int)gba_tempo_grid_sample(0, 48000.0);       /* the origin, before frame 3 */
+    float *obuf = malloc(sizeof(float) * (size_t)s0 * 2);
+    m4a_engine_process(&pair[0], obuf, obuf + s0, s0);
+    free(obuf);
+    m4a_engine_start_song_tempo(&pair[0]);
+    m4a_sequencer_start(&seq[0], song);
+    m4a_engine_set_tick_tempo(&pair[0], (uint16_t)tempoI);
+
+    /* The song's tick frames: MPlayStart's tempoI 150 on frame 3 (tick 0,
+     * where the TEMPO is read), the song's from frame 4. */
+    int tickFrame[512], nTicks = 0, acc = 0;
+    for (int f = 3; f < 3 + nFrames && nTicks < 512; f++) {
+        acc += f == 3 ? 150 : tempoI;
+        while (acc >= 150 && nTicks < 512) {
+            tickFrame[nTicks++] = f;
+            acc -= 150;
+        }
+    }
+    float outL[1024], outR[1024];
+    int bad = 0, ev = 0, w0 = 0, w1 = 0;
+    *firstBad = -1;
+    *writes = 0;
+    for (int f = 3; f < 3 + nFrames; f++) {
+        while (ev < nEvs && evs[ev].tick < nTicks && tickFrame[evs[ev].tick] == f)
+            cgb_entry_dispatch(&pair[0], &evs[ev++]);
+        for (int k = 0; k < 2; k++)
+            lfo_order_frame(&pair[k], outL, outR);   /* past frame f's SoundMain and CgbSound */
+        entry[f - 3] = pair[0].cgbEntryCycles + M4A_CYC_SOUNDMAIN_ENTRY;
+        bool same = pair[0].cgbEntryCycles == pair[1].cgbEntryCycles
+                 && log[0].n - w0 == log[1].n - w1;
+        for (int i = 0; same && i < log[0].n - w0; i++)
+            same = log[0].cycle[w0 + i] == log[1].cycle[w1 + i] && log[0].regVal[w0 + i] == log[1].regVal[w1 + i];
+        *writes += log[0].n - w0;
+        if (!same && (*firstBad < 0))
+            *firstBad = f;
+        bad += !same;
+        w0 = log[0].n;
+        w1 = log[1].n;
+    }
+    for (int k = 0; k < 2; k++) {
+        m4a_sequencer_detach(&seq[k]);
+        m4a_engine_destroy(&pair[k]);
+    }
+    m4a_song_free(song);
+    return bad;
+}
+
+/*
+ * The CgbSound entry on the MIDI path (plan, milestone 5 slice 5): with a
+ * timing-only sequencer over the song mid2agb makes of the MIDI (here the
+ * song's text itself), the MIDI path's CgbSound starts on the cycle the
+ * sequencer path's does and its PSG writes land on the same cycles, frame
+ * for frame -- tick and no-tick frames, note-on and gate-expiry frames, LFO
+ * frames, two tracks -- latched and not; on the sq1 song both are mgba's
+ * measured entries.  A timing-only sequencer drives nothing.
+ */
+static void test_cgb_entry_midi_path(void)
+{
+    printf("Testing the CgbSound entry on the MIDI path (timing-only sequencer)...\n");
+    char msg[200];
+    ToneData voices[128];
+    seq_test_voices(voices);                 /* 0: square 1, sustain 15 */
+    voices[1] = voices[0];
+    voices[1].type = VOICE_SQUARE_2;         /* 1: square 2 */
+    int entry[160], writes, firstBad;
+
+    /* sq1 (test/accuracy/rom/micro/sq1.s): the probe's entries, frames 3 .. 52
+     * (test_sequencer_cycles' column), now through the MIDI path. */
+    char text[4096];
+    snprintf(text, sizeof(text), "%s%s%s", seq_song_header,
+             "\t.byte\tKEYSH , t_key+0\n"
+             "\t.byte\tTEMPO , 120*t_tbs/2\n"
+             "\t.byte\t\tVOICE , 0\n"
+             "\t.byte\t\tVOL   , 127*t_mvl/mxv\n"
+             "\t.byte\t\tPAN   , c_v+0\n"
+             "\t.byte\t\tN24   , Cn3 , v127\n"
+             "\t.byte\tW36\n"
+             "\t.byte\t\t        Cn4 \n"
+             "\t.byte\tW36\n"
+             "\t.byte\t\tN48   , Cn2 \n"
+             "\t.byte\tW24\n"
+             "\t.byte\tW24\n"
+             "\t.byte\tFINE\n", seq_song_footer);
+    static const CgbEntryEvent sq1[] = {
+        { 0, 'p', 1, 0, 0 }, { 0, 'c', 1, 7, 127 }, { 0, 'c', 1, 10, 64 }, { 0, 'n', 1, 60, 127 },
+        { 24, 'n', 1, 60, 0 }, { 36, 'n', 1, 72, 127 }, { 60, 'n', 1, 72, 0 },
+        { 72, 'n', 1, 48, 127 }, { 120, 'n', 1, 48, 0 },
+    };
+    static const int probe[50] = {
+        4069, 1402, 1866, 1866, 1866, 1866, 1402, 1866, 1866, 1866,
+        1866, 1402, 1866, 1866, 1866, 1866, 1402, 1866, 1866, 1866,
+        1866, 1402, 1866, 1866, 1866, 1866, 1402, 1866, 1866, 1866,
+        1874, 1402, 1953, 1840, 1840, 1840, 1402, 1840, 1840, 1840,
+        1840, 1402, 1840, 1840, 1840, 2790, 1402, 1866, 1866, 1866 };
+    for (int q = 0; q < 2; q++) {
+        int bad = cgb_entry_pair(text, voices, sq1, (int)(sizeof(sq1) / sizeof(sq1[0])), 120, q == 1, 160,
+                                 entry, &writes, &firstBad);
+        snprintf(msg, sizeof(msg), "sq1%s: the MIDI path's CgbSound entry and PSG write cycles are the sequencer's,"
+                 " frames 3 .. 162 (%d differ, first %d; %d writes)", q ? " latched" : "", bad, firstBad, writes);
+        ASSERT(bad == 0 && writes > 20, msg);
+        int off = 0;
+        for (int f = 0; f < 50; f++)
+            off += entry[f] != probe[f];
+        snprintf(msg, sizeof(msg), "sq1%s: the MIDI path's entries on frames 3 .. 52 are mgba's (%d differ)",
+                 q ? " latched" : "", off);
+        ASSERT_EQ(off, 0, msg);
+    }
+
+    /* Without the timing-only sequencer: the fixed one-track no-tick value on
+     * every frame (the plugin's), 2667 early on frame 3 as measured. */
+    {
+        M4AEngine e;
+        engine_init_booted(&e, 48000.0f);
+        ASSERT_EQ(e.cgbEntryCycles + M4A_CYC_SOUNDMAIN_ENTRY, 1402,
+                  "no timing-only sequencer: the fixed entry, 1402 from line 160");
+        ASSERT(e.frameHook == NULL && e.frameEndHook == NULL, "no hooks on a plain engine");
+        m4a_engine_destroy(&e);
+    }
+
+    /* Two tracks: track 1 square 1 notes under running status, track 2 a
+     * square-2 TIE with a delayed vibrato (the delay countdown, then LFO
+     * frames and the VOLCHG / PITCHG pass) ended by EOT. */
+    snprintf(text, sizeof(text),
+             "%s"
+             "\t.byte\tKEYSH , t_key+0\n"
+             "\t.byte\tTEMPO , 120*t_tbs/2\n"
+             "\t.byte\t\tVOICE , 0\n"
+             "\t.byte\t\tVOL   , 100*t_mvl/mxv\n"
+             "\t.byte\t\tN24   , Cn3 , v127\n"
+             "\t.byte\tW24\n"
+             "\t.byte\t\t        Dn3 \n"
+             "\t.byte\tW24\n"
+             "\t.byte\t\tN12   , En3 , v100\n"
+             "\t.byte\tW48\n"
+             "\t.byte\tFINE\n"
+             "t_2:\n"
+             "\t.byte\tKEYSH , t_key+0\n"
+             "\t.byte\t\tVOICE , 1\n"
+             "\t.byte\t\tVOL   , 90*t_mvl/mxv\n"
+             "\t.byte\t\tLFOS  , 40\n"
+             "\t.byte\t\tLFODL , 6\n"
+             "\t.byte\t\tMOD   , 24\n"
+             "\t.byte\t\tTIE   , Gn3 , v127\n"
+             "\t.byte\tW96\n"
+             "\t.byte\tW12\n"
+             "\t.byte\t\tEOT   \n"
+             "\t.byte\tW12\n"
+             "\t.byte\tFINE\n"
+             "\t.align\t2\n"
+             "t:\n"
+             "\t.byte\t2, 0, t_pri, t_rev\n"
+             "\t.word\tt_grp\n"
+             "\t.word\tt_1\n"
+             "\t.word\tt_2\n", seq_song_header);
+    static const CgbEntryEvent two[] = {
+        { 0, 'p', 1, 0, 0 }, { 0, 'c', 1, 7, 100 }, { 0, 'n', 1, 60, 127 },
+        { 0, 'p', 2, 1, 0 }, { 0, 'c', 2, 7, 90 }, { 0, 'c', 2, 0x15, 40 }, { 0, 'c', 2, 0x1A, 6 }, { 0, 'c', 2, 1, 24 },
+        { 0, 'n', 2, 67, 127 },
+        { 24, 'n', 1, 60, 0 }, { 24, 'n', 1, 62, 127 }, { 48, 'n', 1, 62, 0 }, { 48, 'n', 1, 64, 100 },
+        { 60, 'n', 1, 64, 0 }, { 108, 'n', 2, 67, 0 },
+    };
+    for (int q = 0; q < 2; q++) {
+        int bad = cgb_entry_pair(text, voices, two, (int)(sizeof(two) / sizeof(two[0])), 120, q == 1, 150,
+                                 entry, &writes, &firstBad);
+        int tick = 0, ticks = 0;
+        for (int f = 1; f < 150; f++) {
+            tick += entry[f] > 1600;        /* a tick frame costs well over a no-tick one */
+            ticks++;
+        }
+        snprintf(msg, sizeof(msg), "two tracks with vibrato%s: entry and PSG write cycles are the sequencer's,"
+                 " frames 3 .. 152 (%d differ, first %d; %d writes; %d of %d frames tick)",
+                 q ? " latched" : "", bad, firstBad, writes, tick, ticks);
+        ASSERT(bad == 0 && writes > 100 && tick > 50 && tick < ticks, msg);
+    }
+
+    /* A timing-only sequencer drives nothing: with no MIDI events its engine's
+     * channels never start, its tracks keep their state, the song header's
+     * reverb is not applied -- and its entries are still the song's. */
+    {
+        M4ASong *song = seq_song(
+            "\t.byte\tTEMPO , 120*t_tbs/2\n"
+            "\t.byte\t\tVOICE , 0\n"
+            "\t.byte\t\tN24   , Cn3 , v127\n"
+            "\t.byte\tW24\n"
+            "\t.byte\tFINE\n");
+        ASSERT(song != NULL, "timing song parses");
+        if (song) {
+            song->reverb = 0x80 | 40;
+            static M4AEngine e, fresh;
+            M4ASequencer seq;
+            engine_init_booted(&e, 48000.0f);
+            engine_init_booted(&fresh, 48000.0f);
+            m4a_engine_set_voicegroup(&e, voices);
+            m4a_engine_set_voicegroup(&fresh, voices);
+            m4a_sequencer_init_timing(&seq, &e);
+            m4a_sequencer_start(&seq, song);
+            ASSERT(!e.externalSequencer, "timing-only: the engine keeps its own per-tick work");
+            float outL[1024], outR[1024];
+            int on = 0, first = 0;
+            for (int f = 0; f < 40; f++) {
+                lfo_order_frame(&e, outL, outR);
+                if (f == 0) first = e.cgbEntryCycles + M4A_CYC_SOUNDMAIN_ENTRY;
+                for (int c = 0; c < TOTAL_PCM_CHANNELS; c++) on += (e.pcmChannels[c].status & CHN_ON) != 0;
+                for (int c = 0; c < TOTAL_CGB_CHANNELS; c++) on += (e.cgbChannels[c].status & CHN_ON) != 0;
+            }
+            ASSERT_EQ(on, 0, "timing-only: no engine channel ever starts");
+            ASSERT(memcmp(e.tracks, fresh.tracks, sizeof(e.tracks)) == 0, "timing-only: the engine's tracks untouched");
+            ASSERT_EQ(e.reverb.amount, 0, "timing-only: the header's reverb not applied");
+            ASSERT(first > 3000, "timing-only: the start frame's entry is the song's (start tick, commands, note)");
+            m4a_sequencer_detach(&seq);
+            ASSERT(e.frameHook == NULL && e.frameEndHook == NULL, "timing-only: detach removes both hooks");
+            m4a_engine_destroy(&e);
+            m4a_engine_destroy(&fresh);
+            m4a_song_free(song);
+        }
+    }
+}
+
 static void test_event_latch(void)
 {
     printf("Testing the MIDI event latch (quantizeEvents)...\n");
@@ -7298,6 +7583,7 @@ int main(void)
     test_gba_tempo_grid();
     test_engine_lfo_grid();
     test_lfo_cgbsound_order();
+    test_cgb_entry_midi_path();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

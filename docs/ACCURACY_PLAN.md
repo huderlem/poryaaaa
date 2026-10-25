@@ -7359,6 +7359,319 @@ has nothing to do); the skill still names the tempo-grid pair as the
 midi baseline and the LFO grid as slice 3b's (stale since 3b, left to the
 user), and could mention `--psg-log` with `--midi`.
 
+### Milestone 5 slice 5: the CgbSound entry on the MIDI path (2026-10-25)
+
+Scope: the cycle CgbSound starts at on the MIDI path (`cgbEntryCycles`,
+fixed by `m4a_engine_init` at the one-track no-tick value, 1205 after
+SoundMain = 1402 from line 160).  Out of scope: per-tick command batching
+and ply_fine's unlink (vol, lfo_delay, se_rain_stop, se_contest_place),
+the two-tick-frame LFO interleave, mid2agb's note-length conversion and
+-E, -P priority, any change to the sequencer path's output or to PCM
+output, the CgbSound driver's internal offsets (`CGB_CYC_*`).  Before any
+change the baselines reproduced: claim_check against
+`2026-10-25_cry-over-song-rows.json` 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0; unit 1858/1858, blip 49112/0, songs 561/561;
+the four midi runs 0 field differences on 44 rows against
+`2026-10-25_midi-path-lfo-order.json`, `-lfo-order-latch`,
+`-lfo-order-aligned`, `-lfo-order-aligned-latch`.
+
+**Step 1, the reading.**  *What MPlayMain's cost is made of* (probe step
+3, `M4A_CYC_*` in `m4a_engine.h`, charged along MPlayMain's control flow
+in `m4a_sequencer.c` and published by `publish_cycles`): the player's
+place in SoundMain's chain (`mpEntry` 566 / `mpHead` 150 / `mpExit` 370
+for BGM, `set_player`); per tempo tick `TICK_ENTER` and, over the
+player's whole `trackCount` (10 on BGM, not the song's), `TICK_TRACK` or
+`TICK_NO_TRACK`; per existing track the chain walk (`TICK_CHAIN` /
+`NO_CHAIN`, per chained channel `WALK_GATE0` 20 for a TIE, `GATE_DEC` 26
+for a counting N## gate, `GATE_EXPIRE` 34 on the tick it reaches 0,
+`WALK_DEAD` + RealClearChain's link case for a channel that died),
+`TICK_START` 121 on a track's first tick, then either the wait / LFO path
+(`WAIT_NO_LFO`, `WAIT_LFO_DELAY`, `LFO_STEP` + its halves + `LFO_PIT` /
+`LFO_VOL` / `LFO_SAME`) or the command loop: `CMD_FETCH`, an explicit
+command byte (`CMD_BYTE` + `_LOW` / `_RS`) or a data byte under running
+status (`CMD_RUNNING`), `CMD_TABLE` + the handler (keysh 89, tempo 91,
+voice 184, vol 89, ... `cmd_cycles`), ply_note's byte parse (78 + key
+byte 19 + velocity byte 17 + gate byte), voice resolution, the CGB test
+or the DirectSound scan channel by channel, the unlink, TrkVolPitSet,
+ChnVolSetAsm and the frequency routine, and a `W##` (`CMD_WAIT`, 93 with
+its fetch); then the VOLCHG / PITCHG pass per track and chained channel.
+*What the MIDI path has of it.*  (A) What the engine sees each frame is
+ROM-defined given the events: tick or no tick (its own accumulator, on
+the ROM's grid with `--gba-tempo-grid` since slice 3b), the channels and
+their liveness, each event's handler, everything ply_note costs from the
+voice and channel state, the LFO steps.  (B) mid2agb's byte encoding is
+not in the event stream: explicit byte vs running status (6 cycles per
+command), the key / velocity bytes ply_note reads, a `W##` after every
+tick with commands (93) and the extra ones at bar lines and 96-clock
+splits, N## vs TIE (26 vs 20 per channel per tick, a gate expiry 34 vs an
+EOT command), the KEYSH (186) and the inserted VOL at a track's start,
+TEMPO on AGB track 1 (188), PATT / PEND / GOTO, every AGB track existing
+from frame 3, and AGB track order (per SMF track, per MIDI channel with
+notes).  On sq1's frame 3, (B) is about 470 of the 2667.  Part of (B) is
+not causal: whether a note is an N## or a TIE is known at its note-off,
+a PATT only once its whole bar is known to repeat an earlier one.
+
+*The measured gap* (`--psg-log` of the grid-form MIDI render against the
+row's `--song` render, both 3 s for micro rows, the row's length for SEs
+and songs; each engine frame's ordered (register, value) list compared,
+the cycle offset per write in the equal frames): **every frame of every
+PSG row has the same write list on both paths** (25 rows: the 13 PSG
+micro rows, the six PSG SEs and the seven songs; the one exception is
+rg_vs_trainer's 40 frames 904 .. 944, the recorded two-tick-frame
+interleave), and in every equal frame all writes share one offset, the
+entry's, except 4 frames of mt_chimney and 9 of rg_vs_trainer whose
+offsets move inside the frame where the FIFO stall falls on a different
+write.  No write is on its `--song` cycle except wave / wave_alt's frame
+139 (a no-tick frame with a write: the fixed value is the ROM's there).
+Per frame, MIDI minus `--song`:
+sq1 -2667 (frame 3), -472 (33, 78: gate expiry), -1388 / -1394 (48, 93:
+note), -649 (153); wave the same plus -464 on every tick frame with a
+write; noise -2575 / -1296 / -1302 on its start and note frames (noise
+note 832 against 924); psg_mix -8902 (frame 3, four tracks), -746 on its
+tick frames (four existing tracks), -1584 .. -1650 on note frames;
+lfo_psg -3673 (frame 3), -960 / -962 on the LFO-step frames before MODT
+and -830 / -832 after, -2063 on its note frame.  This is the whole PSG
+difference between the two paths on these rows.
+
+**Decision (the user, 2026-10-25):** the model is the renderer's only --
+the plugin keeps the fixed entry and its output does not change; and the
+renderer gets mid2agb's encoding in full (patterns included) for the
+costs, the audible note timing left as it is.
+
+**The design.**  The renderer converts the MIDI with **mid2agb itself**
+(pokeemerald `tools/mid2agb`, vendored as `third_party/mid2agb`, MIT;
+`RaiseError` throws instead of exiting, a reset between conversions, and
+a library entry in place of `main.cpp`) and parses the text with the
+existing `.s` parser: the bytes the ROM would play for this MIDI.
+(pokeemerald's mid2agb, run on sq1, psg_mix, lfo_psg, mus_mt_chimney and
+se_exp with their cfg options, writes text identical to the harness's
+`.s` files, byte for byte.)  Options: `-E` (the MIDI path's notes end at
+their note-off: its gates are exact by construction), `-X` with
+`--extended-clocks`, `-V` with `--song-volume`; `-P` / `-R` / `-G` do not
+enter the cost (one player's notes compare equal priorities; reverb and
+the voicegroup name are not read).  That song runs on **the sequencer
+in a shadow mode** (`m4a_sequencer_init_shadow`): MPlayMain's whole
+control flow and every `M4A_CYC_*` charge exactly as on the `--song`
+path -- one cost model, no copy -- but its channel and track accesses go
+to its own arrays, it never starts, stops or changes an engine channel
+or track, and the channel *liveness* its branches test comes from the
+MIDI engine: at the end of each SoundMain (after SoundMainRAM, where the
+ROM's channels die) the shadow takes the engine's real channel statuses;
+within the next frame it applies its own note starts, gate expiries and
+EOTs to that copy as MPlayMain does; ownership, priority, keys, chains
+and gates are its own.  It runs as the engine's frame hook (MPlayMain's
+place, before the latched drain; `externalSequencer` stays false, so the
+MIDI path's own tick is untouched) and publishes the frame's sum as
+`cgbEntryCycles`.  Gate: **`--gba-tempo-grid`**, no new flag -- the
+costs are the ROM's frames, which the events only reach on the grid
+(without it the MIDI path's ticks are its own and a ROM entry for them
+does not exist); the plugin never sets it.  With the grid, `--player`
+and `--seq-log` also apply on the MIDI path (the shadow's player and its
+trace).  A MIDI mid2agb rejects keeps the fixed entry, with a warning.
+
+*Why it is the ROM's.*  The cost is MPlayMain's over the very bytes the
+ROM would play for this MIDI, segment by segment with the probe's
+measured constants (the code the `--song` path is bit-exact with), its
+branches decided on the MIDI path's own channels as the MIDI engine left
+them; nothing is fitted.  Where the MIDI path's channels match the
+ROM's, the entry is the ROM's by construction; where they do not
+(per-tick batching, ply_fine), it follows the MIDI path's channels.
+
+*Predictions* (grid form; latched and unlatched alike):
+
+1. **Song input byte-identical**: claim_check 59 / 0 moved / 57/66 / 0
+   regressions / every row 0.0 (the shadow mode is new code beside the
+   sequencer's; with it off every access is the old one).
+2. **The aligned pair byte-identical** to `-lfo-order-aligned(-latch)`
+   (no shadow without the grid).
+3. **PCM-only rows byte-identical** to their lfo-order WAVs: the 18
+   PCM micro rows (vol and lfo_delay at -47.2 / -20.3 included) and
+   se_rain_stop -- nothing reads the entry without a CGB channel.
+4. **Every PSG write on its `--song` cycle** on every frame with the
+   same write list: offset 0 on all writes of the 25 PSG rows but
+   rg_vs_trainer's frames 904 .. 944.
+5. **The PSG micro rows -inf** (their `--song` value): sq1, sq1_env,
+   sq1_sweep, sq1_alt, sq2_alt, wave, wave_alt, noise, noise7, tune_psg,
+   psg_mix, lfo_psg; sq2 stays -inf.  pcm_psg reaches its `--song` value,
+   -55.0 / -49.2 (its PCM half is the song path's channel state, slice 2a).
+6. **The PSG-only SEs and song -inf**: se_exp, se_truck_unload,
+   se_low_health, mus_weather_groudon (lag 0.0, drift 0.0).
+7. **The mixed rows** (littleroot, vs_wild, mt_chimney, rg_vs_trainer,
+   vs_trainer, credits, se_faint, se_contest_place) improve with their
+   PSG half exact; how far depends on their PCM side, not measured
+   before the change.  Pass count at least 34 / 44 (17 + 13 + 4).
+
+**Step 2, the code.**  `third_party/mid2agb/` (pokeemerald commit
+962442a, the five sources and headers, LICENSE, README naming the three
+marked changes) built as the static library `mid2agb`, linked into
+`poryaaaa_render` only.  The vendored converter's text is identical to
+the harness's compiled `.s` on all 560 MIDIs that have one (529 songs
+with their midi.cfg options, 31 micro rows; a scratch check, the second
+conversion in one process identical too).  `plugin/m4a_sequencer.c`:
+the timing mode -- every channel access through accessors
+(`chan_status`, `chan_gate_time`, `chan_track`, `chan_priority`,
+`chan_midi_key`, `chan_cgb_type`, `chan_cgb_key`, `chan_clear_track`)
+and every track access through `seq_track` (the `ETRK` macro), which
+read the engine as before or, with `timingOnly`, the sequencer's
+`tm*` copies; the five engine calls (`m4a_engine_note_on`,
+`_program_change_from`, `_track_apply`, `_xcmd`, `_kill_channel`) and
+the header's reverb skipped in timing mode, ply_note storing what the
+engine's note-on would (SF_START, the priority, the owner, the keys) and
+doing its work on the track (TrkVolPitSet; the LFO-delay restart of
+`note_on_restart_lfo_delay`'s sequencer form -- missing at first, which
+left lfo_delay's entry 517 cycles off on frame 3 and 106 / 177 frames
+equal; the unit test below now holds it); `m4a_sequencer_init_timing`,
+its snapshot as the engine's new `frameEndHook` (end of `sound_main`,
+after SoundMainRAM), its trace numbered as the ROM's frames.
+`cmd/poryaaaa_render.c`: with `--gba-tempo-grid`, `load_timing_song`
+(mid2agb with `-E -V<song volume>` and `-X`, parsed), the timing-only
+sequencer on `--player`'s player with the loaded voicegroup, started at
+the origin with `m4a_engine_start_song_tempo`, `--seq-log` its trace;
+the `--player` / `--seq-log` notes say where they apply; usage text.
+No new flag; `m4a_plugin.c` unchanged (the plugin never attaches one).
+
+**Step 3, the unit test** (`test_cgb_entry_midi_path`, 15 assertions):
+the same material through the MIDI path (the renderer's calls with the
+start delay and the grid: the seed at the origin, the held TEMPO, each
+event before its tick's SoundMain; a timing-only sequencer over the
+song's text) and through a sequencer song, both engines booted with
+their output: the CgbSound entry and every PSG write's register, value
+and cycle equal on every frame -- sq1 (frames 3 .. 162, tick and no-tick
+frames, its note, gate-expiry and running-status frames; and on frames
+3 .. 52 the entries are mgba's, the probe column of
+`test_sequencer_cycles`) and two tracks (square 1 notes under running
+status and a velocity byte, a square-2 TIE with LFODL / LFOS / MOD
+ended by EOT: the delay countdown, LFO frames, the pitch pass), latched
+and not; without a timing-only sequencer the fixed 1402 and no hooks;
+a timing-only sequencer with no MIDI events starts no engine channel,
+leaves the engine's tracks untouched, applies no reverb, still charges
+the start frame, and its detach removes both hooks.  Checked against
+the old behaviour: with the timing-only sequencer's publish disabled
+(the fixed entry) 7 assertions fail (sq1 130 / 160 frames, two tracks
+144 / 150); without the LFO-delay restart the two-track ones fail (20
+frames).  Unit **1873/1873** (1858 + 15).
+
+**Step 4, the measurement.**  Song input: claim_check 59 diffed, 0
+moved, 57/66, 0 regressions, no row moved; blip 49112/0, songs 561/561;
+poryaaaa and poryaaaa-standalone build.  Midi:
+`baselines/2026-10-25_midi-path-cgb-entry(.json/.txt)`, `-latch`,
+`-aligned`, `-aligned-latch`: **grid 35/44** (lfo-order 17/44), aligned
+12/44 (12/44); latched = unlatched on both pairs (0 field differences,
+every WAV byte-identical); the aligned pair 0 field differences against
+`-lfo-order-aligned(-latch)` and every WAV byte-identical;
+`compare_reports.py` 0 regressions over 1 dB.  The rows that moved
+(grid form; every other row byte-identical to its lfo-order WAV):
+
+| test | lfo-order null / worst1s | cgb-entry null / worst1s | `--song` | aligned (both sets) |
+|------|------:|------:|------:|------:|
+| sq1 | -37.2 / -32.9 | **-inf / -inf** PASS | -inf / -inf | -37.2 / -32.9 |
+| sq1_env | -3.5 / -1.2 | **-inf / -inf** PASS | -inf / -inf | -3.5 / -1.2 |
+| sq1_sweep | -43.1 / -37.1 | **-inf / -inf** PASS | -inf / -inf | -43.1 / -37.1 |
+| sq1_alt | -35.5 / -30.6 | **-inf / -inf** PASS | -inf / -inf | -35.5 / -30.6 |
+| sq2_alt | -34.5 / -29.7 | **-inf / -inf** PASS | -inf / -inf | -34.5 / -29.7 |
+| wave | -11.8 / -9.4 | **-inf / -inf** PASS | -inf / -inf | -11.8 / -9.4 |
+| wave_alt | -10.6 / -8.2 | **-inf / -inf** PASS | -inf / -inf | -10.6 / -8.2 |
+| noise | -5.1 / -3.1 | **-inf / -inf** PASS | -inf / -inf | -5.1 / -3.1 |
+| noise7 | -6.0 / -2.9 | **-inf / -inf** PASS | -inf / -inf | -6.0 / -2.9 |
+| lfo_psg | -17.8 / -16.1 | **-inf / -inf** PASS | -inf / -inf | -2.0 / 0.2 |
+| tune_psg | -33.5 / -26.5 | **-inf / -inf** PASS | -inf / -inf | -33.5 / -26.5 |
+| psg_mix | -3.8 / -2.0 | **-inf / -inf** PASS | -inf / -inf | -2.1 / 1.9 |
+| pcm_psg | -17.3 / -14.4 | **-55.0 / -49.2** PASS | -55.0 / -49.2 | -17.3 / -14.4 |
+| mus_littleroot | -14.7 / -10.4 | -26.8 / -21.8 | -49.6 / -44.2 | 2.2 / 4.0 |
+| mus_weather_groudon | -2.8 / 0.3 (lag -14.3, drift -0.6) | **-inf / -inf** PASS (lag 0.0, drift 0.0) | -inf / -inf | -1.5 / 3.1 |
+| mus_vs_wild | -10.1 / -5.0 | -21.1 / -11.1 | -49.4 / -40.1 | 2.1 / 3.7 |
+| mus_mt_chimney | -3.2 / -0.2 | -35.6 / -25.0 | -49.6 / -44.3 | 1.7 / 3.7 |
+| mus_rg_vs_trainer | -5.0 / -0.2 | -15.4 / -7.0 | -49.3 / -42.9 | 2.3 / 3.9 |
+| mus_vs_trainer | -12.7 / -4.7 | -43.1 / -30.8 | -52.7 / -45.2 | 2.0 / 3.5 |
+| mus_credits | -14.4 / -7.0 | -46.0 / -26.8 | -51.3 / -40.7 | 2.2 / 5.4 |
+| se_exp | -0.8 / 1.6 | **-inf / -inf** PASS | -inf / -inf | 2.0 / 3.0 |
+| se_faint | -5.5 / -2.4 | **-53.3 / -42.9** PASS | -53.3 / -42.9 | -5.5 / -2.4 |
+| se_contest_place | -10.8 / -8.6 | -25.5 / -12.2 | -53.7 / -44.7 | -10.8 / -8.5 |
+| se_truck_unload | 1.1 / 1.1 | **-inf / -inf** PASS | -inf / -inf | 1.1 / 1.1 |
+| se_low_health | -1.9 / -0.5 | **-inf / -inf** PASS | -inf / -inf | -1.9 / -0.5 |
+
+*The write-cycle offsets* (MIDI minus `--song`, grid form, each frame's
+ordered (register, value) list matched against the same frame of the
+`--song` log, offsets in the equal frames; before = lfo-order code,
+after = this slice): every listed row had all its frames equal before
+and after (rg_vs_trainer but its 40 frames 904 .. 944 both times), so
+the lists are the same and only the cycles moved:
+
+| row | before: writes on their `--song` cycle; offsets (commonest) | after |
+|-----|------|------|
+| sq1 / sq1_alt / sq2 / sq2_alt | 0 / 27 (24 on sq2*); -2667 .. -472 (-2667) | all on cycle |
+| sq1_env | 0 / 35; -2667 .. +395 (-2667) | 35 / 35 |
+| sq1_sweep | 0 / 18; -2671 .. -472 (-2671) | 18 / 18 |
+| wave / wave_alt | 2 / 66 (frame 139); -2667 .. 0 (-464) | 66 / 66 |
+| noise / noise7 | 0 / 36; -2575 .. -464 (-464) | 36 / 36 |
+| tune_psg | 0 / 27; -2851 .. -472 (-1609) | 27 / 27 |
+| psg_mix | 0 / 107; -8902 .. -18 (-8902) | 107 / 107 |
+| lfo_psg | 0 / 253; -3673 .. -649 (-830) | 253 / 253 |
+| pcm_psg | 0 / 23; -9087 .. -1451 (-9087) | 23 / 23 |
+| se_exp | 0 / 284; -2585 .. -369 (-1548) | 284 / 284 |
+| se_faint | 0 / 38; -6366 .. -178 (-6366) | 38 / 38 |
+| se_contest_place | 0 / 51; -8952 .. -682 (-8952) | 51 / 51 |
+| se_truck_unload | 0 / 22; -2327 .. -493 (-2327) | 22 / 22 |
+| se_low_health | 0 / 67; -2491 .. +118 (-1116) | 67 / 67 |
+| mus_littleroot | 0 / 1169; -21293 .. -48 (-48) | 1169 / 1169 |
+| mus_weather_groudon | 0 / 2813; -9301 .. -12 (-12) | 2813 / 2813 |
+| mus_vs_wild | 0 / 1104; -14518 .. -1012 (-1102) | 1104 / 1104 |
+| mus_mt_chimney | 0 / 4223; -24157 .. -48 (-48) | 4223 / 4223 |
+| mus_rg_vs_trainer | 0 / 4120; -22771 .. -1148 (-10095) | 4120 / 4120 (40 frames' lists differ, both times) |
+| mus_vs_trainer | 0 / 927; -16682 .. -1038 (-1102) | 927 / 927 |
+| mus_credits | 0 / 2018; -9150 .. -54 (-54) | 2018 / 2018 |
+
+(3 s renders for micro rows, the row's length for SEs and songs;
+mt_chimney's 4 and rg_vs_trainer's 9 frames whose offsets moved inside
+the frame before -- the FIFO stall on a different write -- are on cycle
+too.)  The timing-only sequencer's `--seq-log` against the `--song`
+render's: the CgbSound entry equal on every frame of all 44 rows (177
+frames per micro row, 117 / 177 per SE, 1192 per song, 3581 for
+credits) -- including the rows whose MIDI path departs from the ROM
+elsewhere (vol, lfo_delay, se_rain_stop, rg_vs_trainer): their channel
+liveness agrees at each SoundMain.  34 of the 44 grid WAVs are now
+byte-identical to their `--song` renders (all but vol, lfo_delay, the
+six mixed songs, se_contest_place, se_rain_stop -- and those because of
+PCM or LFO state, below).
+
+**Which predictions held.**
+
+1. *Song input byte-identical*: held.
+2. *The aligned pair byte-identical*: held (fields and WAVs, both latch
+   forms).
+3. *PCM-only rows byte-identical*: held (18 micro rows and se_rain_stop).
+4. *Every PSG write on its `--song` cycle*: held, 25 rows, every write
+   of every equal frame.
+5. *The PSG micro rows -inf, pcm_psg at its `--song` -55.0 / -49.2*:
+   held, all 13.
+6. *se_exp, se_truck_unload, se_low_health, groudon -inf*: held
+   (groudon lag 0.0, drift 0.0).
+7. *The mixed rows improve, at least 34 / 44*: held, 35 / 44 --
+   se_faint, which I had among the mixed rows, reaches its `--song`
+   value (-53.3 / -42.9): its DirectSound snare is the song path's
+   sample for sample.  Not passing: littleroot -26.8, vs_wild -21.1,
+   mt_chimney -35.6, rg_vs_trainer -15.4, vs_trainer -43.1 (worst
+   -30.8), credits -46.0 (worst -26.8), se_contest_place -25.5.
+
+**What is left on the MIDI path** (each against the row's own `--song`
+render): with every PSG write on its `--song` cycle and register / value
+list, the PSG half of every row is the song path's, except
+rg_vs_trainer's frames 904 .. 944 (the two-tick-frame LFO interleave).
+What the seven failing rows still differ in is their DirectSound side --
+the per-tick command batching and ply_fine's unlink of slice 1 / 3b
+(vol -47.2, lfo_delay -20.3, se_rain_stop and se_contest_place named
+there; the songs' PCM tracks the same mechanisms, not taken apart here)
+-- and rg_vs_trainer's interleave.  The MIDI path's CgbSound entry is
+the ROM's on every frame of the corpus under `--gba-tempo-grid`; without
+it (the aligned pair, the plugin) it stays the fixed one-track no-tick
+value, by decision.
+
+**The midi baseline** is now the cgb-entry set
+(`2026-10-25_midi-path-cgb-entry.json` / `-latch.json`, the runner's
+default; `-cgb-entry-aligned` / `-aligned-latch` for
+`--no-gba-tempo-grid`, identical to the lfo-order-aligned pair); the
+lfo-order set is history.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

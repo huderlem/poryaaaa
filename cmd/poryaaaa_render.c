@@ -31,6 +31,7 @@
 #include "m4a_sequencer.h"
 #include "voicegroup_loader.h"
 #include "gba_tempo_grid.h"
+#include "mid2agb_lib.h"
 
 /* ========================================================================
  * WAV writing helpers (matching test_wav_export.c)
@@ -816,6 +817,9 @@ static void print_usage(const char *prog)
         "                              --gba-start-delay each tick and LFO step lands on the\n"
         "                              ROM's frame (without it the ticks of the first frames\n"
         "                              collapse onto frame 3 and the LFO runs 3 frames behind).\n"
+        "                              The CgbSound entry follows the work MPlayMain would do\n"
+        "                              for the song mid2agb (-E) makes of the MIDI, as on the\n"
+        "                              --song path; --player and --seq-log then apply too.\n"
         "                              Default: the exact tempo map\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
@@ -1316,6 +1320,32 @@ static int cmp_render_event_pos(const void *a, const void *b)
 }
 
 /*
+ * --gba-tempo-grid: the song mid2agb makes of the MIDI, for the CgbSound
+ * entry (plan, milestone 5 slice 5).  A timing-only sequencer runs MPlayMain over
+ * it cost for cost and publishes the entry; the MIDI path plays the events
+ * as before.  Options: -E (the MIDI path's notes end at their note-off, an
+ * exact gate), -X with --extended-clocks, -V with --song-volume; the
+ * priority, reverb and voicegroup name do not enter the cost.  NULL, with a
+ * warning, for a MIDI mid2agb rejects (the fixed entry stays).
+ */
+static M4ASong *load_timing_song(const char *midiPath, bool extendedClocks, int songVolume)
+{
+    char vol[16], err[256] = "";
+    snprintf(vol, sizeof(vol), "-V%d", songVolume);
+    const char *opts[3] = { "-E", vol, "-X" };
+    char *text = mid2agb_convert(midiPath, "song", extendedClocks ? 3 : 2, opts, err, sizeof(err));
+    if (!text) {
+        fprintf(stderr, "Warning: %s; the CgbSound entry stays the fixed one\n", err);
+        return NULL;
+    }
+    M4ASong *song = m4a_song_parse(text, strlen(text), err, sizeof(err));
+    free(text);
+    if (!song)
+        fprintf(stderr, "Warning: mid2agb's song does not parse (%s); the CgbSound entry stays the fixed one\n", err);
+    return song;
+}
+
+/*
  * --gba-start-delay: the output sample MIDI time 0 is dispatched at.  The
  * ROM's first song tick is frame 3's SoundMain (MPlayStart runs on frame 2):
  * 124773 + 2 x 280896 + 160 x 1232 + 197 = 883882 cycles, m4a_engine.c's
@@ -1655,8 +1685,11 @@ int main(int argc, char *argv[])
 
     double sampleRate = (double)sampleRateHz;
 
-    if (midiPath && player != M4A_PLAYER_BGM)
-        fprintf(stderr, "Note: --player only applies to --song (the MIDI path has no music player)\n");
+    if (midiPath && !gbaTempoGrid && player != M4A_PLAYER_BGM)
+        fprintf(stderr, "Note: --player only applies to --song, and to --midi with --gba-tempo-grid "
+                        "(the CgbSound entry's music player)\n");
+    if (midiPath && !gbaTempoGrid && seqLogPath)
+        fprintf(stderr, "Note: --seq-log only applies to --song / --cry, and to --midi with --gba-tempo-grid\n");
 
     if (songPath || cryId >= 0) {
         if (quantize)
@@ -2144,6 +2177,32 @@ oom:
     if (quantize)
         printf("MIDI events latched to the VBlank tick (--quantize)\n");
 
+    /* --gba-tempo-grid: the CgbSound entry of the song mid2agb makes of the
+     * MIDI, from a timing-only sequencer on the chosen player (load_timing_song),
+     * attached after the boot as the --song path's sequencer is. */
+    static M4ASequencer timingSeq;
+    M4ASong *timingSong = gbaTempoGrid ? load_timing_song(midiPath, extendedClocks, songVolume) : NULL;
+    FILE *seqLog = NULL;
+    if (timingSong) {
+        m4a_sequencer_init_timing(&timingSeq, &engine);
+        m4a_sequencer_set_voicegroup(&timingSeq, vg->voices);
+        if (m4a_sequencer_set_player(&timingSeq, player) != 0) {
+            fprintf(stderr, "Error: no music player %d\n", player);
+            m4a_sequencer_detach(&timingSeq);
+            m4a_song_free(timingSong);
+            m4a_engine_destroy(&engine);
+            voicegroup_free(vg);
+            free(extEvts);
+            free(events->events);
+            free(events);
+            return 1;
+        }
+        seqLog = seqLogPath ? fopen(seqLogPath, "w") : NULL;
+        timingSeq.traceFile = seqLog;
+        printf("  CgbSound entry: MPlayMain over mid2agb's song of the MIDI (%u tracks), player %d\n",
+               timingSong->trackCount, player);
+    }
+
     /* ---- Allocate output buffers ---- */
     float *outL = calloc(totalSamples, sizeof(float));
     float *outR = calloc(totalSamples, sizeof(float));
@@ -2151,6 +2210,8 @@ oom:
         fprintf(stderr, "Out of memory allocating audio buffers (%llu samples)\n",
                 (unsigned long long)totalSamples);
         free(outL); free(outR);
+        m4a_song_free(timingSong);
+        if (seqLog) fclose(seqLog);
         m4a_engine_destroy(&engine);
         voicegroup_free(vg);
         free(extEvts);
@@ -2182,6 +2243,8 @@ oom:
                 samplePos = midiOrigin;
             }
             m4a_engine_start_song_tempo(&engine);
+            if (timingSong)
+                m4a_sequencer_start(&timingSeq, timingSong);   /* MPlayStart, as the ROM's frame 2 */
             songTempoStarted = true;
         }
 
@@ -2216,6 +2279,12 @@ oom:
         fclose(sPsgLog.f);
         sPsgLog.f = NULL;
     }
+    if (timingSong) {
+        m4a_sequencer_detach(&timingSeq);
+        m4a_song_free(timingSong);
+    }
+    if (seqLog)
+        fclose(seqLog);
     free(outL);
     free(outR);
     m4a_engine_destroy(&engine);
