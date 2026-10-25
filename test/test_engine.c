@@ -6130,6 +6130,260 @@ static void test_event_latch(void)
     free(wd);
 }
 
+/* The PCM channel sounding (track, key), or NULL. */
+static M4APCMChannel *find_pcm_note(M4AEngine *e, int track, int key)
+{
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
+        M4APCMChannel *c = &e->pcmChannels[i];
+        if ((c->status & CHN_ON) && c->trackIndex == track && c->midiKey == key)
+            return c;
+    }
+    return NULL;
+}
+
+static void test_note_choke(void)
+{
+    printf("Testing NOTE_CHOKE (m4a_engine_note_choke)...\n");
+
+    WaveData *wd = seq_test_wave();
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+    voices[0].release = 0x80;
+    voices[2].type = VOICE_SQUARE_1;
+    voices[2].key = 60;
+    voices[2].sustain = 15;
+    voices[2].wavePointer = (void *)(uintptr_t)2;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    for (int t = 0; t < 2; t++) {
+        m4a_engine_program_change(&engine, t, 0);
+        m4a_engine_cc(&engine, t, 7, 127);
+    }
+
+    /* --- latch off: a cut at once, where a note-off releases --- */
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    m4a_engine_note_on(&engine, 0, 64, 127);
+    m4a_engine_note_on(&engine, 1, 60, 127);
+    m4a_engine_tick(&engine);
+    M4APCMChannel *a = find_pcm_note(&engine, 0, 60);
+    M4APCMChannel *b = find_pcm_note(&engine, 0, 64);
+    M4APCMChannel *c = find_pcm_note(&engine, 1, 60);
+    ASSERT(a && b && c, "choke off: three notes sounding");
+    if (!a || !b || !c) { m4a_engine_destroy(&engine); free(wd); return; }
+    m4a_engine_note_choke(&engine, 0, 60);
+    ASSERT_EQ(a->status, 0, "choke off: the key's channel cut at once (status 0, no release)");
+    ASSERT(b->status & CHN_ON, "choke off: another key on the track untouched");
+    ASSERT(!(b->status & CHN_STOP), "choke off: another key not released");
+    ASSERT(c->status & CHN_ON, "choke off: the same key on another track untouched");
+    m4a_engine_note_off(&engine, 0, 64);
+    ASSERT(b->status & CHN_STOP, "choke off: note_off still releases (STOP, not a cut)");
+    ASSERT(b->status & CHN_ON, "choke off: the released channel still sounds");
+    m4a_engine_note_choke(&engine, 0, 64);
+    ASSERT_EQ(b->status, 0, "choke off: a releasing channel is cut too");
+    m4a_engine_note_choke(&engine, 1, 60);
+    ASSERT_EQ(c->status, 0, "choke off: track 1's key cut");
+
+    /* --- latch on: a sounding note, a note queued in the same frame, another key --- */
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    m4a_engine_note_on(&engine, 0, 64, 127);
+    m4a_engine_tick(&engine);
+    a = find_pcm_note(&engine, 0, 60);
+    b = find_pcm_note(&engine, 0, 64);
+    ASSERT(a && b, "choke on: two notes sounding");
+    if (!a || !b) { m4a_engine_destroy(&engine); free(wd); return; }
+    a->status = b->status = CHN_ENV_SUSTAIN;  /* the mixer's envelope step would have run by now */
+    m4a_engine_set_quantize_events(&engine, true);
+    m4a_engine_note_off(&engine, 0, 60);              /* queued */
+    m4a_engine_note_on(&engine, 0, 62, 127);           /* queued */
+    m4a_engine_note_on(&engine, 0, 60, 127);           /* queued: the key retriggered */
+    m4a_engine_cc(&engine, 0, 7, 100);                 /* queued */
+    m4a_engine_note_off(&engine, 0, 64);               /* queued */
+    ASSERT_EQ(engine.eventQueueCount, 5, "choke on: five events queued");
+    m4a_engine_note_choke(&engine, 0, 60);
+    ASSERT_EQ(a->status, 0, "choke on: the sounding note cut at once, not at the tick");
+    ASSERT(!(b->status & CHN_STOP), "choke on: another key's queued note-off still waits");
+    ASSERT_EQ(engine.eventQueueCount, 3, "choke on: the key's queued note-off and note-on removed");
+    ASSERT_EQ(engine.eventQueue[0].kind, M4A_EV_NOTE_ON, "choke on: queue[0] is note-on 62");
+    ASSERT_EQ(engine.eventQueue[0].a, 62, "choke on: queue[0] key 62");
+    ASSERT_EQ(engine.eventQueue[1].kind, M4A_EV_CC, "choke on: queue[1] is the CC, order kept");
+    ASSERT_EQ(engine.eventQueue[2].kind, M4A_EV_NOTE_OFF, "choke on: queue[2] is note-off 64");
+    ASSERT_EQ(engine.eventQueue[2].a, 64, "choke on: queue[2] key 64");
+    ASSERT(engine.quantizeEvents, "choke on: the latch stays on");
+    m4a_engine_tick(&engine);
+    ASSERT(find_pcm_note(&engine, 0, 60) == NULL, "choke on: the choked note-on never starts");
+    ASSERT(find_pcm_note(&engine, 0, 62) != NULL, "choke on: the other queued note-on starts at the tick");
+    ASSERT(b->status & CHN_STOP, "choke on: key 64's note-off applied at the tick");
+    ASSERT_EQ(engine.tracks[0].rawVolume, 100, "choke on: the queued CC applied at the tick");
+
+    /* --- latch on: a note queued and released in the same frame, choked
+     * before its tick: nothing starts and nothing is left queued --- */
+    m4a_engine_note_on(&engine, 0, 67, 127);
+    m4a_engine_note_off(&engine, 0, 67);
+    m4a_engine_note_choke(&engine, 0, 67);
+    ASSERT_EQ(engine.eventQueueCount, 0, "choke on: a same-frame note and its note-off both removed");
+    m4a_engine_tick(&engine);
+    ASSERT(find_pcm_note(&engine, 0, 67) == NULL, "choke on: the same-frame note never starts");
+
+    /* --- wildcards: key -1 on one track, track -1 for one key, both --- */
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        engine.pcmChannels[i].status = 0;
+    m4a_engine_set_quantize_events(&engine, false);
+    m4a_engine_note_on(&engine, 0, 48, 127);
+    m4a_engine_note_on(&engine, 0, 50, 127);
+    m4a_engine_note_on(&engine, 1, 48, 127);
+    m4a_engine_set_quantize_events(&engine, true);
+    m4a_engine_note_on(&engine, 0, 52, 127);           /* queued on track 0 */
+    m4a_engine_note_on(&engine, 1, 52, 127);           /* queued on track 1 */
+    m4a_engine_cc(&engine, 0, 7, 90);                  /* queued, not a note */
+    m4a_engine_note_choke(&engine, 0, -1);
+    ASSERT(find_pcm_note(&engine, 0, 48) == NULL && find_pcm_note(&engine, 0, 50) == NULL,
+           "choke key -1: every key on track 0 cut");
+    ASSERT(find_pcm_note(&engine, 1, 48) != NULL, "choke key -1: track 1 untouched");
+    ASSERT_EQ(engine.eventQueueCount, 2, "choke key -1: track 0's queued note removed, the rest kept");
+    ASSERT(engine.eventQueue[0].kind == M4A_EV_NOTE_ON && engine.eventQueue[0].track == 1,
+           "choke key -1: track 1's note-on kept first");
+    ASSERT_EQ(engine.eventQueue[1].kind, M4A_EV_CC, "choke key -1: the CC kept");
+    m4a_engine_note_on(&engine, 0, 48, 127);           /* queued */
+    m4a_engine_note_choke(&engine, -1, 48);
+    ASSERT(find_pcm_note(&engine, 1, 48) == NULL, "choke track -1: key 48 on track 1 cut");
+    ASSERT_EQ(engine.eventQueueCount, 2, "choke track -1: key 48's queued note-on removed");
+    m4a_engine_note_choke(&engine, -1, -1);
+    ASSERT_EQ(engine.eventQueueCount, 1, "choke -1 / -1: every queued note removed, the CC kept");
+    ASSERT_EQ(engine.eventQueue[0].kind, M4A_EV_CC, "choke -1 / -1: only the CC left");
+    int on = 0;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        on += (engine.pcmChannels[i].status & CHN_ON) != 0;
+    ASSERT_EQ(on, 0, "choke -1 / -1: nothing sounding");
+
+    /* --- out-of-range arguments are ignored --- */
+    m4a_engine_note_on(&engine, 0, 60, 127);           /* queued */
+    m4a_engine_note_choke(&engine, MAX_TRACKS, 60);
+    m4a_engine_note_choke(&engine, 0, 128);
+    ASSERT_EQ(engine.eventQueueCount, 2, "choke: track 16 / key 128 leave the queue alone");
+    m4a_engine_flush_events(&engine);
+    ASSERT(find_pcm_note(&engine, 0, 60) != NULL, "choke: track 16 / key 128 cut nothing");
+    m4a_engine_set_quantize_events(&engine, false);
+
+    /* --- the shadow pool (poly debug's lost sounds) is cut too --- */
+    M4APCMChannel *sh = &engine.pcmChannels[MAX_PCM_CHANNELS];
+    sh->status = CHN_ENV_SUSTAIN;
+    sh->trackIndex = 0;
+    sh->midiKey = 60;
+    m4a_engine_note_choke(&engine, 0, 60);
+    ASSERT_EQ(sh->status, 0, "choke: the shadow channel cut");
+    ASSERT(find_pcm_note(&engine, 0, 60) == NULL, "choke: the real channel cut");
+
+    /* --- a CGB channel: cut at once, the PSG oscillator off --- */
+    m4a_engine_program_change(&engine, 0, 2);
+    m4a_engine_set_quantize_events(&engine, true);
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    m4a_engine_tick(&engine);
+    M4ACGBChannel *sq = &engine.cgbChannels[0];
+    ASSERT(sq->status & CHN_ON, "choke CGB: the square note sounding");
+    m4a_engine_note_choke(&engine, 0, 60);
+    ASSERT_EQ(sq->status, 0, "choke CGB: the channel cut at once with the latch on");
+
+    m4a_engine_destroy(&engine);
+    free(wd);
+}
+
+/* The plugin's playing -> stopped edge (m4a_plugin.c plugin_process): the
+ * latch is turned off -- applying what it holds -- before the portamento
+ * reset, so a note queued before the stop cannot leave glide history. */
+static void test_transport_stop_edge(void)
+{
+    printf("Testing the transport stop edge (latch flush, then portamento reset)...\n");
+
+    WaveData *wd = seq_test_wave();
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+    voices[0].release = 0x80;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    engine.portamentoEnabled = true;
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 0x5, 5);
+
+    /* Playing: a note sounds and its note-off is queued; then the stop. */
+    m4a_engine_set_quantize_events(&engine, true);
+    m4a_engine_note_on(&engine, 0, 50, 127);
+    m4a_engine_tick(&engine);
+    M4APCMChannel *n50 = find_pcm_note(&engine, 0, 50);
+    ASSERT(n50 != NULL, "stop edge: key 50 sounding while playing");
+    if (!n50) { m4a_engine_destroy(&engine); free(wd); return; }
+    n50->status = CHN_ENV_SUSTAIN;      /* the mixer's envelope step would have run by now */
+    m4a_engine_note_off(&engine, 0, 50);
+    ASSERT(!(n50->status & CHN_STOP), "stop edge: the note-off queued, not applied");
+    m4a_engine_set_quantize_events(&engine, false);
+    ASSERT(n50->status & CHN_STOP, "stop edge: the queued note-off reached its note at the flush (no hang)");
+    m4a_engine_reset_portamento(&engine);
+
+    /* Playing again (key 50 is the history): a note-on queued, then the
+     * stop edge in the plugin's order. */
+    m4a_engine_set_quantize_events(&engine, true);
+    m4a_engine_note_on(&engine, 0, 50, 127);
+    m4a_engine_tick(&engine);
+    m4a_engine_note_on(&engine, 0, 48, 127);
+    ASSERT_EQ(engine.eventQueueCount, 1, "stop edge: a note-on queued before the stop");
+    m4a_engine_set_quantize_events(&engine, false);
+    ASSERT_EQ(engine.eventQueueCount, 0, "stop edge: the latch's flush emptied the queue");
+    ASSERT(find_pcm_note(&engine, 0, 48) != NULL, "stop edge: the queued note-on applied at the flush");
+    ASSERT(engine.tracks[0].portamentoGliding, "stop edge: the flushed note-on glides from 50, as at its tick");
+    ASSERT_EQ(engine.tracks[0].portamentoTargetKey, 48, "stop edge: the flushed note-on is the glide target");
+    m4a_engine_reset_portamento(&engine);
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 0, "stop edge: the reset after the flush forgets the history");
+    ASSERT(!engine.tracks[0].portamentoGliding, "stop edge: the reset ends the glide");
+
+    /* Stopped: the first live note does not glide, and applies at once. */
+    int h = m4a_engine_note_on(&engine, 0, 60, 127);
+    ASSERT(h >= 0, "stop edge: the live note applies at once (latch off)");
+    ASSERT(!engine.tracks[0].portamentoGliding, "stop edge: no glide from a note queued before the stop");
+    ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 60, "stop edge: the live note is the new history");
+    ASSERT_EQ(engine.tracks[0].portamentoDuration, 5, "stop edge: CC 5 survives");
+    m4a_engine_destroy(&engine);
+
+    /* The hazard the order prevents: reset first, then the flush. */
+    m4a_engine_init(&engine, 48000.0f);
+    engine.portamentoEnabled = true;
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 0x5, 5);
+    m4a_engine_set_quantize_events(&engine, true);
+    m4a_engine_note_on(&engine, 0, 48, 127);
+    m4a_engine_reset_portamento(&engine);
+    m4a_engine_set_quantize_events(&engine, false);
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    ASSERT(engine.tracks[0].portamentoGliding,
+           "stop edge, reversed order: the live note glides from the queued one (the hazard)");
+    m4a_engine_destroy(&engine);
+
+    /* Stopped -> playing: nothing was queued; the block's events queue. */
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_set_quantize_events(&engine, true);
+    ASSERT_EQ(engine.eventQueueCount, 0, "start edge: nothing queued at the flip");
+    ASSERT_EQ(m4a_engine_note_on(&engine, 0, 60, 127), M4A_CHANNEL_QUEUED, "start edge: the next event queues");
+    m4a_engine_set_quantize_events(&engine, true);
+    ASSERT_EQ(engine.eventQueueCount, 1, "start edge: a repeated 'playing' block keeps the queue");
+    m4a_engine_destroy(&engine);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -6199,6 +6453,8 @@ int main(void)
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();
     test_event_latch();
+    test_note_choke();
+    test_transport_stop_edge();
     test_gba_start_delay_origin();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);

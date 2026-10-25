@@ -756,6 +756,40 @@ void m4a_engine_set_quantize_events(M4AEngine *engine, bool enabled)
     engine->quantizeEvents = enabled;
 }
 
+static bool choke_matches(int trackIndex, int key, int chTrack, int chKey)
+{
+    return (trackIndex < 0 || chTrack == trackIndex) && (key < 0 || chKey == key);
+}
+
+void m4a_engine_note_choke(M4AEngine *engine, int trackIndex, int key)
+{
+    if (trackIndex >= MAX_TRACKS || key > 127)
+        return;
+
+    /* The key's latched note-ons and note-offs go: the choked note must not
+     * start at the next tick, and its note-off has nothing left to end. */
+    int kept = 0;
+    for (int i = 0; i < engine->eventQueueCount; i++) {
+        const M4AQueuedEvent *ev = &engine->eventQueue[i];
+        if ((ev->kind == M4A_EV_NOTE_ON || ev->kind == M4A_EV_NOTE_OFF)
+            && choke_matches(trackIndex, key, ev->track, ev->a))
+            continue;
+        engine->eventQueue[kept++] = *ev;
+    }
+    engine->eventQueueCount = kept;
+
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
+        M4APCMChannel *ch = &engine->pcmChannels[i];
+        if ((ch->status & CHN_ON) && choke_matches(trackIndex, key, ch->trackIndex, ch->midiKey))
+            m4a_engine_kill_channel(engine, i);
+    }
+    for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
+        M4ACGBChannel *ch = &engine->cgbChannels[i];
+        if ((ch->status & CHN_ON) && choke_matches(trackIndex, key, ch->trackIndex, ch->midiKey))
+            m4a_engine_kill_channel(engine, TOTAL_PCM_CHANNELS + i);
+    }
+}
+
 /*
  * Program Change - select instrument from voicegroup
  */

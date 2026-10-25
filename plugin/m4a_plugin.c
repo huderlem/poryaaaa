@@ -232,6 +232,9 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     m4a_engine_set_poly_debug_invert(&data->engine, data->polyDebugInvert);
     m4a_engine_set_pcm_freq_mode(&data->engine, data->pcmFreqMode);
     m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
+    /* The fresh engine's event latch is off: the transport is "not playing"
+     * until a block says otherwise. */
+    data->transportWasPlaying = false;
 
     /* If voicegroup is configured, load it */
     if (data->projectRoot[0] && data->voicegroupName[0]) {
@@ -352,7 +355,9 @@ static void process_clap_note_event(M4APluginData *data, const clap_event_note_t
     } else if (ev->header.type == CLAP_EVENT_NOTE_OFF) {
         m4a_engine_note_off(&data->engine, channel, (uint8_t)ev->key);
     } else if (ev->header.type == CLAP_EVENT_NOTE_CHOKE) {
-        m4a_engine_note_off(&data->engine, channel, (uint8_t)ev->key);
+        /* A cut, not a release, and not latched; -1 channel / key are CLAP
+         * wildcards (the host's stop-button choke). */
+        m4a_engine_note_choke(&data->engine, ev->channel < 0 ? -1 : channel, ev->key);
     }
 }
 
@@ -372,12 +377,22 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         m4a_engine_set_tempo_bpm(&data->engine, process->transport->tempo);
     }
 
-    /* When the host transport stops, forget portamento note history so the
+    /* The MIDI event latch follows the transport: events start on the next
+     * VBlank tick while it plays (an honest preview of recorded parts) and
+     * at once while it is stopped (live playing).  No transport (a free
+     * running host such as the standalone) keeps the current state, off
+     * from activation.  Turning the latch off applies what it still holds,
+     * in order -- so on the stop edge the queued note-ons have already
+     * recorded their glide history when the portamento reset below
+     * forgets it, and no queued note-off is lost.
+     *
+     * When the host transport stops, forget portamento note history so the
      * first note after the playhead moves doesn't glide from a note that was
      * sounding when playback paused.  (Hosts that send All Notes Off / All
      * Sound Off on stop are covered by those handlers too.) */
     if (process->transport) {
         bool playing = (process->transport->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
+        m4a_engine_set_quantize_events(&data->engine, playing);
         if (data->transportWasPlaying && !playing)
             m4a_engine_reset_portamento(&data->engine);
         data->transportWasPlaying = playing;

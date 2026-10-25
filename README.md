@@ -146,6 +146,8 @@ Caveat: I haven't actually tested this on Linux.  It theoretically works...
 5. Use Program Change (PC) midi messages to select instruments from the voicegroup.
 6. Play MIDI notes. You should hear GBA-accurate audio.
 
+While the DAW's transport is playing, note, CC, program change and pitch bend events are held to the next GBA frame (one VBlank, about 16.7 ms), where the game's sound engine would start them; while the transport is stopped, and in the standalone (which has no transport), they apply at once so live playing stays responsive. A host's note choke always cuts the note at once.
+
 The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings can be changed live through the GUI and are saved in the DAW's project state.
 
 #### Plugin config reference

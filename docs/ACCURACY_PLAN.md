@@ -5675,6 +5675,209 @@ equals `-start.json` and with `--midi-quantize` `-latch.json` (0 field
 differences on 44 rows each).  The aligned pair is now the midi baseline
 the next slice compares against.
 
+### Milestone 5 slice 2b-i: the plugin's transport-driven latch (2026-10-25)
+
+Scope: `plugin/m4a_plugin.c`'s `plugin_process` and the smallest engine
+addition it needs.  The manual override (GUI, `poryaaaa.cfg`, CLAP state)
+is slice 2b-ii; no frame-phase or start alignment in the plugin (slice
+2a); the tempo / LFO grids, VOL batching, -P priority and the CgbSound
+entry are slice 3.  The sequencer path and `poryaaaa_render` are not
+touched, so the harness cannot see this slice: its gates are the
+unchanged harness numbers and unit tests of the engine pieces.
+
+**Step 1, the reading (written before the code).**
+
+- *`plugin_process`* (`m4a_plugin.c`): first the tempo
+  (`CLAP_TRANSPORT_HAS_TEMPO` -> `m4a_engine_set_tempo_bpm`), then the
+  transport block: with `process->transport` non-NULL, `playing =
+  flags & CLAP_TRANSPORT_IS_PLAYING`, and on `transportWasPlaying &&
+  !playing` `m4a_engine_reset_portamento`; `transportWasPlaying` is only
+  updated when a transport is given.  Then the sample-accurate loop: every
+  event whose `time <= framePos` is applied (`process_clap_note_event` for
+  NOTE_ON / NOTE_OFF / NOTE_CHOKE, `process_midi_event` for raw MIDI),
+  then `m4a_engine_process` renders up to the next event's time.  The
+  engine's VBlank ticks (and so the latch's drains) happen inside
+  `m4a_engine_process`; the host delivers `in_events` sorted by sample
+  (`process.h`), so arrival order is time order.  Nothing reads
+  `CLAP_EVENT_TRANSPORT` events inside a block: the transport is read once,
+  at the block's sample 0.
+- *`process_clap_note_event`*: a channel of -1 or >= 16 becomes track 0;
+  NOTE_ON's velocity is `v * 127 + 0.5`, at least 1; NOTE_OFF and
+  NOTE_CHOKE both call `m4a_engine_note_off(track, (uint8_t)key)`.  A
+  wildcard key (-1) becomes 255, which `note_off` rejects (> 127): a
+  wildcard choke or note-off does nothing today.
+  *`process_midi_event`*: 0x90 (velocity 0 = note-off), 0x80, 0xC0, 0xB0,
+  0xE0 to the engine's entry points; no choke in MIDI 1.
+- *Lifecycle*: `plugin_activate` re-runs `m4a_engine_init` (a `memset`:
+  the latch comes back off, the queue empty) and re-applies the
+  plugin's settings; `transportWasPlaying` is set false only in
+  `plugin_init`, so after a deactivate / activate it can say "playing"
+  while the fresh engine's latch is off.  `plugin_stop_processing` and
+  `plugin_reset` call `m4a_engine_all_sound_off`, which outside a tick
+  drops the queue, cuts every channel and resets the portamento history.
+- *The SDK*: `CLAP_TRANSPORT_IS_PLAYING` is bit 4 of the transport flags
+  (`events.h`); `process->transport` is "null [for] a free running host,
+  no transport events will be provided" (`process.h`) -- the
+  clap-wrapper standalone host is one (`standalone_host.cpp`:
+  `process.transport = nullptr`).  NOTE_CHOKE "is meant to choke the
+  voice(s), like in a drum machine when a closed hihat chokes an open
+  hihat", also sent when "the user double-clicks the DAW's stop button
+  ... which then stops the sound on every track"; NOTE_OFF is a key
+  release.  A choke is a cut, not a release.  Note addresses use -1 as a
+  wildcard (`events.h`: "(-1, 0, 60, -1) will match all channel 0 key 60
+  voices"), so the stop-button choke may carry key -1 and / or
+  channel -1.
+- *The latch* (`m4a_engine.c`): `queue_event` queues when `quantizeEvents
+  && !inTick`, a full queue drained in order first; `drain_events` sets
+  `inTick` for its duration and applies the `n` events present at entry;
+  `m4a_engine_set_quantize_events(false)` drains before clearing the flag
+  (nothing lost), `(true)` only sets it; `m4a_engine_flush_events` drains;
+  `m4a_engine_all_sound_off` drops the queue when called outside a tick.
+  `m4a_engine_reset_portamento` clears every track's `portamentoPrevKey`,
+  target, gliding flag and elapsed count, and does not look at the queue.
+  `m4a_engine_note_off` with the latch on queues; applied, it sets STOP on
+  the track's matching channels not already STOP, or gate 1 on one still
+  START (the one-tick note).
+
+**What happens today, and the hazards.**
+
+- *Transport edges*: nothing touches the latch (the plugin never turns it
+  on).  Once it follows the transport: on stopped -> playing nothing is
+  queued (the latch was off), so the flip only makes the block's events
+  queue.  On playing -> stopped the queue holds the events of the last
+  playing block(s) that the next SoundMain has not drained yet (at most a
+  frame's worth); this block's events have not been read yet.
+- *The ordering hazard* (slice 1's review): if the stop edge called
+  `m4a_engine_reset_portamento` with events still queued, the queued
+  note-ons would apply after it -- at the next tick, or at the flush when
+  the latch turns off -- and record `portamentoPrevKey`, so the first note
+  played after the stop would glide from a note queued before it.  The
+  queue must be emptied before the reset.
+- *A choke with the latch on* would be queued as a note-off: deferred to
+  the next tick, and, in its note's own frame, turned into the one-tick
+  note instead of a cut.  What it must do: cut that key's sounding
+  channel(s) at once, releasing or not, and remove that key's queued
+  note-on (and note-off) so the next tick does not start the note it
+  choked.  With the latch off it must cut too, not release.
+- *No transport* (`process->transport == NULL`): no edge can be seen and
+  no state is known; the latch keeps whatever it had.
+
+**Decisions.**
+
+- *The latch follows the transport* at the top of `plugin_process`, after
+  the tempo and before the block's events:
+  `m4a_engine_set_quantize_events(engine, playing)` whenever a transport is
+  given.
+- *No transport: off, and kept.*  The initial state is the engine's
+  default after `m4a_engine_init` (off), and `plugin_activate` now resets
+  `transportWasPlaying` to false so the plugin's view matches the fresh
+  engine.  Off is right for the one free-running host we know, the
+  standalone, which is played live from a MIDI keyboard (the milestone's
+  "unquantized when the transport is stopped": no transport is no
+  playback).  A host that drops the transport for some blocks keeps the
+  last known state rather than flapping.
+- *Stop edge: flush, then reset.*  The flip to off is
+  `m4a_engine_set_quantize_events(false)`, which applies the queue in
+  order at once; `m4a_engine_reset_portamento` follows.  Dropping instead
+  would lose the queued note-offs as well as the note-ons: a note sounding
+  before the stop whose note-off sits in the queue would hang (a host that
+  sends no note-offs on stop would never end it).  Flushing loses nothing,
+  matches what turning the latch off already does, and the reset after it
+  clears whatever history the flushed note-ons recorded.  The flushed
+  events apply up to a frame early (at the stop's block boundary instead
+  of the next SoundMain) -- immaterial once the transport has stopped.
+  The host's own stop handling (NOTE_OFFs, CC 123 / 120, a choke, or
+  `stop_processing` / `reset`, whose all-sound-off drops the queue) then
+  arrives unlatched.
+- *NOTE_CHOKE bypasses the latch*: a new engine entry point
+  `m4a_engine_note_choke(engine, trackIndex, key)` that, at once and with
+  the latch on or off, removes the matching queued note-ons and note-offs
+  (the rest keep their order) and kills every matching channel (`CHN_ON`,
+  releasing or not, shadow pools included) with `m4a_engine_kill_channel`
+  (PCM status 0; CGB CgbOscOff then status 0).  A negative track or key is
+  a CLAP wildcard (all tracks / all keys), so the stop-button choke works;
+  the plugin passes -1 through for the choke only.  The portamento
+  history is untouched (a choke is not a transport event; the note it
+  removed from the queue never recorded any).  `m4a_engine_note_off` is
+  unchanged.
+
+**Step 2, the code.**  `plugin_process`: after the tempo, with a
+transport, `m4a_engine_set_quantize_events(&engine, playing)` and then,
+on the playing -> stopped edge, `m4a_engine_reset_portamento` (the
+existing reset, now after the flip's flush); nothing without a
+transport.  `plugin_activate` sets `transportWasPlaying = false`.
+`process_clap_note_event`: NOTE_CHOKE -> `m4a_engine_note_choke(track,
+key)`, a channel of -1 passed as -1 (other out-of-range channels still
+map to track 0, as for NOTE_ON / NOTE_OFF), the key passed as is (-1 a
+wildcard, 0..127, above 127 ignored).  `m4a_engine_note_choke`
+(`m4a_engine.h` / `.c`, next to the latch): a track >= 16 or a key > 127
+does nothing; otherwise the matching NOTE_ON / NOTE_OFF entries are
+compacted out of the queue in place (the rest keep their order, the
+count shrinks), then every PCM and CGB channel with `CHN_ON` on a
+matching track and key, the shadow pools included, goes through
+`m4a_engine_kill_channel`.  It does not depend on `quantizeEvents` or
+`inTick`.  The renderer and the sequencer never call it.
+
+**Step 3, the tests** (`test/test_engine.c`; `m4a_engine_tick` driven by
+hand as in `test_event_latch`, a channel's status set to
+`CHN_ENV_SUSTAIN` where the mixer's envelope step would have cleared
+START).  `test_note_choke`: latch off -- a sounding key cut to status 0
+at once, another key on the track and the same key on another track
+untouched, `note_off` still a release (STOP, channel on), a releasing
+channel cut; latch on -- with a sounding key 60 and 64 and five events
+queued (note-off 60, note-on 62, note-on 60, CC 7, note-off 64), the
+choke of 60 cuts the sounding note at once and leaves note-on 62, CC 7,
+note-off 64 in that order, key 64 not yet released; at the tick key 60
+never starts, 62 starts, 64 releases, the CC applies; a note-on and its
+note-off queued in one frame and choked leave nothing queued and nothing
+starting; wildcards -- key -1 cuts every key of one track and removes
+only that track's queued notes (a CC kept), track -1 one key on every
+track, -1 / -1 every note and every queued note (the CC kept); track 16
+/ key 128 change nothing; a shadow-pool channel (index
+`MAX_PCM_CHANNELS`) cut; a square channel cut at once with the latch on.
+`test_transport_stop_edge`, in the plugin's order: a note-off queued for
+a sounding note reaches it at the flip's flush (no hang); a note-on
+queued before the stop applies at the flush, gliding from the previous
+key as it would have at its tick, and the reset after it leaves no
+history, so the first live note applies at once without a glide, CC 5
+kept; the reversed order (reset, then flush) makes that live note glide
+-- the hazard, shown; the start edge queues nothing at the flip and the
+next event queues, a repeated "playing" block keeping the queue.  Unit
+**1673/1673** (1613 + 60).
+
+**Step 4, the gates.**  `claim_check.sh` against
+`2026-10-25_cry-over-song-rows.json`: 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0; unit 1673/1673, blip 49112/0, songs 561/561.
+`accuracy.py --input midi` and `--input midi --midi-quantize`: 0 field
+differences on 44 rows against `2026-10-25_midi-path-aligned.json` /
+`-aligned-latch.json`.  `poryaaaa` and `poryaaaa-standalone` build.  The
+standalone was not driven: in this WSL environment it exits at its MIDI
+initialisation (no `/dev/snd/seq`) before audio starts, so nothing about
+the change was checked by running it (it passes `transport = NULL`, so
+of this slice only the choke reaches it, and RtMidi sends no choke).
+README: one paragraph under "CLAP plugin in a DAW" on the transport-driven
+latch and the choke.
+
+**What slice 2b-ii needs.**  The override as designed (transport / on /
+off; a GUI Options item, a `poryaaaa.cfg` key, an appended CLAP state
+byte, an old state loading as "transport") fits what 2b-i built: "on" and
+"off" call `m4a_engine_set_quantize_events` with a constant (each block,
+or on change), "transport" is this slice's per-block flip.  Three things
+found here bear on it.  (1) The stop-edge portamento reset must stay on
+the transport edge in every mode, and with "on" the queue must still be
+flushed before it (an explicit `m4a_engine_flush_events` there, since the
+latch does not turn off).  (2) Switching from "on" to "off" or
+"transport"-while-stopped flushes through `set_quantize_events(false)`;
+the GUI change arrives on the main thread (the timer's
+`m4a_gui_poll_changes` block in `m4a_plugin.c`), which today writes the
+other toggles straight into the engine (`m4a_engine_set_portamento_enabled`
+etc.) while `plugin_process` may be running.  The override must not copy
+that: a flip to off drains the queue -- note-ons, channel allocation --
+and would race the audio thread's own queueing and tick.  Store the mode
+in `M4APluginData` and let `plugin_process` apply it at the top of the
+next block, where 2b-i's flip already sits.  (3) With no transport (the standalone),
+"transport" means off; the option's tooltip should say so.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

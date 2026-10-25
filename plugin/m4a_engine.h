@@ -826,6 +826,13 @@ void m4a_engine_all_sound_off(M4AEngine *engine);
 void m4a_engine_set_quantize_events(M4AEngine *engine, bool enabled);
 /* Apply every queued event now, in arrival order (what the tick does). */
 void m4a_engine_flush_events(M4AEngine *engine);
+/* A CLAP NOTE_CHOKE: cut `key` on `trackIndex` at once, latch or no latch
+ * -- every matching channel killed (releasing or not, shadow pools
+ * included) and the matching note-ons / note-offs removed from the queue,
+ * the other queued events keeping their order.  A negative trackIndex or
+ * key is a wildcard (all tracks / all keys).  Not a queued event, so it
+ * never runs inside a drain. */
+void m4a_engine_note_choke(M4AEngine *engine, int trackIndex, int key);
 /* TrackStop's per-channel silence: PCM channels just stop; CGB channels also
  * get CgbOscOff on their PSG.  `handle` is a note-on return value. */
 void m4a_engine_kill_channel(M4AEngine *engine, int handle);
