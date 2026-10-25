@@ -733,7 +733,8 @@ static void print_usage(const char *prog)
         "                              MPlayMain sequencer port.  Master volume, reverb\n"
         "                              and the voicegroup are baked into the .s file, so\n"
         "                              --song-volume / --reverb are ignored on this path.\n"
-        "  --cry <id>                  a Pokemon cry: gCryTable[id] (sound/cry_tables.inc)\n"
+        "  --cry <id>                  a Pokemon cry: gCryTable[id] (sound/cry_tables.inc; the cry_reverse\n"
+        "                              entries continue the count after the cry lines: 388 + species)\n"
         "                              played as the game does (PlayCryInternal's\n"
         "                              CRY_MODE_NORMAL defaults: volume 120, pan 0, pitch\n"
         "                              15360, length 140, priority 10) on cry player 0\n"
@@ -1014,20 +1015,22 @@ static int render_cry(const SongRenderOpts *o, float **outL, float **outR,
                       uint64_t *outTotal, uint64_t *outFadeStart)
 {
     char symbol[128];
-    if (voicegroup_cry_table_symbol(o->projectRoot, o->cry, symbol, sizeof(symbol)) != 0) {
+    uint8_t type = VOICE_CRY;
+    if (voicegroup_cry_table_entry(o->projectRoot, o->cry, symbol, sizeof(symbol), &type) != 0) {
         fprintf(stderr, "Error: no gCryTable entry %d in %s/sound/cry_tables.inc\n", o->cry, o->projectRoot);
         return -1;
     }
-    printf("Cry %d: %s\n", o->cry, symbol);
+    printf("Cry %d: %s%s\n", o->cry, symbol, (type & VOICE_TYPE_REV) ? " (reversed: gCryTable_Reverse's entry)" : "");
     fflush(stdout);
-    LoadedVoiceGroup *vg = voicegroup_load_cry(o->projectRoot, symbol, NULL);
+    LoadedVoiceGroup *vg = voicegroup_load_cry_typed(o->projectRoot, symbol, type, NULL);
     if (!vg) {
         fprintf(stderr, "Failed to load cry sample '%s'\n", symbol);
         return -1;
     }
     const WaveData *wd = vg->voices[0].wav;
-    printf("  %s: %u samples at %u Hz, %s%s\n", symbol, wd->size, wd->freq >> 10,
+    printf("  %s: %u samples at %u Hz, %s%s%s\n", symbol, wd->size, wd->freq >> 10,
            (vg->voices[0].type & VOICE_TYPE_CMP) ? "DPCM" : "uncompressed (no built .bin: plays as DirectSound)",
+           (vg->voices[0].type & VOICE_TYPE_REV) ? ", played in reverse" : "",
            (wd->status & 0x4000) ? ", loops" : "");
     M4ACryParams cp = o->cryParams;
     M4ASong *song = m4a_cry_song_new(&cp);

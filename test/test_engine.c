@@ -9,6 +9,11 @@
 #include "m4a_song.h"
 #include "m4a_sequencer.h"
 #include "m4a_cry.h"
+#include "voicegroup_loader.h"
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 /*
  * Unit tests for the m4a engine.
@@ -4352,6 +4357,94 @@ static void test_cry_song(void)
     m4a_song_free(base);
 }
 
+/* gCryTable's index space (voicegroup_cry_table_entry): the `cry` lines
+ * after `gCryTable::` and, continuing the count, the `cry_reverse` lines
+ * after `gCryTable_Reverse::` -- the two labels assemble into one block, so
+ * the ROM's gCryTable[388] is gCryTable_Reverse[0] (type 0x30, the same
+ * sample).  A miniature table in a temporary project root. */
+static void test_cry_table_index(void)
+{
+    printf("Testing the gCryTable index space (cry / cry_reverse)...\n");
+#ifdef _WIN32
+    printf("  (skipped: needs mkdtemp)\n");
+#else
+    char root[] = "/tmp/poryaaaa_cry_tables_XXXXXX";
+    if (!mkdtemp(root)) { ASSERT(0, "cry table: mkdtemp"); return; }
+    char dir[320], path[320];
+    snprintf(dir, sizeof(dir), "%s/sound", root);
+    mkdir(dir, 0700);
+    snprintf(path, sizeof(path), "%s/sound/cry_tables.inc", root);
+    FILE *f = fopen(path, "w");
+    ASSERT(f != NULL, "cry table: wrote the test table");
+    if (!f) { rmdir(dir); rmdir(root); return; }
+    fputs("\t.align 2\n"
+          "gCryTable::\n"
+          "\tcry Cry_Bulbasaur\n"
+          "\tcry Cry_Ivysaur\n"
+          "\t@ a comment line\n"
+          "\tcry\tCry_Pidgey\n"
+          "\n"
+          "\t.align 2\n"
+          "gCryTable_Reverse::\n"
+          "\tcry_reverse Cry_Bulbasaur\n"
+          "\tcry_reverse Cry_Ivysaur\n"
+          "\tcry_reverse Cry_Pidgey\n"
+          "\n"
+          "\t.align 2\n"
+          "gOtherTable::\n"
+          "\tcry Cry_Venusaur\n", f);
+    fclose(f);
+
+    static const struct { int index; const char *symbol; uint8_t type; } expect[] = {
+        { 0, "Cry_Bulbasaur", VOICE_CRY }, { 1, "Cry_Ivysaur", VOICE_CRY }, { 2, "Cry_Pidgey", VOICE_CRY },
+        { 3, "Cry_Bulbasaur", VOICE_CRY_REVERSE }, { 4, "Cry_Ivysaur", VOICE_CRY_REVERSE },
+        { 5, "Cry_Pidgey", VOICE_CRY_REVERSE },
+    };
+    for (size_t k = 0; k < sizeof(expect) / sizeof(expect[0]); k++) {
+        char sym[64] = "";
+        uint8_t type = 0xFF;
+        int rc = voicegroup_cry_table_entry(root, expect[k].index, sym, sizeof(sym), &type);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "cry table: index %d is %s %s (type 0x%02X)", expect[k].index,
+                 (expect[k].type & VOICE_TYPE_REV) ? "cry_reverse" : "cry", expect[k].symbol, expect[k].type);
+        ASSERT(rc == 0 && strcmp(sym, expect[k].symbol) == 0 && type == expect[k].type, msg);
+        if (rc != 0 || strcmp(sym, expect[k].symbol) != 0 || type != expect[k].type)
+            printf("  got rc %d '%s' type 0x%02X\n", rc, sym, type);
+    }
+    char sym[64];
+    ASSERT_EQ(voicegroup_cry_table_entry(root, 6, sym, sizeof(sym), NULL), -1,
+              "cry table: the next label's entries are not in the table (index 6 missing)");
+    ASSERT_EQ(voicegroup_cry_table_entry(root, -1, sym, sizeof(sym), NULL), -1, "cry table: negative index");
+    ASSERT_EQ(voicegroup_cry_table_symbol(root, 4, sym, sizeof(sym)), 0, "cry table: the symbol-only form reaches the reverse entries");
+    ASSERT_EQ(strcmp(sym, "Cry_Ivysaur"), 0, "cry table: symbol-only form, index 4");
+    ASSERT_EQ(voicegroup_cry_table_entry("/nonexistent/poryaaaa", 0, sym, sizeof(sym), NULL), -1, "cry table: missing file");
+
+    /* The vanilla layout when the project is at hand: 388 `cry` lines, so
+     * 388 / 403 / 511 are the reversed Bulbasaur / Pidgey / Jynx (the
+     * ROM's gCryTable_Reverse at gCryTable + 388 * 12, type 0x30). */
+    const char *home = getenv("HOME");
+    char vanilla[320];
+    snprintf(vanilla, sizeof(vanilla), "%s/pokeemerald", home ? home : "");
+    uint8_t type = 0;
+    if (home && voicegroup_cry_table_entry(vanilla, 388, sym, sizeof(sym), &type) == 0) {
+        ASSERT(strcmp(sym, "Cry_Bulbasaur") == 0 && type == VOICE_CRY_REVERSE, "cry table: pokeemerald index 388 = cry_reverse Cry_Bulbasaur");
+        ASSERT(voicegroup_cry_table_entry(vanilla, 403, sym, sizeof(sym), &type) == 0
+               && strcmp(sym, "Cry_Pidgey") == 0 && type == VOICE_CRY_REVERSE, "cry table: pokeemerald index 403 = cry_reverse Cry_Pidgey");
+        ASSERT(voicegroup_cry_table_entry(vanilla, 511, sym, sizeof(sym), &type) == 0
+               && strcmp(sym, "Cry_Jynx") == 0 && type == VOICE_CRY_REVERSE, "cry table: pokeemerald index 511 = cry_reverse Cry_Jynx");
+        ASSERT(voicegroup_cry_table_entry(vanilla, 123, sym, sizeof(sym), &type) == 0
+               && strcmp(sym, "Cry_Jynx") == 0 && type == VOICE_CRY, "cry table: pokeemerald index 123 = cry Cry_Jynx");
+        ASSERT_EQ(voicegroup_cry_table_entry(vanilla, 776, sym, sizeof(sym), &type), -1, "cry table: pokeemerald has 776 entries");
+    } else {
+        printf("  (no ~/pokeemerald: vanilla indices not checked)\n");
+    }
+
+    unlink(path);
+    rmdir(dir);
+    rmdir(root);
+#endif
+}
+
 /* XCMD xRELE (ply_xrele, m4a.c): the byte becomes the track tone's release,
  * so a note started after it releases at that rate instead of the voice's.
  * The cry song carries SetPokemonCryRelease's value this way (0 at the
@@ -4922,6 +5015,7 @@ int main(void)
     test_sequencer_players();
     test_sequencer_cycles_se2();
     test_cry_song();
+    test_cry_table_index();
     test_sequencer_xrele();
     test_sequencer_cycles_cry();
     test_pcm_start_offset();

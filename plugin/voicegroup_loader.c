@@ -2944,10 +2944,10 @@ fail:
     return NULL;
 }
 
-LoadedVoiceGroup *voicegroup_load_cry(const char *projectRoot, const char *sampleSymbol,
-                                      const VoicegroupLoaderConfig *config)
+LoadedVoiceGroup *voicegroup_load_cry_typed(const char *projectRoot, const char *sampleSymbol,
+                                            uint8_t type, const VoicegroupLoaderConfig *config)
 {
-    vg_log("voicegroup_load_cry: start root='%s' sample='%s'", projectRoot, sampleSymbol);
+    vg_log("voicegroup_load_cry: start root='%s' sample='%s' type=0x%02X", projectRoot, sampleSymbol, type);
     LoadedVoiceGroup *vg = calloc(1, sizeof(LoadedVoiceGroup));
     ProjectDiscovery *disc = calloc(1, sizeof(ProjectDiscovery));
     if (!vg || !disc) {
@@ -2962,21 +2962,26 @@ LoadedVoiceGroup *voicegroup_load_cry(const char *projectRoot, const char *sampl
     symbol_map_init(&dsMap);
     parse_all_direct_sound_data(disc, projectRoot, &dsMap);
 
-    /* The `cry` macro's voice (parse_voicegroup_file's cry path). */
+    /* The cry macros' voice (parse_voicegroup_file's cry path): the type
+     * byte the macro assembles (`cry` 0x20 = CMP, `cry_reverse` 0x30 =
+     * CMP | REV, the uncompressed forms 0x00 / 0x10), key 60, envelope
+     * 255 / 0 / 255 / 0. */
     vg_set_voice_name(vg, 0, sampleSymbol);
     ToneData *td = &vg->voices[0];
-    td->type = VOICE_CRY;
+    td->type = type;
     td->key = 60;
     td->attack = 0xFF;
     td->decay = 0;
     td->sustain = 0xFF;
     td->release = 0;
-    WaveData *wd = resolve_and_load_compressed_sample(projectRoot, sampleSymbol, &dsMap, disc, vg, &waveCache);
+    WaveData *wd = (type & VOICE_TYPE_CMP)
+        ? resolve_and_load_compressed_sample(projectRoot, sampleSymbol, &dsMap, disc, vg, &waveCache)
+        : resolve_and_load_sample(projectRoot, sampleSymbol, &dsMap, disc, vg, &waveCache);
     if (wd) {
         td->wav = wd;
         /* SoundMainRAM_Unk1 mixes nothing for a CMP-typed voice whose data
          * is not compressed (see parse_voicegroup_file). */
-        if (wd->type == 0)
+        if ((td->type & VOICE_TYPE_CMP) && wd->type == 0)
             td->type &= (uint8_t)~VOICE_TYPE_CMP;
     }
 
@@ -2992,7 +2997,14 @@ LoadedVoiceGroup *voicegroup_load_cry(const char *projectRoot, const char *sampl
     return vg;
 }
 
-int voicegroup_cry_table_symbol(const char *projectRoot, int index, char *out, size_t outLen)
+LoadedVoiceGroup *voicegroup_load_cry(const char *projectRoot, const char *sampleSymbol,
+                                      const VoicegroupLoaderConfig *config)
+{
+    return voicegroup_load_cry_typed(projectRoot, sampleSymbol, VOICE_CRY, config);
+}
+
+int voicegroup_cry_table_entry(const char *projectRoot, int index, char *out, size_t outLen,
+                               uint8_t *type)
 {
     char path[MAX_PATH_LEN];
     if (index < 0)
@@ -3011,21 +3023,44 @@ int voicegroup_cry_table_symbol(const char *projectRoot, int index, char *out, s
             inTable = strncmp(t, "gCryTable::", 11) == 0;
             continue;
         }
-        if (strncmp(t, "cry ", 4) == 0 || strncmp(t, "cry\t", 4) == 0) {
+        /* match_cry_macro's words, with a space or a tab after the word. */
+        const DirectSoundMacro *m = NULL;
+        for (size_t k = 0; k < sizeof(kCryMacros) / sizeof(kCryMacros[0]); k++) {
+            size_t w = kCryMacros[k].len - 1;
+            if (strncmp(t, kCryMacros[k].prefix, w) == 0 && (t[w] == ' ' || t[w] == '\t')) {
+                m = &kCryMacros[k];
+                break;
+            }
+        }
+        if (m) {
+            /* `cry` / `cry_reverse` (/ the uncompressed spellings), counted
+             * through the whole table: gCryTable_Reverse's entries follow
+             * gCryTable's in the ROM (sound/cry_tables.inc assembles both
+             * labels into one block), so gCryTable[388] is
+             * gCryTable_Reverse[0] -- the same sample reversed, type 0x30. */
             if (n == index) {
-                t += 4;
+                t += m->len;
                 while (*t == ' ' || *t == '\t') t++;
                 snprintf(out, outLen, "%s", t);
+                if (type)
+                    *type = m->type;
                 rc = 0;
                 break;
             }
             n++;
         } else if (*t && *t != '@' && *t != '.') {
-            break;      /* the next label (gCryTable_Reverse) ends the table */
+            if (strncmp(t, "gCryTable_Reverse::", 19) == 0)
+                continue;   /* the reversed entries continue the block */
+            break;          /* any other label or content ends the table */
         }
     }
     fclose(f);
     return rc;
+}
+
+int voicegroup_cry_table_symbol(const char *projectRoot, int index, char *out, size_t outLen)
+{
+    return voicegroup_cry_table_entry(projectRoot, index, out, outLen, NULL);
 }
 
 LoadedSampleSet *voicegroup_load_samples(

@@ -1119,6 +1119,134 @@ on the cry track either.  The scheduler-lateness floor of each run
 cycle 28146944), cry_wailord_doubles 6 (first 3428099),
 cry_pidgey_roar2 1 (2304512).
 
+### SoundMain timing probe, step 8: the reverse cries (2026-10-25, milestone 4 slice 5)
+
+**No ROM change.**  `gCryTable_Reverse` is not a second table but a label
+inside the block `sound/cry_tables.inc` assembles (`gCryTable::`, 388 `cry`
+lines, `gCryTable_Reverse::`, 388 `cry_reverse` lines), so the test ROM's
+`StartCry(index)` with `&gCryTable[index]` reaches the reversed entries at
+388 + species: the map has `gCryTable` 0x0802afac and `gCryTable_Reverse`
+0x0802c1dc, 0x1230 = 388 * 12 apart.  The runner's `"id"` stays the linear
+index.  The 12-byte entries read from the ROM (type, key, _, pan, wav,
+attack, decay, sustain, release):
+
+| id | entry | ROM bytes | type | wav (= the forward entry's) |
+|---|---|---|---|---|
+| 0 | cry Cry_Bulbasaur | `20 3c 00 00 bc 39 0d 08 ff 00 ff 00` | 0x20 CMP | 0x080d39bc |
+| 388 | cry_reverse Cry_Bulbasaur | `30 3c 00 00 bc 39 0d 08 ff 00 ff 00` | 0x30 CMP \| REV | 0x080d39bc |
+| 15 | cry Cry_Pidgey | `20 3c 00 00 f0 30 0e 08 ff 00 ff 00` | 0x20 | 0x080e30f0 |
+| 403 | cry_reverse Cry_Pidgey | `30 3c 00 00 f0 30 0e 08 ff 00 ff 00` | 0x30 | 0x080e30f0 |
+| 123 | cry Cry_Jynx | `20 3c 00 00 e8 77 15 08 ff 00 ff 00` | 0x20 | 0x081577e8 |
+| 511 | cry_reverse Cry_Jynx | `30 3c 00 00 e8 77 15 08 ff 00 ff 00` | 0x30 | 0x081577e8 |
+
+Key 60, pan 0, envelope 255 / 0 / 255 / 0 on all six, as
+`voice_directsound_compressed_reverse 60, 0, \sample, 255, 0, 255, 0`
+(the `cry_reverse` macro, `.byte 0x30` then `_voice_directsound`).  The
+samples are the forward ones byte for byte: 16-byte headers
+`01 00 00 00 00 40 a4 00 00 00 00 00 <size LE>` (type 1 = DPCM, freq
+10764288 = 10512 Hz, loopStart 0; sizes 8183 / 1902 / 23524), the data
+`size / 64 + 1` blocks of 0x21 bytes.
+
+**The loader.**  `voicegroup_cry_table_symbol` stopped at the
+`gCryTable_Reverse::` label, so no index past 387 resolved and every cry
+loaded as type 0x20: the first fix of the slice.
+`voicegroup_cry_table_entry` (plugin/voicegroup_loader.c) now counts the
+`cry` / `cry_reverse` (/ `cry_uncomp` / `cry_reverse_uncomp`) lines through
+that one label and returns the macro's type byte; `voicegroup_load_cry_typed`
+gives the engine a voice of that type (`voicegroup_load_cry` is the 0x20
+form); `poryaaaa_render --cry 388` prints "Cry_Bulbasaur (reversed:
+gCryTable_Reverse's entry)" and "played in reverse".  Gate:
+`test_cry_table_index` (a miniature table with both labels in a temporary
+root, and the vanilla file's 388 / 403 / 511 / 123 / 776 when ~/pokeemerald
+is present).  The eventide `cry_reverse_custom` / `_reverse` voicegroup
+macros were already parsed by `parse_voicegroup_file`; this is only the
+by-index path.
+
+**What the reversed path reads at the sample's edges** (read before the
+first render, so a run at the start or the end can be attributed).
+SoundMainRAM_Unk1's first-mix setup for a REV channel (m4a_1.s
+`_081DD29C`'s predecessor: `r3 = size + 2 * wav + 0x20 - r3`, i.e. data +
+size with r3 at data) flips `currentPointer` to the end, and the CMP
+branch then stores it back as the index `size`; the reversed CMP walk
+(`_081DD3C0`) decodes index `size - 1` as the first output and `size - 2`
+as its look-behind, both inside the `size / 64 + 1` allocated blocks
+(Bulbasaur 8182 in block 127 of 128, Pidgey 1901 in 29 of 30, Jynx 23523
+in 367 of 368) -- so **nothing before the data is read at the start**; the
+byte before each sample's data is the header's last byte, `size >> 24` =
+0x00 for all three (that byte is what the *uncompressed* REV path's
+`ldrsb r1, [r3, -1]` would read at the end; the port's `REV_RD(-1)` = 0
+matches it).  At the **end**, the walk reaches sample 0 with `r2 = 1`
+still to consume: it decodes "block -1" as sample 0's look-behind
+(`SoundMainRAM_Unk2` with r3 = -1: block 0x3FFFFFF, 0x21 * 0x3FFFFFF +
+wav + 0x10 = `wav + 0x83FFFFEF` mod 2^32 = 0x8C0D39AB / 0x8C0E30DF /
+0x8C1577D7), an address outside the cartridge space that mgba's
+`GBALoad8` default case serves as open bus (`GBALoadBad`: `prefetch[1]`,
+the IWRAM Unk2 instruction word two ahead of each `ldrb`, byte lane
+`address & 3`; all three addresses are lane 3, so the 33 bytes are
+`e4 01 00 96 e1 d0 ...` from the words 0xe4d21001 / 0xe19600d0 and the
+delta decode gives **38** at block offset 63).  The port's `unk2` decodes
+a zero block for any index past the allocation and reads **0** there.
+The difference reaches the one or two outputs between the last two
+crossings (`r0 = d[0]`, `r1 = lookbehind - d[0]`, `(r9 * r1) >> 23` with
+r9 the fraction below one sample): one output of up to `38 * frac`
+sample units at the forward sample's first sample, i.e. a **one-sample
+run at the reversed cry's end** if it shows at all; a release that stops
+the channel before sample 0 ((b) below) never gets there.  Recorded here
+so that run, if it appears, is attributed to the open-bus look-behind and
+not to the decode; emulating mgba's prefetch there is a mixer change and
+is not made in this slice.
+
+**The template bytes**, worked by hand before the first render
+(`SetPokemonCryPitch`: b = pitch + 0x80, TIE key = b >> 8, TUNE = (b >> 1)
+& 0x7F, TUNE2 = (16 + TUNE) & 0x7F with chorus 0; `SetPokemonCryLength` the
+xWAIT u16 at 0x2E..0x2F; `SetPokemonCryRelease` the xRELE byte at 0x26;
+`SetPokemonCryVolume` the VOL byte at 0x1D) and confirmed by the probe's
+track key after each EOT (`_081DD938`'s r3 on the line after `ply_endtie`:
+0x3C / 0x3B / 0x3D).  The mode's `reverse` flag is not a template byte: it
+selects the table (`GET_CRY(index, table, reversed)`), hence the id.
+
+| entry | id | mode | pitch | b | TIE key (0x2A) | TUNE (0x12) | TUNE2 (0x19) | VOL (0x1D) | xWAIT (0x2E,0x2F) | xRELE (0x26) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| cry_bulbasaur_reverse | 388 | CRY_MODE_NORMAL defaults | 15360 | 0x3C80 | 0x3C (60) | 0x40 | 0x50 | 0x78 (120) | 0x8C 0x00 (140) | 0x00 |
+| cry_jynx_growl1 | 511 | CRY_MODE_GROWL_1: reverse, length 15, release 125, pitch 15200 | 15200 | 0x3BE0 | 0x3B (59) | 0x70 | 0x00 | 0x78 | 0x0F 0x00 (15) | 0x7D (125) |
+| cry_pidgey_echo_start | 403 | CRY_MODE_ECHO_START: reverse, length 25, release 100, pitch 15600, volume 90, chorus 192 | 15600 | 0x3D70 | 0x3D (61) | 0x38 | 0x48 | 0x5A (90) | 0x19 0x00 (25) | 0x64 (100) |
+
+PAN 0x40 on all three.  CRY_MODE_ECHO_START's chorus 192 is not patchable
+(the ROM's `StartCry` sets no chorus), so (c) is one track with chorus 0
+and its note says so; its volume 90 is part of the mode and is patched
+(`--volume 90` / `--cry-volume 90`).  Length against pitch, as slice 4
+checked: Cry_Pidgey's 1902 samples at key 61 + TUNE 56 (about 11.0 kHz)
+run 0.17 s, gone by frame 14, long before tick 25 on frame 28, so (c)'s
+EOT finds an empty chain and the xRELE byte reaches no channel;
+Cry_Jynx's 23524 at key 59 + TUNE 112 (about 10.36 kHz, 2.27 s) are cut
+at tick 15 on frame 18 with 0.3 s played -- the *end* of the sample, since
+it plays backwards; Cry_Bulbasaur's 8183 at 10512 Hz (0.78 s) run out on
+frame 50 through the count path.
+
+**The probe runs** (type 1, 180 frames, `gPokemonCryMusicPlayers`, the
+parameters as the ninth to thirteenth arguments; cycles from VBlank line
+160): the frame skeleton is slice 4's to the cycle.  cry_bulbasaur_reverse:
+start tick 4077 on frame 3, 1596 while the channel lives, the unlink tick
+**1689 on frame 50** (the sample ran out, as cry_bulbasaur's forward play
+does on the same frame: the same 8183 samples at the same rate), 1576
+after, the EOT **1810 on frame 143** (`ply_endtie` -> `_081DD938` 54, the
+empty chain; `ply_fine` -> `_done`), 1192 on 144, 1007 from 145.
+cry_jynx_growl1: 4077 on 3, 1596 to 17, the EOT **1928 on frame 18**
+(`_081DD938` 82, the chained channel holding key 0x3B; `ply_fine` ->
+`_loop` -> RealClearChain, the live channel unlinked), 1192 on 19, 1007
+from 20; the channel's death at the `_081DCFB0` stamp **raw f25 = frame
+24**: release 125 from 255 gives 124, 60, 29, 14, 6, 2, 0 -- six mixed
+release passes on frames 18..23 and the stop on 24 (`env * 125 >> 8`,
+the stop on the pass whose product is 0, exactly as the 200 / 225 chains
+of step 7).  cry_pidgey_echo_start: 4077 on 3, 1596 to 13, the unlink
+**1689 on frame 14** (as cry_pidgey / cry_pidgey_roar2), 1576 after, the
+EOT **1810 on frame 28**, 1192 on 29, 1007 from 30; no death stamp (the
+count path).  The reversed walk costs SoundMainRAM, not MPlayMain, so no
+sequencer constant changes.  Scheduler-lateness floor (`.events`):
+cry_bulbasaur_reverse **0** timer-0 slot crossings, cry_pidgey_echo_start
+**0**, cry_jynx_growl1 4 (cycles 1180928, 2304515, 3428098, 5675266 =
+0.0704, 0.1374, 0.2043, 0.3383 s; the last two inside the release tail).
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`

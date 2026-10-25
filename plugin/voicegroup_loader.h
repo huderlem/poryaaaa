@@ -138,12 +138,28 @@ LoadedVoiceGroup *voicegroup_load_cry(const char *projectRoot, const char *sampl
                                       const VoicegroupLoaderConfig *config);
 
 /*
- * The sample symbol of gCryTable[index] from <projectRoot>/sound/cry_tables.inc
- * (the `cry` lines after the `gCryTable::` label, in order).  Returns 0 and
+ * voicegroup_load_cry with the entry's ToneData type byte: VOICE_CRY (0x20,
+ * `cry`), VOICE_CRY_REVERSE (0x30 = CMP | REV, `cry_reverse`: the same DPCM
+ * sample played backwards), or the uncompressed `cry_uncomp` /
+ * `cry_reverse_uncomp` forms (0x00 / 0x10).  The CMP bit is cleared when
+ * only the uncompressed source is found, as above.
+ */
+LoadedVoiceGroup *voicegroup_load_cry_typed(const char *projectRoot, const char *sampleSymbol,
+                                            uint8_t type, const VoicegroupLoaderConfig *config);
+
+/*
+ * The sample symbol of gCryTable[index] from <projectRoot>/sound/cry_tables.inc:
+ * the `cry` lines after the `gCryTable::` label and, continuing the count,
+ * the `cry_reverse` lines after `gCryTable_Reverse::` (the two labels share
+ * one block in the ROM, so the reversed entries follow the forward ones:
+ * with 388 species, index 388 is gCryTable_Reverse[0]).  Returns 0 and
  * writes the symbol (e.g. "Cry_Bulbasaur") to `out`, or -1 when the file or
- * the entry is missing.
+ * the entry is missing.  voicegroup_cry_table_entry also gives the macro's
+ * ToneData type byte (0x20 `cry`, 0x30 `cry_reverse`, ...).
  */
 int voicegroup_cry_table_symbol(const char *projectRoot, int index, char *out, size_t outLen);
+int voicegroup_cry_table_entry(const char *projectRoot, int index, char *out, size_t outLen,
+                               uint8_t *type);
 
 /*
  * Set an optional file path for diagnostic logging inside the voicegroup loader.
