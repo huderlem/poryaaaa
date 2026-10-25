@@ -33,8 +33,15 @@ Steps (all idempotent, cached under --build-dir):
      VBlank start_frame2 (1..255) while the first plays, as mgba_render
      names them (--id2 N --start-frame2 F; AccParams bytes 12..14), and go
      to poryaaaa_render as --cry2 N --cry2-start-frame F (cry player 1,
-     a second sequencer chained after cry 0's).
-     Cries have no MIDI, so --input midi skips them.
+     a second sequencer chained after cry 0's).  The same pair on an "se"
+     or "song" entry (with "song": the name of the SE / song it plays, since
+     such an entry is named after its probe log, cry_over_*) starts that cry
+     over the sound effect or song
+     (mgba_render's --type song run takes --id2 / --start-frame2 as well;
+     poryaaaa_render --song ... [--player seN] --cry2 N --cry2-start-frame F,
+     cry player 0 chained after the song's player).
+     Cries have no MIDI, so --input midi skips them, and an SE or song with
+     a cry over it the same way.
   4. metrics.compare on each pair; a table on stdout and a JSON report.
 
 Typical use (after `make` in test/accuracy/rom and building mgba_render and
@@ -119,6 +126,20 @@ def song_ids(pokeemerald):
     return ids
 
 
+def second_cry_ok(name, s):
+    """The optional "id2" / "start_frame2" pair of a songs.json entry (a second cry
+    while a cry plays, or a cry over an SE / song): both or neither, the ROM's
+    u16 id2 (0..65535) and u8 startFrame2 (1..255; 0 means no second cry to the
+    ROM but is refused by poryaaaa_render).  False, with a warning, on a violation."""
+    if ("id2" in s) != ("start_frame2" in s):
+        print(f"warning: {name}: a second cry needs both \"id2\" and \"start_frame2\", skipping", file=sys.stderr)
+        return False
+    if "id2" in s and not (0 <= int(s["id2"]) <= 0xFFFF and 1 <= int(s["start_frame2"]) <= 255):
+        print(f"warning: {name}: \"id2\" takes 0..65535 and \"start_frame2\" 1..255, skipping", file=sys.stderr)
+        return False
+    return True
+
+
 def build_tests(args):
     tests = []
     for i, (name, opts) in enumerate(parse_cfg(os.path.join(MICRO_DIR, "micro.cfg"))):
@@ -145,12 +166,7 @@ def build_tests(args):
                 if "id" not in s:
                     print(f"warning: {name}: a cry needs its gCryTable index as \"id\", skipping", file=sys.stderr)
                     continue
-                if ("id2" in s) != ("start_frame2" in s):
-                    print(f"warning: {name}: a second cry needs both \"id2\" and \"start_frame2\", skipping", file=sys.stderr)
-                    continue
-                if "id2" in s and not (0 <= int(s["id2"]) <= 0xFFFF and 1 <= int(s["start_frame2"]) <= 255):
-                    # The ROM's u16 id2 / u8 startFrame2; 0 means no second cry to the ROM but is refused by poryaaaa_render.
-                    print(f"warning: {name}: \"id2\" takes 0..65535 and \"start_frame2\" 1..255, skipping", file=sys.stderr)
+                if not second_cry_ok(name, s):
                     continue
                 tests.append(dict(name=name, group="cry", type="cry", id=int(s["id"]), midi=None, song=None,
                                   voicegroup=None, volume=None, reverb=None, extended=False,
@@ -159,7 +175,8 @@ def build_tests(args):
                                   cry2=int(s["id2"]) if "id2" in s else None,
                                   cry2_start_frame=int(s["start_frame2"]) if "id2" in s else None))
                 continue
-            const = name.upper()
+            song = s.get("song", name)         # the song it plays; the entry's name unless the row is a cry over it (cry_over_*)
+            const = song.upper()
             if const not in ids:
                 print(f"warning: {const} not in songs.h, skipping", file=sys.stderr)
                 continue
@@ -168,19 +185,26 @@ def build_tests(args):
                 continue
             player = None
             if kind == "se":
-                player = players.get(name)
+                player = players.get(song)
                 if player is None:
-                    print(f"warning: {name} not in song_table.inc, skipping", file=sys.stderr)
+                    print(f"warning: {song} not in song_table.inc, skipping", file=sys.stderr)
                     continue
-            vg, vol, rev, ext = mid2agb_opts(cfg[name])
+            if not second_cry_ok(name, s):
+                continue
+            vg, vol, rev, ext = mid2agb_opts(cfg[song])
             # Both play through m4aSongNumStart in the ROM (--type song); the
             # song table's player decides the track count and MPlayMain position.
+            # "id2" / "start_frame2" here are a cry over the SE / song (StartTest
+            # runs the second-cry block after its type switch): cry player 0
+            # chained after the song's player in poryaaaa_render.
             tests.append(dict(name=name, group=kind, type="song", id=ids[const],
-                              midi=os.path.join(midi_dir, name + ".mid"),
-                              song=os.path.join(args.rom_dir, "songs", name + ".s") if args.rom_dir else None,
+                              midi=os.path.join(midi_dir, song + ".mid"),
+                              song=os.path.join(args.rom_dir, "songs", song + ".s") if args.rom_dir else None,
                               voicegroup=vg, volume=vol, reverb=rev, extended=ext,
                               seconds=float(s.get("seconds", 20.0 if kind == "song" else 3.0)),
-                              player=player))
+                              player=player,
+                              cry2=int(s["id2"]) if "id2" in s else None,
+                              cry2_start_frame=int(s["start_frame2"]) if "id2" in s else None))
     if args.tests:
         wanted = set(args.tests.split(","))
         tests = [t for t in tests if t["name"] in wanted or t["group"] in wanted]
@@ -302,12 +326,18 @@ def render_poryaaaa(args, t, overlay, out_dir):
         # Volume, reverb and voicegroup come from the .s header.
         cmd = [args.poryaaaa_render, overlay, "--song", t["song"]] + common
     else:
+        if t.get("cry2") is not None:
+            print(f"{t['name']}: a cry over the song has no MIDI; skipped with --input midi", file=sys.stderr)
+            return None
         cmd = [args.poryaaaa_render, overlay, t["voicegroup"], "--midi", t["midi"]] + common
         cmd += ["--song-volume", str(t["volume"]), "--reverb", str(t["reverb"])]
         if t["extended"]:
             cmd.append("--extended-clocks")
     if t.get("player"):
         cmd += ["--player", t["player"]]
+    if t.get("cry") is None and t.get("cry2") is not None:
+        # The cry over the SE / song: cry player 0 chained after the song's player (slice 9b-i).
+        cmd += ["--cry2", str(t["cry2"]), "--cry2-start-frame", str(t["cry2_start_frame"])]
     cmd += args.poryaaaa_args
     if run(cmd, wav + ".log") != 0:
         raise SystemExit(f"poryaaaa_render failed for {t['name']}, see {wav}.log")

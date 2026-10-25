@@ -16,6 +16,9 @@
 # (600), SEs 3 s with --player, cries 3 s (180 frames) or 4 s (240) with
 # --cry (the id and any pitch / pan / volume / length / release / chorus
 # from songs.json, and --cry2 / --cry2-start-frame for an id2 / start_frame2).
+# An SE / song entry's id2 / start_frame2 (a cry over it) adds the same two
+# flags to its line; a probe log named cry_over_* is resolved against that
+# entry (its name, then the song it plays) before the cry_* rule.
 set -u
 cd "$(dirname "$0")/../../.."
 BASE=${1:-$(ls -t test/accuracy/baselines/*.json | head -1)}
@@ -47,6 +50,12 @@ for s in json.load(open("test/accuracy/songs.json")):
         if "id2" in s:
             extra += " --cry2 %d --cry2-start-frame %d" % (s["id2"], s["start_frame2"])
         print(s["name"], "--cry %d %s" % (s["id"], extra))')
+# SE / song entries with a cry over them: name, the song it plays, the two flags.
+overs=$(python3 -c '
+import json
+for s in json.load(open("test/accuracy/songs.json")):
+    if s.get("type", "song") in ("se", "song") and "id2" in s and "start_frame2" in s:
+        print(s["name"], s.get("song", s["name"]), "--cry2 %d --cry2-start-frame %d" % (s["id2"], s["start_frame2"]))')
 moved=0; checked=0
 for f in build/probe/*.txt; do
     n=$(basename "$f" .txt)
@@ -54,6 +63,13 @@ for f in build/probe/*.txt; do
     frames=$(grep -c '^frame' "$f.frames")
     args=""
     case $n in
+        cry_over_*) over=$(echo "$overs" | awk -v n="$n" '$1 == n { print }')
+                    [ -n "$over" ] || continue
+                    song=$(echo "$over" | awk '{ print $2 }')
+                    src=songs/$song.s
+                    args=$(echo "$over" | awk '{ $1 = ""; $2 = ""; print }')
+                    p=$(echo "$players" | awk -v n="$song" '$1 == n { print $2 }')
+                    [ -n "$p" ] && args="--player $p $args";;
         cry_*)      src=""
                     args=$(echo "$cries" | awk -v n="$n" '$1 == n { $1 = ""; print }')
                     [ -n "$args" ] || continue;;

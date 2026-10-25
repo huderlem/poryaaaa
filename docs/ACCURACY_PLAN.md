@@ -4098,6 +4098,90 @@ where `stolenFromTrack` uses -1; `m4a_sequencer_frame`'s head comment
 cites the two-cry statement only; `track_apply`'s dead branch against the
 GBA's `_081DD9C8` pass was not re-checked by this review (pre-existing).
 
+### Done: milestone 4 slice 9b-ii, the cry-over-song corpus rows (2026-10-25)
+
+`songs.json`, the runner, `claim_check.sh`, the baseline and docs only: no
+engine, plugin, `cmd/`, ROM, reference-definition or `test_engine.c`
+change; the two runs of slice 9b-i gate c become corpus rows.  Before any
+change, `claim_check.sh` against `2026-10-25_two-cry-rows.json` reproduced
+the baseline (57 diffed, 0 moved, 55/64, 0 regressions, every row 0.0;
+unit 1521/1521, blip 49112/0, songs 561/561), and the probe logs
+`build/probe/cry_over_se.txt` / `cry_over_bgm.txt` (+ `.frames`, 179
+`frame` lines each) were in place from slice 9a.
+
+**The keys.**  An `"se"` or `"song"` entry may carry the same `"id2"` /
+`"start_frame2"` pair a cry entry may (both or neither; 0..65535 /
+1..255, the ROM's `u16 id2` / `u8 startFrame2`; a violation is a warning
+and a skip, the checks now shared by the two loader branches as
+`second_cry_ok`): gCryTable[id2] at CRY_MODE_NORMAL's defaults, its
+`StartCry` on VBlank start_frame2 (start tick on engine frame + 2), over
+the SE / song.  Since the loader has always taken the entry's name as the
+song it plays (`songs.h`, `midi.cfg`, `song_table.inc`, the `.s` path) and
+the two rows are named after their probe logs, such an entry also carries
+`"song"`: the name of the SE / song it plays (default: the entry's name,
+so every existing row is unchanged).  **The runner lines**: `mgba_render
+... --type song --id <song> --id2 N --start-frame2 F` (the line already
+appended the two flags for any entry with `cry2`; verified, not
+duplicated -- `StartTest` runs the second-cry block after its type switch,
+slice 9a's premise) and `poryaaaa_render --song <.s> ... [--player seN]
+--cry2 N --cry2-start-frame F` (after `--player`, the song / SE branch
+only: a cry entry's own `--cry2` line is untouched); `--input midi` skips
+such an entry with a message ("a cry over the song has no MIDI"), as it
+skips cries.  The reference frame count is the existing `seconds ->
+frames + 2`: 182 for both rows.  `claim_check.sh`: a probe log named
+`cry_over_*` is resolved against the SE / song entry of that name (its
+`"song"` for the `.s`, `--player` from `song_table.inc` for an SE, then
+the two flags from the keys) before the `cry_*` rule, which looks only
+among `type == "cry"` entries and would have skipped both logs; the
+`cry_over_se_se` / `cry_over_bgm_bgm` twin logs (the same runs read from
+the other player's symbol) match no entry and stay skipped as before.
+
+**The two rows** (`songs.json`): `cry_over_se` (type se, song se_exp, id2
+0, start_frame2 30, 3.0 s) and `cry_over_bgm` (type song, song
+mus_littleroot, id2 0, start_frame2 60, 3.0 s).  Both kept at 3 s so the
+existing 180-frame probes cover them; the BGM cry's EOT on frame 202 is
+past the row (its chain is empty from the count-path death on frame 108,
+so 4 s would add only the tick's xWAIT; the note says so).  **Gate a**:
+(a) null **-55.0 dB**, worst 1 s **-52.7**, lag 0.0, gain -0.0 dB, ref /
+test -23.5 dBFS; (b) null **-49.6 dB**, worst **-46.4**, lag 0.0, -23.1
+dBFS -- slice 9b-i's gate-c numbers to the digit, both PASS at -40; the
+two new references are byte-identical (`cmp`) to gate c's
+`build/scratch/cry_over_se.wav` / `cry_over_bgm.wav`, the `mgba_render
+--type song --id 33 / 405 --id2 0 --start-frame2 30 / 60 --frames 182`
+lines in the refs' `.log`s; the residual the PCM scheduler-lateness floor
+attributed run by run in 9b-i (6 / 20 `timer0 slot_crossed` in the
+`.events`).  `compare_reports.py` against `2026-10-25_two-cry-rows.json`:
+0 regressions, every one of the 64 existing rows 0.0 in null and worst
+and identical in every `report.json` field but the `ref` / `test` paths
+(checked with python), the two new rows "only in after".  **Gate b**:
+`claim_check.sh` against the previous baseline -- **59 tests diffed**
+(57 + the two new logs: the SE's 284 and the BGM's 156 mgba writes, max
+|d| 0 cycles each, the engine lines rebuilt as `--song
+build/accuracy/rom/songs/se_exp.s --player se1 --cry2 0
+--cry2-start-frame 30` / `--song .../mus_littleroot.s --cry2 0
+--cry2-start-frame 60`), **0 moved**; harness **57/66**; unit 1521/1521
+(unchanged, no test change), blip 49112/0, songs 561/561.  `--input midi
+--tests cry_over_se,cry_over_bgm,se_exp` skips the two with the message
+and runs se_exp.  **Gate c, the baseline**:
+`test/accuracy/baselines/2026-10-25_cry-over-song-rows.json` / `.txt`
+from the full default run (gate b's harness stage, the last run before the
+copy), 66 rows, **57/66** at -40 dB, the nine documented FAILs unchanged
+(se_rain_stop, cry_pidgey, cry_jynx, cry_bulbasaur_howl,
+cry_pidgey_quiet, cry_bulbasaur_reverse, cry_pidgey_echo_start,
+cry_pidgey_echo_start_chorus, cry_jynx_high_pitch); the `.txt` differs
+from the previous one by the two appended rows and the summary line only.
+Reproduced once with `claim_check.sh` against it after the commit (the
+numbers in the review paragraph below).
+
+**What comes next**: the next ground-truth probe is a second cry while
+both cry players are busy (the game's `SetPokemonCryTone` replacing the
+player with the smaller `maxClock` -- the `--cry2` refusal of slice 8b-i
+becomes a measured path; a probe step and a ROM parameter first, no
+engine change until the frames are read) or an SE over music (BGM + SE1
+in one chain, the SE's PSG writes after the BGM's on the same frame; the
+`StartTest` block needs a second song id, so a ROM change under the
+boot-path rule).  Either is a probe step first, as 9a was for 9b.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

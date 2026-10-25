@@ -343,8 +343,14 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   --cry2 0 --cry2-start-frame 60` (slice 9b-i: cry player 0 chained after
   the song's player, BGM -> cry 0 on engine tracks 10..11 / SE1 -> cry 0 on
   3..4, the steal unlinking the owner's chain at once; `--seq-log` /
-  `--psg-log` and the diff tools as for two cries; the `songs.json` rows
-  and the runner's lines are slice 9b-ii).
+  `--psg-log` and the diff tools as for two cries).  Their `songs.json`
+  rows are `cry_over_se` / `cry_over_bgm` (slice 9b-ii): an `"se"` /
+  `"song"` entry carrying the same `"id2"` / `"start_frame2"` pair plus
+  `"song"` naming the SE / song it plays (`"se_exp"` / `"mus_littleroot"`;
+  the entry is named after its probe log), both 3 s; the runner appends
+  `--cry2 N --cry2-start-frame F` after `--player`, `--input midi` skips
+  them, and `claim_check.sh` resolves a `cry_over_*` log against its entry
+  and adds the two flags to that line.
   Optional `"pitch"`, `"pan"`, `"volume"`, `"length"`, `"release"`,
   `"chorus"` keys (SetPokemonCryPitch / Panpot / Volume / Length / Release
   / Chorus's arguments; take the values from `PlayCryInternal`'s modes in

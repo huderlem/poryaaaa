@@ -256,5 +256,23 @@
     "start_frame2": 60,
     "seconds": 4.0,
     "note": "two long cries at once: Cry_Jynx (gCryTable[123], 23524 samples, the longest) on cry player 0, then Cry_Wailord (gCryTable[381], 20846 samples) at the defaults on VBlank 60 (start tick on frame 62) on cry player 1 and channel 1; both samples still sounding together from frame 62 to Jynx's count-path death on frame 137, Wailord's on frame 181, then both EOTs on empty chains (143 / 202) -- 4 s covers the second EOT; the probe log build/probe/cry_second_jynx_wailord.txt, 240 frames"
+  },
+  {
+    "name": "cry_over_se",
+    "type": "se",
+    "song": "se_exp",
+    "id2": 0,
+    "start_frame2": 30,
+    "seconds": 3.0,
+    "note": "a cry over a sound effect (slice 9a / 9b-i / 9b-ii): se_exp on SE1 (3 tracks, square 1 only), then StartCry of Cry_Bulbasaur (gCryTable[0]) at CRY_MODE_NORMAL's defaults on VBlank 30 (its start tick on engine frame 32) while the SE plays -- cry player 0 chained after SE1 (engine tracks 3..4), no DirectSound channel ON so the cry takes channel 0 freely (no steal); the 8183-sample cry dies through the count path on frame 78, the SE's EOT and the cry's EOT (frame 172) both inside the row; the probe log build/probe/cry_over_se.txt, 180 frames"
+  },
+  {
+    "name": "cry_over_bgm",
+    "type": "song",
+    "song": "mus_littleroot",
+    "id2": 0,
+    "start_frame2": 60,
+    "seconds": 3.0,
+    "note": "a cry over music: mus_littleroot on BGM (10 tracks), then StartCry of Cry_Bulbasaur (gCryTable[0]) at the defaults on VBlank 60 (start tick on frame 62) -- cry player 0 chained after BGM (engine tracks 10..11); all five DirectSound channels are ON on frame 62, so ply_note's stopping-candidate rule steals channel 1, a releasing note of BGM track 1, and unlinks it from the BGM's chain at once (the measured 70 = NOTE_UNLINK_11 66 + CHAIN_EMPTY 4; the BGM's tick frames then read -32 for the missing channel); the cry dies through the count path on frame 108; kept at 3 s so the existing 180-frame probe covers the row -- the cry's EOT on frame 202 is past it (its chain is empty by then, so only the tick's xWAIT would be covered by 4 s); the probe log build/probe/cry_over_bgm.txt, 180 frames"
   }
 ]
