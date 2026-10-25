@@ -122,5 +122,35 @@
     "volume": 90,
     "seconds": 2.0,
     "note": "Cry_Pidgey at volume 90 (CRY_MODE_ENCOUNTER / HIGH_PITCH's value, VOL byte 0x5A) at the default pitch and pan"
+  },
+  {
+    "name": "cry_jynx_faint_full",
+    "type": "cry",
+    "id": 123,
+    "pitch": 14440,
+    "length": 140,
+    "release": 200,
+    "seconds": 3.0,
+    "note": "Cry_Jynx with CRY_MODE_FAINT complete (pitch 14440, length 140, release 200; the mode sets no chorus): the twin of cry_jynx_faint whose EOT releases the still-sounding channel instead of cutting it -- the first release tail on a DPCM channel in the corpus (envelope 255 * 200 >> 8 per frame from the EOT on frame 143, the channel stopped on frame 161 when the product reaches 0); ply_fine unlinks the releasing channel"
+  },
+  {
+    "name": "cry_wailord_doubles",
+    "type": "cry",
+    "id": 381,
+    "pitch": 15360,
+    "length": 20,
+    "release": 225,
+    "seconds": 3.0,
+    "note": "Cry_Wailord with CRY_MODE_DOUBLES (length 20, release 225, pitch 15360; the mode sets no chorus): the 1.98 s sample cut by the EOT at tick 20 (frame 23) with the slowest release, 30 release frames to the channel's stop on frame 53"
+  },
+  {
+    "name": "cry_pidgey_roar2",
+    "type": "cry",
+    "id": 15,
+    "pitch": 15616,
+    "length": 60,
+    "release": 225,
+    "seconds": 2.0,
+    "note": "Cry_Pidgey with CRY_MODE_ROAR_2 (length 60, release 225, pitch 15616 = TIE key 61; the mode sets no chorus): the 0.17 s sample has ended long before tick 60 (the unlink tick on frame 14), so the EOT on frame 63 finds an empty chain and only the xWAIT length changes against cry_pidgey; the xRELE byte reaches no channel"
   }
 ]

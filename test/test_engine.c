@@ -4257,19 +4257,27 @@ static void test_cry_song(void)
     ASSERT(base != NULL, "cry: default song built (variants)");
     if (!base) return;
     static const struct {
-        const char *name; int16_t pitch; int8_t pan; uint8_t volume;
-        uint8_t key, tune, tune2, panByte, volByte;
-    } variants[3] = {
+        const char *name; int16_t pitch; int8_t pan; uint8_t volume; uint16_t length; uint8_t release;
+        uint8_t key, tune, tune2, panByte, volByte, waitLo, waitHi, releaseByte;
+    } variants[6] = {
         /* Cry_Jynx at CRY_MODE_FAINT's 14440: b = 0x38E8 -> key 0x38, tune 0x74, tune2 (16 + 0x74) & 0x7F */
-        { "cry_jynx_faint", 14440, 0, 120, 0x38, 0x74, 0x04, 0x40, 0x78 },
+        { "cry_jynx_faint", 14440, 0, 120, 140, 0, 0x38, 0x74, 0x04, 0x40, 0x78, 0x8C, 0x00, 0x00 },
         /* Cry_Bulbasaur at CRY_MODE_HIGH_PITCH's 15800, pan 63: b = 0x3E38 -> key 0x3E, tune 0x1C, tune2 0x2C; PAN (63 + 64) & 0x7F */
-        { "cry_bulbasaur_howl", 15800, 63, 120, 0x3E, 0x1C, 0x2C, 0x7F, 0x78 },
+        { "cry_bulbasaur_howl", 15800, 63, 120, 140, 0, 0x3E, 0x1C, 0x2C, 0x7F, 0x78, 0x8C, 0x00, 0x00 },
         /* Cry_Pidgey at volume 90 (CRY_MODE_ENCOUNTER's): VOL 0x5A */
-        { "cry_pidgey_quiet", 15360, 0, 90, 0x3C, 0x40, 0x50, 0x40, 0x5A },
+        { "cry_pidgey_quiet", 15360, 0, 90, 140, 0, 0x3C, 0x40, 0x50, 0x40, 0x5A, 0x8C, 0x00, 0x00 },
+        /* Milestone 4 slice 4, whole modes (src/sound.c PlayCryInternal; none sets chorus):
+         * CRY_MODE_FAINT on Cry_Jynx: pitch 14440, length 140 (xWAIT 0x8C 0x00), release 200 (xRELE 0xC8) */
+        { "cry_jynx_faint_full", 14440, 0, 120, 140, 200, 0x38, 0x74, 0x04, 0x40, 0x78, 0x8C, 0x00, 0xC8 },
+        /* CRY_MODE_DOUBLES on Cry_Wailord: pitch 15360, length 20 (0x14 0x00), release 225 (0xE1) */
+        { "cry_wailord_doubles", 15360, 0, 120, 20, 225, 0x3C, 0x40, 0x50, 0x40, 0x78, 0x14, 0x00, 0xE1 },
+        /* CRY_MODE_ROAR_2 on Cry_Pidgey: pitch 15616 (b = 0x3D80 -> key 0x3D, tune 0x40, tune2 0x50), length 60 (0x3C 0x00), release 225 */
+        { "cry_pidgey_roar2", 15616, 0, 120, 60, 225, 0x3D, 0x40, 0x50, 0x40, 0x78, 0x3C, 0x00, 0xE1 },
     };
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 6; k++) {
         M4ACryParams v = d;
         v.pitch = variants[k].pitch; v.pan = variants[k].pan; v.volume = variants[k].volume;
+        v.length = variants[k].length; v.release = variants[k].release;
         M4ASong *vs = m4a_cry_song_new(&v);
         ASSERT(vs != NULL, "cry: variant song built");
         if (!vs) continue;
@@ -4278,9 +4286,13 @@ static void test_cry_song(void)
         ASSERT(vs->data[0x2A] == variants[k].key && vs->data[0x12] == variants[k].tune
                && vs->data[0x19] == variants[k].tune2 && vs->data[0x28] == variants[k].panByte
                && vs->data[0x1D] == variants[k].volByte, msg);
+        snprintf(msg, sizeof(msg), "cry: %s xWAIT u16 (0x2E, 0x2F) / xRELE (0x26) bytes", variants[k].name);
+        ASSERT(vs->data[0x2E] == variants[k].waitLo && vs->data[0x2F] == variants[k].waitHi
+               && vs->data[0x26] == variants[k].releaseByte, msg);
         int same = 1;
         for (int i = 0; i < M4A_CRY_SONG_SIZE; i++)
-            if (i != 0x2A && i != 0x12 && i != 0x19 && i != 0x28 && i != 0x1D && vs->data[i] != base->data[i])
+            if (i != 0x2A && i != 0x12 && i != 0x19 && i != 0x28 && i != 0x1D && i != 0x2E && i != 0x2F && i != 0x26
+                && vs->data[i] != base->data[i])
                 same = 0;
         snprintf(msg, sizeof(msg), "cry: %s differs from the default song in those bytes only", variants[k].name);
         ASSERT(same, msg);
@@ -4643,6 +4655,173 @@ static void test_sequencer_cycles_cry_faint(void)
     free(wd);
 }
 
+/* The PCM release envelope on a hand-built channel (SoundMainRAM
+ * _081DCFB6.._081DCFC8 / _081DD006, m4a_1.s): once per pass with SF_STOP
+ * set, envelopeVolume = envelopeVolume * release >> 8; with pseudoEchoVolume
+ * 0 the pass whose product is 0 stores statusFlags 0 and mixes nothing (the
+ * `cmp r5, echo; bhi` falls through to `_081DCFC8` -> `_081DCFB0`); the
+ * per-channel volume is (masterVolume + 1) * env >> 4, then * rightVolume /
+ * leftVolume >> 8.  The game's cry modes use releases 100..225 (slice 4's
+ * corpus: 200 and 225, the probe's death frames 161 and 53). */
+static void test_pcm_release_envelope(void)
+{
+    printf("Testing the PCM release envelope (release 225 / 200 against the GBA's arithmetic)...\n");
+    static const uint8_t seq225[31] = { 224, 196, 172, 151, 132, 116, 101, 88, 77, 67, 58, 50, 43, 37, 32, 28,
+                                        24, 21, 18, 15, 13, 11, 9, 7, 6, 5, 4, 3, 2, 1, 0 };
+    static const uint8_t seq200[19] = { 199, 155, 121, 94, 73, 57, 44, 34, 26, 20, 15, 11, 8, 6, 4, 3, 2, 1, 0 };
+    const struct { uint8_t release; const uint8_t *seq; int n; } cases[2] = {
+        { 225, seq225, 31 }, { 200, seq200, 19 } };
+
+    for (int c = 0; c < 2; c++) {
+        /* The tick alone: the sequence, the volumes and the stop pass. */
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        ch.status = CHN_ENV_SUSTAIN | CHN_STOP;          /* ply_endtie's SF_STOP on a sustaining channel */
+        ch.envelopeVolume = 0xFF;                        /* attack 255 reached it; decay 0 / sustain 255 hold it */
+        ch.release = cases[c].release;
+        ch.rightVolume = 0xEE; ch.leftVolume = 0x77;     /* arbitrary ChnVolSetAsm results */
+        int bad = -1, volBad = -1, stoppedAt = -1;
+        for (int k = 0; k < cases[c].n; k++) {
+            m4a_pcm_channel_tick(&ch, 12);
+            uint8_t want = cases[c].seq[k];
+            if (want == 0) {
+                if ((ch.status & CHN_ON) == 0 && stoppedAt < 0) stoppedAt = k;
+                break;
+            }
+            if (!(ch.status & CHN_ON) || ch.envelopeVolume != want) { if (bad < 0) bad = k; }
+            uint32_t vol = (13u * want) >> 4;
+            if (ch.envelopeVolumeRight != ((0xEEu * vol) >> 8) || ch.envelopeVolumeLeft != ((0x77u * vol) >> 8)) { if (volBad < 0) volBad = k; }
+        }
+        char msg[128];
+        if (bad >= 0) printf("  release %d pass %d: engine %d, GBA %d\n", cases[c].release, bad, ch.envelopeVolume, cases[c].seq[bad]);
+        snprintf(msg, sizeof(msg), "release %d: envelopeVolume follows env * release >> 8 on every mixed pass (%d passes)", cases[c].release, cases[c].n - 1);
+        ASSERT_EQ(bad, -1, msg);
+        snprintf(msg, sizeof(msg), "release %d: the per-side volumes are rightVolume * ((13 * env) >> 4) >> 8 on every pass", cases[c].release);
+        ASSERT_EQ(volBad, -1, msg);
+        snprintf(msg, sizeof(msg), "release %d: the channel stops on pass %d, the first whose product is 0", cases[c].release, cases[c].n - 1);
+        ASSERT_EQ(stoppedAt, cases[c].n - 1, msg);
+        ASSERT_EQ(ch.status, 0, "release: the stop clears every status flag");
+    }
+
+    /* Through the mixer, as m4a_sound_main_ram runs a channel (the tick,
+     * then the mix if the channel is still on): a constant +100 sample at
+     * FIX, release 200 from 255 -- the mixed byte is (100 *
+     * envelopeVolumeRight) >> 8 per pass, env 1 (volume 0) is already
+     * silent, and the stop pass writes nothing. */
+    {
+        M4AEngine e;
+        m4a_engine_init(&e, 44100.0f);
+        e.pcmDivFreq = 1;
+        ASSERT_EQ(e.masterVolume, 12, "release: the engine's masterVolume is m4aSoundInit's 12");
+        static int8_t frame[GBA_PCM_DMA_BUF_SIZE * 2];
+        WaveData *wd = calloc(1, sizeof(WaveData) + 8192 + 1);   /* 20 passes of 224 samples fit */
+        wd->size = 8192; wd->freq = 13379 << 10;
+        wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+        memset(wd->data, 100, 8192);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX);
+        ch.status = CHN_START;                           /* ply_note's SF_START */
+        ch.rightVolume = ch.leftVolume = 0xFF;
+        ch.attack = 0xFF; ch.decay = 0; ch.sustain = 0xFF; ch.release = 200;
+        m4a_pcm_channel_tick(&ch, e.masterVolume);       /* SF_START: attack to 255 */
+        mix_frame(&e, &ch, frame);
+        ASSERT_EQ(ch.envelopeVolume, 0xFF, "release: attack 255 reaches 255 on the first pass");
+        ASSERT_EQ(frame[0], (int8_t)((100u * ((0xFFu * ((13u * 0xFFu) >> 4)) >> 8)) >> 8), "release: the sustained byte is 100 * (255 * 207 >> 8) >> 8");
+        ch.status |= CHN_STOP;                           /* the EOT */
+        int bad = -1;
+        for (int k = 0; k < 18; k++) {
+            m4a_pcm_channel_tick(&ch, e.masterVolume);
+            mix_frame(&e, &ch, frame);
+            uint32_t vol = (13u * seq200[k]) >> 4;
+            int8_t want = (int8_t)((100u * ((0xFFu * vol) >> 8)) >> 8);
+            if (ch.envelopeVolume != seq200[k] || frame[0] != want || frame[GBA_PCM_DMA_BUF_SIZE] != want || frame[e.pcmSamplesPerVBlank - 1] != want) {
+                if (bad < 0) { bad = k; printf("  pass %d: env %d (want %d), byte %d (want %d)\n", k, ch.envelopeVolume, seq200[k], frame[0], want); }
+            }
+        }
+        ASSERT_EQ(bad, -1, "release 200 through the mixer: 18 release passes at the GBA's envelope and volume");
+        ASSERT_EQ(frame[0], 0, "release: the pass at env 1 ((13 * 1) >> 4 = 0) is already silent");
+        ASSERT(ch.status & CHN_ON, "release: the channel is still on after the env-1 pass");
+        m4a_pcm_channel_tick(&ch, e.masterVolume);
+        ASSERT_EQ(ch.status, 0, "release: the 19th pass (product 0) stops the channel before its mix (m4a_sound_main_ram skips it)");
+        free(wd);
+        m4a_engine_destroy(&e);
+    }
+}
+
+/* cry_jynx_faint_full (gCryTable 123 with CRY_MODE_FAINT complete: pitch
+ * 14440, length 140, release 200) against build/probe/cry_jynx_faint_full.txt
+ * (plan, "SoundMain timing probe, step 7"): the sequencer frames are
+ * cry_jynx_faint's (the EOT at 143 finds the chained channel, 1928; FINE
+ * unlinks it), and the channel then releases on its own, 18 mixed passes
+ * on frames 143..160 and the stop on 161 (the probe's _081DCFB0 stamp). */
+static void test_sequencer_cycles_cry_faint_full(void)
+{
+    printf("Testing sequencer CgbSound entry and the release tail on a cry mode (cry_jynx_faint_full probe)...\n");
+    static int8_t decoded[23524 + 2 * M4A_DPCM_BLOCK_SAMPLES];
+    WaveData *wd = make_dpcm_wave(23524, 0, 0, decoded);
+    wd->freq = 10512u << 10;
+    static ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_CRY;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF; voices[0].decay = 0; voices[0].sustain = 0xFF; voices[0].release = 0;
+
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    p.pitch = 14440; p.length = 140; p.release = 200;      /* CRY_MODE_FAINT */
+    M4ASong *song = m4a_cry_song_new(&p);
+    ASSERT(song != NULL, "cry faint full cycles: song built");
+    if (!song) { free(wd); return; }
+    ASSERT(song->data[0x2A] == 0x38 && song->data[0x12] == 0x74 && song->data[0x2E] == 0x8C
+           && song->data[0x2F] == 0x00 && song->data[0x26] == 0xC8, "cry faint full cycles: TIE key 56, TUNE 116, xWAIT 140, xRELE 200");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&seq, M4A_PLAYER_CRY0), 0, "cry faint full cycles: cry player 0");
+    m4a_engine_boot(&engine, false);
+    m4a_sequencer_start(&seq, song);
+
+    static float outL[4096], outR[4096];
+    static const uint8_t seq200[19] = { 199, 155, 121, 94, 73, 57, 44, 34, 26, 20, 15, 11, 8, 6, 4, 3, 2, 1, 0 };
+    int mismatches = 0, envBad = -1, deathFrame = -1;
+    bool liveAtEot = false, releaseAtEot = false;
+    for (int k = 3; k <= 165; k++) {
+        int expected = k == 3 ? 4077 : k < 143 ? 1596 : k == 143 ? 1928 : k == 144 ? 1192 : 1007;
+        if (k == 143)
+            liveAtEot = (engine.pcmChannels[0].status & CHN_ON) != 0;
+        advance_frames(&engine, 1, outL, outR);
+        if (seq.frameCycles != expected) {
+            if (mismatches++ < 5)
+                printf("  frame %d: engine %d, mgba %d\n", k, seq.frameCycles, expected);
+        }
+        if (k == 143)
+            releaseAtEot = engine.pcmChannels[0].release == 200;
+        if (k >= 143 && k <= 160) {
+            if (!(engine.pcmChannels[0].status & CHN_ON) || engine.pcmChannels[0].envelopeVolume != seq200[k - 143]) {
+                if (envBad < 0) { envBad = k; printf("  frame %d: env %d status %02X, GBA %d\n", k, engine.pcmChannels[0].envelopeVolume, engine.pcmChannels[0].status, seq200[k - 143]); }
+            }
+        }
+        if (deathFrame < 0 && k >= 143 && !(engine.pcmChannels[0].status & CHN_ON))
+            deathFrame = k;
+    }
+    ASSERT(liveAtEot, "cry faint full cycles: the channel is still sounding when the EOT tick runs");
+    ASSERT(releaseAtEot, "cry faint full cycles: the channel carries xRELE's 200 (ply_xrele -> the track tone -> ply_note)");
+    ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the cry_jynx_faint_full probe on frames 3..165 (cry 0)");
+    ASSERT_EQ(envBad, -1, "cry faint full cycles: the release envelope on frames 143..160 is 255 * 200 >> 8 per pass (199 .. 1)");
+    ASSERT_EQ(deathFrame, 161, "cry faint full cycles: the channel dies on frame 161, the probe's _081DCFB0 stamp (f162)");
+    ASSERT(m4a_sequencer_finished(&seq), "sequencer: the cry finished (the track gone at 143, the channel outliving it)");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -4697,6 +4876,8 @@ int main(void)
     test_sequencer_xcmd_0D();
     test_sequencer_endtie_walk();
     test_sequencer_cycles_cry_faint();
+    test_pcm_release_envelope();
+    test_sequencer_cycles_cry_faint_full();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

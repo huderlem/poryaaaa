@@ -14,7 +14,7 @@
 # mgba_probe; not committed) and renders each test for the probe's length:
 # micro-tests 1.2 s (70 frames) or 3 s (180), songs 20 s (1200) or 10 s
 # (600), SEs 3 s with --player, cries 3 s with --cry (the id and any
-# pitch / pan / volume from songs.json).
+# pitch / pan / volume / length / release from songs.json).
 set -u
 cd "$(dirname "$0")/../../.."
 BASE=${1:-$(ls -t test/accuracy/baselines/*.json | head -1)}
@@ -42,7 +42,7 @@ cries=$(python3 -c '
 import json
 for s in json.load(open("test/accuracy/songs.json")):
     if s.get("type") == "cry" and "id" in s:
-        extra = " ".join("--cry-%s %d" % (k, s[k]) for k in ("pitch", "pan", "volume") if k in s)
+        extra = " ".join("--cry-%s %d" % (k, s[k]) for k in ("pitch", "pan", "volume", "length", "release") if k in s)
         print(s["name"], "--cry %d %s" % (s["id"], extra))')
 moved=0; checked=0
 for f in build/probe/*.txt; do

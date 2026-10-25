@@ -23,9 +23,11 @@ Steps (all idempotent, cached under --build-dir):
      (mgba_render --type cry --id N, PlayCryInternal's CRY_MODE_NORMAL
      defaults) and poryaaaa_render --cry N: the cry song template on cry
      player 0 with the cry's DPCM sample as its one voice.  Optional
-     "pitch", "pan", "volume" keys (SetPokemonCryPitch / Panpot / Volume's
-     arguments) go to both renderers (mgba_render --pitch / --pan /
-     --volume, poryaaaa_render --cry-pitch / --cry-pan / --cry-volume).
+     "pitch", "pan", "volume", "length", "release" keys (SetPokemonCryPitch /
+     Panpot / Volume / Length / Release's arguments) go to both renderers
+     (mgba_render --pitch / --pan / --volume / --length / --release,
+     poryaaaa_render --cry-pitch / --cry-pan / --cry-volume / --cry-length /
+     --cry-release).
      Cries have no MIDI, so --input midi skips them.
   4. metrics.compare on each pair; a table on stdout and a JSON report.
 
@@ -42,6 +44,9 @@ import re
 import shutil
 import subprocess
 import sys
+
+# songs.json cry keys = the SetPokemonCry* setters StartCry takes: mgba_render --<key>, poryaaaa_render --cry-<key>.
+CRY_PARAM_KEYS = ("pitch", "pan", "volume", "length", "release")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import metrics  # noqa: E402
@@ -128,16 +133,16 @@ def build_tests(args):
             name = s["name"]
             kind = s.get("type", "song")       # "song": vanilla music; "se": a sound effect; "cry": a Pokemon cry
             if kind == "cry":
-                # StartCry in the ROM (--type cry --id N [--pitch/--pan/--volume]),
+                # StartCry in the ROM (--type cry --id N [--pitch/--pan/--volume/--length/--release]),
                 # the cry song template on cry player 0 in poryaaaa_render
-                # (--cry N [--cry-pitch/--cry-pan/--cry-volume]).
+                # (--cry N [--cry-pitch/--cry-pan/--cry-volume/--cry-length/--cry-release]).
                 if "id" not in s:
                     print(f"warning: {name}: a cry needs its gCryTable index as \"id\", skipping", file=sys.stderr)
                     continue
                 tests.append(dict(name=name, group="cry", type="cry", id=int(s["id"]), midi=None, song=None,
                                   voicegroup=None, volume=None, reverb=None, extended=False,
                                   seconds=float(s.get("seconds", 2.0)), player=None, cry=int(s["id"]),
-                                  cry_params={k: int(s[k]) for k in ("pitch", "pan", "volume") if k in s}))
+                                  cry_params={k: int(s[k]) for k in CRY_PARAM_KEYS if k in s}))
                 continue
             const = name.upper()
             if const not in ids:
@@ -253,7 +258,7 @@ def render_reference(args, t, ref_dir):
         raise SystemExit(f"no mgba_render and no committed reference for {t['name']}")
     cmd = [args.mgba_render, args.rom, wav, "--frames", str(frames_for(t["seconds"])),
            "--rate", str(args.rate), "--type", t["type"], "--id", str(t["id"])]
-    for k, v in sorted(t.get("cry_params", {}).items()):      # StartCry's pitch / pan / volume
+    for k, v in sorted(t.get("cry_params", {}).items()):      # StartCry's pitch / pan / volume / length / release
         cmd += ["--" + k, str(v)]
     if run(cmd, wav + ".log") != 0:
         raise SystemExit(f"mgba_render failed for {t['name']}, see {wav}.log")

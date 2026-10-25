@@ -8,7 +8,7 @@ tooling; the plugin builds without it.
 
 | Path | What |
 |------|------|
-| `rom/` | Standalone GBA test ROM: pokeemerald's `m4a.c`/`m4a_1.s`/`m4a_tables.c` built with agbcc, the full vanilla sound data and song table, the game's sound-mode init (`m4aSoundInit`, VCOUNT-150 `m4aSoundVSync`, VBLANK `m4aSoundMain`), plus the micro-test voicegroup (`accuracy_micro.inc`) and songs (`micro/*.mid`, compiled by mid2agb with the options in `micro/micro.cfg`). A 32-byte parameter block tagged `PORYACC1` at ROM offset 0xC0 selects what to play (song/SE id, cry index, or micro index, plus cry pitch/pan/volume and the start frame); the harness patches it, so one build serves every test. |
+| `rom/` | Standalone GBA test ROM: pokeemerald's `m4a.c`/`m4a_1.s`/`m4a_tables.c` built with agbcc, the full vanilla sound data and song table, the game's sound-mode init (`m4aSoundInit`, VCOUNT-150 `m4aSoundVSync`, VBLANK `m4aSoundMain`), plus the micro-test voicegroup (`accuracy_micro.inc`) and songs (`micro/*.mid`, compiled by mid2agb with the options in `micro/micro.cfg`). A parameter block tagged `PORYACC1` at ROM offset 0xC0 (`struct AccParams`, 28 bytes: type, cry volume, id, cry pitch, cry pan, start frame, cry length, cry release, 9 reserved) selects what to play (song/SE id, cry index, or micro index, plus the cry's `SetPokemonCry*` values); the harness patches it, so one build serves every test. |
 | `ref/mgba_render.c` | Headless reference renderer linked against `libmgba-static.a`: patches the parameter block, runs N frames from reset, writes 16-bit stereo WAV at the requested rate (48 kHz by default). Deterministic: no user config, idle-loop detection off, unity master volume. The raw DAC stream (`mAVStream.postAudioFrame`, 65536 Hz) is resampled with the engine's own `plugin/m4a_blip.c` so both sides share one bit-exact resampler; `--native-resampler` writes mgba's blip_buf (sinc) output instead. The two modes report different `--version` strings and are cached apart. |
 | `tools/metrics.py` | Alignment (energy-envelope cross-correlation, then sample-level refinement) and the null-depth metrics: RMS of the difference relative to the reference in dB over the whole file and the worst 1 s window, raw and after a least-squares gain match, plus per-segment lag drift (tempo mismatch). |
 | `tools/accuracy.py` | Runner: builds an overlay project for poryaaaa's voicegroup loader, renders references (cached by ROM hash + mgba version), renders poryaaaa (`--input song`, the default: the compiled `.s` from the ROM build through `poryaaaa_render --song`, byte-identical to what mgba plays; `--input midi`: the MIDI with the mid2agb options mapped to CLI flags), compares, prints a table and writes `report.json`. |
@@ -18,7 +18,7 @@ tooling; the plugin builds without it.
 | `tools/probe_diff.py` | Diffs the PSG register writes of a probe log against `poryaaaa_render --song ... --psg-log <file>`, write by write, in cycles. The check that the timing model reproduces mgba's write cycles. |
 | `../test_song_parser.c` (`poryaaaa_song_tests`) | Byte-exact check of the `.s` parser (`plugin/m4a_song.c`) against the ROM: every song under `build/accuracy/rom/{micro,songs}` is parsed, relocated to its address from `accuracy_test.map` and compared with `accuracy_test.gba`. Runs as part of the `accuracy` target. |
 | `tools/gen_micro_midis.py` | Generates `rom/micro/*.mid` and `micro.cfg`. Re-run after editing; then rebuild the ROM. |
-| `songs.json` | Vanilla corpus (name, type, seconds, note). Songs: PSG + DirectSound (littleroot), pure PSG (weather_groudon), DirectSound-heavy battle (vs_wild), noise (mt_chimney), FRLG drumset (rg_vs_trainer), MEMACC (vs_trainer), long (credits, 60 s). Sound effects (`"type": "se"`, played by `m4aSongNumStart` on the player `sound/song_table.inc` names, which the runner passes to `poryaaaa_render --player`): se_exp and se_faint (SE1, 3 tracks), se_contest_place and se_truck_unload (SE2, 9 tracks), se_low_health and se_rain_stop (SE3, 1 track). Cries (`"type": "cry"`, `"id"` = the gCryTable index; the ROM's `StartCry` with `PlayCryInternal`'s CRY_MODE_NORMAL defaults, `poryaaaa_render --cry N`: the cry song template on cry player 0, `plugin/m4a_cry.c`): cry_pidgey (the shortest sample), cry_bulbasaur, cry_wailord, cry_jynx (the longest; no cry sample loops), and three of `PlayCryInternal`'s other parameter values (`"pitch"` / `"pan"` / `"volume"` keys): cry_jynx_faint (pitch 14440, the sample outliving the 140-tick EOT), cry_bulbasaur_howl (pitch 15800, pan 63), cry_pidgey_quiet (volume 90). Cries are the only DPCM (compressed) material besides the `pcm_cmp` micro-test. |
+| `songs.json` | Vanilla corpus (name, type, seconds, note). Songs: PSG + DirectSound (littleroot), pure PSG (weather_groudon), DirectSound-heavy battle (vs_wild), noise (mt_chimney), FRLG drumset (rg_vs_trainer), MEMACC (vs_trainer), long (credits, 60 s). Sound effects (`"type": "se"`, played by `m4aSongNumStart` on the player `sound/song_table.inc` names, which the runner passes to `poryaaaa_render --player`): se_exp and se_faint (SE1, 3 tracks), se_contest_place and se_truck_unload (SE2, 9 tracks), se_low_health and se_rain_stop (SE3, 1 track). Cries (`"type": "cry"`, `"id"` = the gCryTable index; the ROM's `StartCry` with `PlayCryInternal`'s CRY_MODE_NORMAL defaults, `poryaaaa_render --cry N`: the cry song template on cry player 0, `plugin/m4a_cry.c`): cry_pidgey (the shortest sample), cry_bulbasaur, cry_wailord, cry_jynx (the longest; no cry sample loops), and three of `PlayCryInternal`'s other parameter values (`"pitch"` / `"pan"` / `"volume"` keys): cry_jynx_faint (pitch 14440, the sample outliving the 140-tick EOT), cry_bulbasaur_howl (pitch 15800, pan 63), cry_pidgey_quiet (volume 90), and three whole modes with their `"length"` / `"release"` (`SetPokemonCryLength` / `Release`): cry_jynx_faint_full (CRY_MODE_FAINT: pitch 14440, release 200, the EOT releasing the live channel over 18 frames), cry_wailord_doubles (CRY_MODE_DOUBLES: length 20, release 225, the slowest release over 30 frames), cry_pidgey_roar2 (CRY_MODE_ROAR_2: pitch 15616, length 60, release 225, the sample gone before the EOT). Cries are the only DPCM (compressed) material besides the `pcm_cmp` micro-test. |
 | `refs/micro/` | Committed micro-test references (FLAC) and `manifest.json` (ROM hash, mgba version). Lets the micro-tests run without an mgba build. |
 | `baselines/` | Saved reports. |
 
@@ -71,11 +71,18 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   --cry N` (the cry song template with the cry's DPCM sample as voice 0, on
   cry player 0).  Cries have no MIDI: `--input midi` skips them with a
   message.  `--tests cry` runs them alone.  Optional `"pitch"`, `"pan"`,
-  `"volume"` keys are `SetPokemonCryPitch` / `Panpot` / `Volume`'s
-  arguments (the values `PlayCryInternal`'s modes use: pitches
-  14440..15800, volumes 70 / 90 / 120); the runner passes them to both
-  renderers (`mgba_render --pitch/--pan/--volume`, `poryaaaa_render
-  --cry-pitch/--cry-pan/--cry-volume`).  To probe one: `mgba_probe ... 180
-  1 N build/probe/syms.nm gPokemonCryMusicPlayers [pitch [pan [volume]]]`
-  and `probe_mplay.py --player CRY0`; render with `--cry N` (and the same
-  `--cry-*` flags) for the diffs.
+  `"volume"`, `"length"`, `"release"` keys are `SetPokemonCryPitch` /
+  `Panpot` / `Volume` / `Length` / `Release`'s arguments (the values
+  `PlayCryInternal`'s modes use, taken as whole modes: pitches
+  14440..15800, volumes 70 / 90 / 120, lengths 10..140, releases 100..225;
+  chorus is not patchable yet, so a mode's chorus stays 0 and the entry's
+  note says so); the runner passes them to both renderers (`mgba_render
+  --pitch/--pan/--volume/--length/--release`, `poryaaaa_render
+  --cry-pitch/--cry-pan/--cry-volume/--cry-length/--cry-release`).  To
+  probe one: `mgba_probe ... 180 1 N build/probe/syms.nm
+  gPokemonCryMusicPlayers [pitch [pan [volume [length [release]]]]]` and
+  `probe_mplay.py --player CRY0`; render with `--cry N` (and the same
+  `--cry-*` flags) for the diffs.  The probe's `_081DCFB0` breakpoint
+  (SoundMainRAM's channel stop, at its IWRAM copy) stamps the frame a
+  releasing channel dies on; a sample that runs out of data does not hit
+  it.

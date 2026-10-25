@@ -742,6 +742,10 @@ static void print_usage(const char *prog)
         "  --cry-pan <-128..127>       SetPokemonCryPanpot's value (0 = centre; -64 left, 63 right)\n"
         "  --cry-volume <0..255>       SetPokemonCryVolume's value (masked to 0..127; the game\n"
         "                              uses 120, 90, 70)\n"
+        "  --cry-length <0..65535>     SetPokemonCryLength's value: the ticks the TIE holds before\n"
+        "                              the EOT (XCMD xWAIT; the game's modes use 10..140)\n"
+        "  --cry-release <0..255>      SetPokemonCryRelease's value: the track tone's release at\n"
+        "                              the EOT (XCMD xRELE; 0 cuts, the game's modes use 100..225)\n"
         "  --cry-progress <0..2^32-1>  SetPokemonCryProgress: the sample offset the cry starts\n"
         "                              at (XCMD 0x0D; every game mode passes 0)\n"
         "\n"
@@ -795,7 +799,7 @@ typedef struct {
     const char *voicegroup;      /* NULL: use the song header's */
     const char *songPath;        /* --song, or NULL with --cry */
     int cry;                     /* --cry: gCryTable index, or -1 */
-    M4ACryParams cryParams;      /* --cry-pitch / --cry-pan / --cry-volume / --cry-progress over PlayCryInternal's defaults */
+    M4ACryParams cryParams;      /* --cry-pitch / --cry-pan / --cry-volume / --cry-length / --cry-release / --cry-progress over PlayCryInternal's defaults */
     bool respectBaseMidiKey, portamento, pwm;
     int maxChannels;
     double sampleRate;
@@ -1031,8 +1035,8 @@ static int render_cry(const SongRenderOpts *o, float **outL, float **outR,
         voicegroup_free(vg);
         return -1;
     }
-    printf("  %s: volume %u, pan %d, pitch %d, length %u, progress %u, priority %u, %u track%s\n",
-           song->name, cp.volume, cp.pan, cp.pitch, cp.length, cp.progress, cp.priority,
+    printf("  %s: volume %u, pan %d, pitch %d, length %u, release %u, progress %u, priority %u, %u track%s\n",
+           song->name, cp.volume, cp.pan, cp.pitch, cp.length, cp.release, cp.progress, cp.priority,
            song->trackCount, song->trackCount == 1 ? "" : "s");
     return render_sequenced(o, song, vg, outL, outR, outTotal, outFadeStart);
 }
@@ -1173,9 +1177,10 @@ int main(int argc, char *argv[])
             }
             cryId = (int)v;
         } else if ((strcmp(argv[i], "--cry-pitch") == 0 || strcmp(argv[i], "--cry-pan") == 0
-                    || strcmp(argv[i], "--cry-volume") == 0 || strcmp(argv[i], "--cry-progress") == 0)
+                    || strcmp(argv[i], "--cry-volume") == 0 || strcmp(argv[i], "--cry-length") == 0
+                    || strcmp(argv[i], "--cry-release") == 0 || strcmp(argv[i], "--cry-progress") == 0)
                    && i + 1 < argc) {
-            /* The setters' argument types: s16, s8, u8, u32. */
+            /* The setters' argument types: s16, s8, u8, u16, u8, u32. */
             const char *flag = argv[i];
             char *end = NULL;
             long long v = strtoll(argv[++i], &end, 10);
@@ -1183,6 +1188,8 @@ int main(int argc, char *argv[])
             if (strcmp(flag, "--cry-pitch") == 0)         { lo = -32768; hi = 32767; }
             else if (strcmp(flag, "--cry-pan") == 0)      { lo = -128; hi = 127; }
             else if (strcmp(flag, "--cry-volume") == 0)   { lo = 0; hi = 255; }
+            else if (strcmp(flag, "--cry-length") == 0)   { lo = 0; hi = 65535; }
+            else if (strcmp(flag, "--cry-release") == 0)  { lo = 0; hi = 255; }
             else                                          { lo = 0; hi = 4294967295LL; }
             if (end == argv[i] || *end != '\0' || v < lo || v > hi) {
                 fprintf(stderr, "Error: %s takes %lld..%lld (got '%s')\n", flag, lo, hi, argv[i]);
@@ -1192,6 +1199,8 @@ int main(int argc, char *argv[])
             if (strcmp(flag, "--cry-pitch") == 0)         cryParams.pitch = (int16_t)v;
             else if (strcmp(flag, "--cry-pan") == 0)      cryParams.pan = (int8_t)v;
             else if (strcmp(flag, "--cry-volume") == 0)   cryParams.volume = (uint8_t)v;
+            else if (strcmp(flag, "--cry-length") == 0)   cryParams.length = (uint16_t)v;
+            else if (strcmp(flag, "--cry-release") == 0)  cryParams.release = (uint8_t)v;
             else                                          cryParams.progress = (uint32_t)v;
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
             outputPath = argv[++i];
@@ -1266,7 +1275,7 @@ int main(int argc, char *argv[])
     if (cryId >= 0 && vgName)
         fprintf(stderr, "Note: --cry ignores the <voicegroup> argument (the cry's sample is its voicegroup)\n");
     if (cryId < 0 && cryParamsSet)
-        fprintf(stderr, "Note: --cry-pitch / --cry-pan / --cry-volume / --cry-progress only apply to --cry\n");
+        fprintf(stderr, "Note: --cry-pitch / --cry-pan / --cry-volume / --cry-length / --cry-release / --cry-progress only apply to --cry\n");
     if (midiPath && !vgName) {
         fprintf(stderr, "Error: --midi needs a <voicegroup> argument\n\n");
         print_usage(argv[0]);
