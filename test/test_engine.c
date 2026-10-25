@@ -3980,6 +3980,186 @@ static void test_midi_path_modt_tune_lfodl(void)
     free(wd);
 }
 
+/* The music players' positions in SoundMain's MPlayMain chain and their
+ * track counts (m4a_sequencer_set_player), against the SE probes of
+ * milestone 4 slice 1 (build/probe/se_*.txt; docs/ACCURACY_PLAN.md).  With
+ * the other players paused, mgba puts _081DD9BC at 716 / 779 / 842 / 905
+ * and _081DDA6C -> CgbSound at 370 / 307 / 244 / 181 for BGM / SE1 / SE2 /
+ * SE3, and CgbSound at 1007 on every frame where the selected player is
+ * paused too.  A no-tick frame with every player track existing and
+ * unflagged: SE1 with its 3 tracks 1204 (se_faint frame 4), SE2 with 4 of
+ * its 9 tracks 1390 (se_contest_place frame 4). */
+static M4ASong *seq_song_tracks(int n)
+{
+    char buf[4096];
+    int p = snprintf(buf, sizeof(buf), "%s", seq_song_header);
+    for (int i = 1; i <= n; i++) {
+        if (i > 1)
+            p += snprintf(buf + p, sizeof(buf) - p, "t_%d:\n", i);
+        p += snprintf(buf + p, sizeof(buf) - p, "%s\t.byte\tW96\n\t.byte\tFINE\n",
+                      i == 1 ? "\t.byte\tTEMPO , 90*t_tbs/2\n" : "");
+    }
+    p += snprintf(buf + p, sizeof(buf) - p, "\t.align\t2\nt:\n\t.byte\t%d, 0, t_pri, t_rev\n\t.word\tt_grp\n", n);
+    for (int i = 1; i <= n; i++)
+        p += snprintf(buf + p, sizeof(buf) - p, "\t.word\tt_%d\n", i);
+    return parse_song_text(buf);
+}
+
+static void test_sequencer_players(void)
+{
+    printf("Testing sequencer music players (chain position, track counts)...\n");
+    ToneData voices[128];
+    seq_test_voices(voices);
+    static const int tracks[4] = { 10, 3, 9, 1 };
+    static const int bc[4] = { 716, 779, 842, 905 };      /* _081DD9BC */
+    static const int exits[4] = { 370, 307, 244, 181 };   /* _081DDA6C -> CgbSound */
+    for (int p = 0; p < 4; p++) {
+        M4AEngine engine;
+        m4a_engine_init(&engine, 48000.0f);
+        m4a_engine_set_voicegroup(&engine, voices);
+        M4ASequencer seq;
+        m4a_sequencer_init(&seq, &engine);
+        ASSERT_EQ(seq.maxTracks, 10, "sequencer: init selects the BGM player");
+        m4a_sequencer_set_player(&seq, p);
+        ASSERT_EQ(seq.player, p, "sequencer: player selected");
+        ASSERT_EQ(seq.maxTracks, tracks[p], "sequencer: the player's track count");
+        ASSERT_EQ(seq.mpEntry + seq.mpHead, bc[p], "sequencer: _081DD9BC position of the player");
+        ASSERT_EQ(seq.mpExit, exits[p], "sequencer: _081DDA6C -> CgbSound of the player");
+        m4a_sequencer_frame(&seq);
+        ASSERT_EQ(seq.frameCycles, 1007, "sequencer: every player paused -> CgbSound at 1007");
+        m4a_sequencer_detach(&seq);
+        m4a_engine_destroy(&engine);
+    }
+    {
+        M4AEngine engine;
+        m4a_engine_init(&engine, 48000.0f);
+        m4a_engine_set_voicegroup(&engine, voices);
+        M4ASequencer seq;
+        m4a_sequencer_init(&seq, &engine);
+        m4a_sequencer_set_player(&seq, 99);
+        ASSERT_EQ(seq.player, M4A_PLAYER_BGM, "sequencer: out-of-range player falls back to BGM");
+        m4a_sequencer_detach(&seq);
+        m4a_engine_destroy(&engine);
+    }
+
+    /* SE1, three waiting tracks: start frame, then the no-tick frame. */
+    M4ASong *song3 = seq_song_tracks(3);
+    ASSERT(song3 != NULL, "3-track song parses");
+    M4ASong *song4 = seq_song_tracks(4);
+    ASSERT(song4 != NULL, "4-track song parses");
+    if (song3 && song4) {
+        M4AEngine engine;
+        m4a_engine_init(&engine, 48000.0f);
+        m4a_engine_set_voicegroup(&engine, voices);
+        M4ASequencer seq;
+        m4a_sequencer_init(&seq, &engine);
+        m4a_sequencer_set_player(&seq, M4A_PLAYER_SE1);
+        m4a_sequencer_start(&seq, song3);
+        ASSERT_EQ(seq.trackCount, 3, "SE1: three tracks play");
+        m4a_sequencer_frame(&seq);      /* frame 3: the start tick */
+        m4a_sequencer_frame(&seq);      /* frame 4: tempoC 90, no tick */
+        ASSERT_EQ(seq.frameCycles, 1204, "SE1 no-tick frame, 3 tracks existing (se_faint frame 4)");
+
+        /* A fourth track does not fit the SE1 player: MPlayStart clears it. */
+        m4a_sequencer_set_player(&seq, M4A_PLAYER_SE1);
+        m4a_sequencer_start(&seq, song4);
+        ASSERT_EQ(seq.trackCount, 3, "SE1: a 4-track song plays 3 tracks");
+        ASSERT_EQ(seq.tracks[3].flags, 0, "SE1: the fourth track does not exist");
+        m4a_sequencer_frame(&seq);
+        m4a_sequencer_frame(&seq);
+        ASSERT_EQ(seq.frameCycles, 1204, "SE1 no-tick frame with a 4-track song: the player's 3 tracks");
+
+        /* SE2: four of nine tracks. */
+        m4a_sequencer_set_player(&seq, M4A_PLAYER_SE2);
+        m4a_sequencer_start(&seq, song4);
+        ASSERT_EQ(seq.trackCount, 4, "SE2: four tracks play");
+        m4a_sequencer_frame(&seq);
+        m4a_sequencer_frame(&seq);
+        ASSERT_EQ(seq.frameCycles, 1390, "SE2 no-tick frame, 4 of 9 tracks existing (se_contest_place frame 4)");
+
+        /* BGM, for the record: one of ten (the sq1 probe's 1402 minus the
+         * track's 6 ... the three existing tracks' 20 - 14 each). */
+        m4a_sequencer_set_player(&seq, M4A_PLAYER_BGM);
+        m4a_sequencer_start(&seq, song3);
+        m4a_sequencer_frame(&seq);
+        m4a_sequencer_frame(&seq);
+        ASSERT_EQ(seq.frameCycles, 1402 + 2 * 6, "BGM no-tick frame, 3 of 10 tracks existing");
+        m4a_sequencer_detach(&seq);
+        m4a_engine_destroy(&engine);
+    }
+    m4a_song_free(song3);
+    m4a_song_free(song4);
+}
+
+/* A whole sound effect on the SE2 player against its probe: se_truck_unload
+ * (sound/songs/midi/se_truck_unload.mid, voicegroup rs_sfx_1 voice 120 =
+ * voice_noise 60, 0, 0, 2, 7, 15, 0; song table player SE2, id 51).
+ * build/probe/se_truck_unload.txt.frames, CgbSound entry on engine frames
+ * 3..32: the start frame (KEYSH, TEMPO, VOICE, VOL, the note), the W03
+ * waits read every third tick (1895 = 1802 + the 93 of an explicit wait
+ * byte), the second note on the channel the gate just stopped (frame 9),
+ * FINE with that channel chained (frame 30, ply_fine 114), the tick with no
+ * track left (frame 31: _081DD9A4 -> _081DDA6C 24), then paused (1007). */
+static void test_sequencer_cycles_se2(void)
+{
+    printf("Testing sequencer cycle accounting on the SE2 player against the se_truck_unload probe...\n");
+    ToneData voices[128];
+    seq_test_voices(voices);
+    voices[120].type = VOICE_NOISE;
+    voices[120].key = 60;
+    voices[120].wavePointer = NULL;     /* noise period select 0 */
+    voices[120].attack = 2;
+    voices[120].decay = 7;
+    voices[120].sustain = 15;
+    voices[120].release = 0;
+    M4ASong *song = seq_song(
+        "\t.byte\tKEYSH , t_key+0\n"
+        "\t.byte\tTEMPO , 150*t_tbs/2\n"
+        "\t.byte\t\tVOICE , 120\n"
+        "\t.byte\t\tVOL   , 80*t_mvl/mxv\n"
+        "\t.byte\t\tN06   , Bn3 , v028\n"
+        "\t.byte\tW03\n"
+        "\t.byte\tW03\n"
+        "\t.byte\t\tN21   , Gs4 \n"
+        "\t.byte\tW03\n\t.byte\tW03\n\t.byte\tW03\n\t.byte\tW03\n\t.byte\tW03\n\t.byte\tW03\n\t.byte\tW03\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "se_truck_unload song parses");
+    if (!song) return;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_set_player(&seq, M4A_PLAYER_SE2);
+    m4a_sequencer_start(&seq, song);
+
+    static const int expected[30] = {
+        3729, 1802, 1802, 1895, 1802, 1802, 2704, 1802, 1802, 1895,
+        1802, 1802, 1895, 1802, 1802, 1895, 1802, 1802, 1895, 1802,
+        1802, 1895, 1802, 1802, 1895, 1802, 1802, 1987, 1430, 1007 };
+    int mismatches = 0;
+    for (int k = 3; k <= 32; k++) {
+        m4a_sequencer_frame(&seq);
+        if (seq.frameCycles != expected[k - 3]) {
+            if (mismatches++ < 5)
+                printf("  frame %d: engine %d, mgba %d\n", k, seq.frameCycles, expected[k - 3]);
+        }
+        /* Stand in for CgbSound on the noise channel (see test_sequencer_cycles). */
+        M4ACGBChannel *ch = &engine.cgbChannels[3];
+        if (ch->status & CHN_START)
+            ch->status = CHN_ENV_SUSTAIN;
+        else if ((ch->status & CHN_STOP) && (ch->status & CHN_ON))
+            ch->status = 0;           /* release 0, no echo: CgbOscOff */
+    }
+    ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the se_truck_unload probe on frames 3..32 (SE2)");
+    ASSERT(m4a_sequencer_finished(&seq), "sequencer: the SE finished");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -4025,6 +4205,8 @@ int main(void)
     test_sequencer_lfo_untruncated_sum();
     test_sequencer_cycles_poly_invert();
     test_sequencer_track_stop_chain();
+    test_sequencer_players();
+    test_sequencer_cycles_se2();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

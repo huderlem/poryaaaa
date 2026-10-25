@@ -496,12 +496,23 @@ struct M4AEngine {
  * control flow, so the CgbSound entry follows the song state exactly as it
  * does on the GBA.
  */
-/* Frame skeleton: the BGM player is the last of six chained players and
- * runs its body first; the five idle players unwind after it. */
+/* Frame skeleton.  Six players are chained (MPlayOpen order: BGM, SE1, SE2,
+ * SE3, two cry players); each MPlayMain calls the previously opened player
+ * before its own body, so the BGM player (deepest) runs first, then SE1,
+ * SE2, SE3 and the cry players unwind.  With the other players paused, a
+ * player p (gMPlayTable index) starts its body at the deeper player's
+ * _081DDA6C: BGM at its entry 566, SE1 at 637, SE2 at 700, SE3 at 763
+ * (docs/ACCURACY_PLAN.md, "milestone 4 slice 1": measured on the SE corpus,
+ * every frame).  m4a_sequencer_set_player derives the per-player values. */
 #define M4A_CYC_MP_BGM_ENTRY       566   /* BGM MPlayMain entry (first entry 291, five idle entries 55 apart) */
-#define M4A_CYC_MP_HEAD            150   /* entry -> FadeOutBody 96 -> _081DD9BC 54 */
-#define M4A_CYC_MP_PAUSED          71    /* status < 0: entry -> _081DDA6C */
-#define M4A_CYC_MP_EXIT            370   /* _081DDA6C, five idle unwinds of 63, CgbSound 55 after the last */
+#define M4A_CYC_MP_HEAD            150   /* BGM: entry -> FadeOutBody 96 -> _081DD9BC 54 */
+#define M4A_CYC_MP_PAUSED          71    /* BGM, status < 0: entry -> _081DDA6C */
+#define M4A_CYC_MP_IDLE            63    /* a paused player after a deeper one: _081DDA6C -> its own _081DDA6C */
+#define M4A_CYC_MP_SE_HEAD         142   /* a playing SE player: the deeper player's _081DDA6C -> FadeOutBody 88 -> _081DD9BC 54 */
+#define M4A_CYC_MP_TAIL            55    /* the last player's _081DDA6C -> CgbSound */
+#define M4A_CYC_MP_CHAIN           6     /* players in the chain */
+#define M4A_CYC_MP_EXIT            (5 * M4A_CYC_MP_IDLE + M4A_CYC_MP_TAIL)   /* BGM: 370 */
+#define M4A_CYC_TICK_ALL_DONE      24    /* _081DD9A4 -> _081DDA6C when no track exists any more (clock++, status = PAUSE) */
 /* The VOLCHG/PITCHG pass over the player's trackCount tracks (also the
  * no-tick frame's only work). */
 #define M4A_CYC_APPLY_ENTER        16    /* _081DD9BC -> _081DD9C4 12 -> _081DD9C8 4 */
@@ -567,7 +578,15 @@ struct M4AEngine {
 #define M4A_CYC_CMD_TABLE          50    /* _081DD8F6 -> _081DD90C 10 -> the ply_* handler 40 */
 #define M4A_CYC_CMD_WAIT           46    /* a W## byte: _081DD8F6 -> _081DD90C 10 -> _081DD92E 10 -> _081DD938 26 */
 #define M4A_CYC_CMD_DEFAULT        90    /* an unmeasured handler to _081DD938 (est.: the one-byte handlers' median) */
-#define M4A_CYC_FINE_CHAN          14    /* ply_fine's loop body per chained channel, without RealClearChain (est.: ldrb/tst/orrs/strb, ldr/cmp/bne taken); RealClearChain is the M4A_CYC_WALK_UNLINK_* cost */
+/* ply_fine (measured on the SE corpus, milestone 4 slice 1): the handler
+ * returns to the flags test, which finds the track gone and takes the
+ * `beq _081DD994`, so its cost ends at _081DD994 instead of _081DD938. */
+#define M4A_CYC_FINE_EMPTY         16    /* ply_fine -> ply_fine_done, no chained channel */
+#define M4A_CYC_FINE_LOOP          10    /* ply_fine -> ply_fine_loop */
+#define M4A_CYC_FINE_CHAN          14    /* ply_fine_loop -> ply_fine_ok: SF_ON tested and SF_STOP set (every chained channel is ON here: the tick's walk dropped the dead ones) */
+#define M4A_CYC_FINE_UNLINK_CALL   12    /* ply_fine_ok -> RealClearChain */
+#define M4A_CYC_FINE_UNLINK_LAST   50    /* RealClearChain -> ply_fine_done, prev 0 / next 0 (the walk's 54 less the loop's taken bne) */
+#define M4A_CYC_FINE_DONE          28    /* ply_fine_done -> _081DD994 */
 /* ply_note: entry, voice, channel, setup (handler entry to _081DD938). */
 #define M4A_CYC_NOTE_ENTRY         78    /* ply_note -> _081DDB46, no data bytes ... */
 #define M4A_CYC_NOTE_KEY_BYTE      19    /* ... + a key byte */

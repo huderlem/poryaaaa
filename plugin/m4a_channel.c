@@ -305,8 +305,8 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
 #define CGB_CYC_NR32_DONE          20
 #define CGB_CYC_NR34_DONE_VOL      18    /* after the retrigger: same as the pitch block's NR34 */
 #define CGB_CYC_NRX4_DONE_SQ1      24    /* square 1: the sweep-direction test, bit set */
-#define CGB_CYC_NR14_NR14          14    /* est.: square 1 with the sweep direction bit clear writes NR14 again (the 24 path without its taken branch, 20, split 14 + 6) */
-#define CGB_CYC_NR14_DONE          6     /* est. */
+#define CGB_CYC_NR14_NR14          24    /* square 1 with the sweep direction bit clear writes NR14 again (se_faint's sweep 0x17, milestone 4 slice 1) */
+#define CGB_CYC_NR14_DONE          2
 #define CGB_CYC_NRX4_DONE_OTHER    12
 /* oscillator_off -> CgbOscOff -> its writes -> channel_complete */
 #define CGB_CYC_OSCOFF_CALL        14

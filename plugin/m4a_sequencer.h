@@ -40,9 +40,17 @@ extern "C" {
 #define MUSICPLAYER_STATUS_TRACK 0x0000ffff
 #define MUSICPLAYER_STATUS_PAUSE 0x80000000
 
-/* Emerald's BGM player has 10 tracks (NUM_TRACKS_BGM in
- * sound/music_player_table.inc); a mid2agb song with more tracks plays only
- * the first 10 in the game and in the accuracy ROM. */
+/* Emerald's music players (sound/music_player_table.inc, gMPlayTable order;
+ * the `ms` field of a song_table.inc entry): the BGM player has 10 tracks,
+ * SE1 3, SE2 9, SE3 1.  A song with more tracks than its player plays only
+ * the first ones (MPlayStart), in the game and in the accuracy ROM. */
+enum {
+    M4A_PLAYER_BGM = 0,
+    M4A_PLAYER_SE1 = 1,
+    M4A_PLAYER_SE2 = 2,
+    M4A_PLAYER_SE3 = 3,
+    M4A_PLAYER_COUNT
+};
 #define M4A_SEQ_DEFAULT_MAX_TRACKS 10
 
 typedef struct {
@@ -69,7 +77,17 @@ typedef struct {
     uint8_t priority;       /* song header priority */
     uint8_t trackCount;     /* min(song tracks, maxTracks) */
     uint8_t maxTracks;      /* the player's track count (MusicPlayerInfo.trackCount);
-                             * tracks beyond it are not played.  Set before start. */
+                             * tracks beyond it are not played.  Set by
+                             * m4a_sequencer_set_player before start. */
+    uint8_t player;         /* M4A_PLAYER_*: which music player this is */
+    /* The player's position in SoundMain's MPlayMain chain (M4A_CYC_MP_* in
+     * m4a_engine.h), set with the player: cycles from VBlank line 160 to the
+     * start of its body (mpEntry), its body head to _081DD9BC (mpHead), its
+     * paused path to _081DDA6C (mpPaused), and _081DDA6C to CgbSound (mpExit). */
+    int16_t mpEntry;
+    int16_t mpHead;
+    int16_t mpPaused;
+    int16_t mpExit;
     uint16_t tempoD;
     uint16_t tempoU;
     uint16_t tempoI;
@@ -106,6 +124,12 @@ void m4a_sequencer_init(M4ASequencer *seq, M4AEngine *engine);
 
 /* Detach from the engine, restoring its own tick behaviour. */
 void m4a_sequencer_detach(M4ASequencer *seq);
+
+/* Select the music player (M4A_PLAYER_*; the song table's `ms` field):
+ * sets the track count and the MPlayMain chain position the timing model
+ * charges.  Call before m4a_sequencer_start; init selects the BGM player.
+ * An out-of-range value selects the BGM player. */
+void m4a_sequencer_set_player(M4ASequencer *seq, int player);
 
 /* MPlayStart: begin playing `song` (which must outlive playback).  Applies the
  * header's reverb when its SOUND_MODE_REVERB_SET bit is set.  The engine's

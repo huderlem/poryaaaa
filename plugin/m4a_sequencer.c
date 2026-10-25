@@ -240,12 +240,20 @@ static void ply_fine(M4ASequencer *s, int i)
     M4AEngine *e = s->engine;
     /* RealClearChain on every chained channel, newest first: each unlink
      * sees prev == 0 (the one before it was just removed) and next set
-     * except for the last. */
+     * except for the last, whose RealClearChain -> ply_fine_done is the
+     * measured 50; the others' loop-continuing cost is est. the walk's
+     * M4A_CYC_WALK_UNLINK_* (the taken bne). */
     int chain[CHAN_COUNT];
     int n = chain_list(s, i, chain);
-    for (int k = 0; k < n; k++)
-        cyc(s, M4A_CYC_FINE_CHAN + unlink_cost(s, chain[k], M4A_CYC_WALK_UNLINK_00, M4A_CYC_WALK_UNLINK_01,
-                                               M4A_CYC_WALK_UNLINK_10, M4A_CYC_WALK_UNLINK_11));
+    cyc(s, n == 0 ? M4A_CYC_FINE_EMPTY : M4A_CYC_FINE_LOOP);
+    for (int k = 0; k < n; k++) {
+        int unlink = unlink_cost(s, chain[k], M4A_CYC_WALK_UNLINK_00, M4A_CYC_WALK_UNLINK_01,
+                                 M4A_CYC_WALK_UNLINK_10, M4A_CYC_WALK_UNLINK_11);
+        if (k == n - 1)
+            unlink = M4A_CYC_FINE_UNLINK_LAST + (unlink - M4A_CYC_WALK_UNLINK_00);
+        cyc(s, M4A_CYC_FINE_CHAN + M4A_CYC_FINE_UNLINK_CALL + unlink);
+    }
+    cyc(s, M4A_CYC_FINE_DONE);
     for (int h = 0; h < CHAN_COUNT; h++) {
         if (!chan_is_real(h) || chan_track(e, h) != i)
             continue;
@@ -744,7 +752,8 @@ static int cmd_cycles(const M4ASequencer *s, int i, uint8_t cmd)
     case 0xC5: return rd8(s, t->cmdPtr) != et->modT ? 95 : 91;   /* modt */
     case 0xCD: return 110;   /* xcmd 61 + xiecv / xiecl 49 (other sub-commands est.) */
     case 0xCE: return rd8(s, t->cmdPtr) < 0x80 ? 95 : 89;   /* endtie with / without a key byte (rg_vs_trainer, one instance each) */
-    default:   return M4A_CYC_CMD_DEFAULT;   /* tune, rept, memacc, prio, fine, port */
+    case 0xB1: return 0;     /* fine: charged by ply_fine itself (M4A_CYC_FINE_*: 44 with an empty chain, 114 with one channel) */
+    default:   return M4A_CYC_CMD_DEFAULT;   /* tune, rept, memacc, prio, port */
     }
 }
 
@@ -969,13 +978,13 @@ void m4a_sequencer_frame(M4ASequencer *s)
      * Costs are the probe measurements in m4a_engine.h, summed along
      * MPlayMain's control flow; the sum is published as cycles from the
      * SoundMain entry. */
-    s->frameCycles = M4A_CYC_MP_BGM_ENTRY;
+    s->frameCycles = s->mpEntry;
     if (!s->song || (s->status & MUSICPLAYER_STATUS_PAUSE)) {
-        cyc(s, M4A_CYC_MP_PAUSED + M4A_CYC_MP_EXIT);
+        cyc(s, s->mpPaused + s->mpExit);
         publish_cycles(s);
         return;
     }
-    cyc(s, M4A_CYC_MP_HEAD);
+    cyc(s, s->mpHead);
 
     /* FadeOutBody: no fades are started by this host, so nothing to do. */
 
@@ -1000,7 +1009,7 @@ void m4a_sequencer_frame(M4ASequencer *s)
         s->clock++;
         if (trackBits == 0) {
             s->status = MUSICPLAYER_STATUS_PAUSE;
-            cyc(s, M4A_CYC_MP_EXIT);
+            cyc(s, M4A_CYC_TICK_ALL_DONE + s->mpExit);
             publish_cycles(s);
             return;              /* skips the volume/pitch pass, as the GBA does */
         }
@@ -1021,7 +1030,7 @@ void m4a_sequencer_frame(M4ASequencer *s)
             track_apply(s, i);
         cyc(s, i + 1 < nTracks ? M4A_CYC_APPLY_NEXT : M4A_CYC_APPLY_LAST);
     }
-    cyc(s, M4A_CYC_MP_EXIT);
+    cyc(s, s->mpExit);
     publish_cycles(s);
 }
 
@@ -1041,10 +1050,39 @@ void m4a_sequencer_init(M4ASequencer *s, M4AEngine *engine)
     s->engine = engine;
     s->status = MUSICPLAYER_STATUS_PAUSE;
     s->loopTrack = -1;
-    s->maxTracks = M4A_SEQ_DEFAULT_MAX_TRACKS;
+    m4a_sequencer_set_player(s, M4A_PLAYER_BGM);
     engine->frameHook = frame_hook;
     engine->frameHookUser = s;
     engine->externalSequencer = true;
+}
+
+void m4a_sequencer_set_player(M4ASequencer *s, int player)
+{
+    /* NUM_TRACKS_BGM / SE1 / SE2 / SE3 in pokeemerald sound/music_player_table.inc */
+    static const uint8_t trackCounts[M4A_PLAYER_COUNT] = { 10, 3, 9, 1 };
+    if (player < 0 || player >= M4A_PLAYER_COUNT)
+        player = M4A_PLAYER_BGM;
+    s->player = (uint8_t)player;
+    s->maxTracks = trackCounts[player];
+    /* Chain order (MPlayOpen appends to the head; MPlayMain calls the next
+     * player before its own body): BGM runs first at its entry 566, then
+     * each outer player resumes at the deeper player's _081DDA6C.  With the
+     * other players paused, the deeper ones cost M4A_CYC_MP_PAUSED (BGM) and
+     * M4A_CYC_MP_IDLE each, and the outer ones unwind M4A_CYC_MP_IDLE each
+     * before the M4A_CYC_MP_TAIL to CgbSound.  Measured (plan, "milestone 4
+     * slice 1"): _081DD9BC at 716 / 779 / 842 / 905, _081DDA6C -> CgbSound
+     * 370 / 307 / 244 / 181 for BGM / SE1 / SE2 / SE3; every paused frame
+     * 1007 whichever player is selected. */
+    if (player == M4A_PLAYER_BGM) {
+        s->mpEntry = M4A_CYC_MP_BGM_ENTRY;
+        s->mpHead = M4A_CYC_MP_HEAD;
+        s->mpPaused = M4A_CYC_MP_PAUSED;
+    } else {
+        s->mpEntry = (int16_t)(M4A_CYC_MP_BGM_ENTRY + M4A_CYC_MP_PAUSED + (player - 1) * M4A_CYC_MP_IDLE);
+        s->mpHead = M4A_CYC_MP_SE_HEAD;
+        s->mpPaused = M4A_CYC_MP_IDLE;
+    }
+    s->mpExit = (int16_t)((M4A_CYC_MP_CHAIN - 1 - player) * M4A_CYC_MP_IDLE + M4A_CYC_MP_TAIL);
 }
 
 void m4a_sequencer_detach(M4ASequencer *s)

@@ -751,6 +751,10 @@ static void print_usage(const char *prog)
         "\n"
         "Loop options (when MIDI contains '[' / ']' text events):\n"
         "  --loop-count <n>            Number of loop body repetitions (default: 2)\n"
+        "  --player <bgm|se1|se2|se3>  (--song) the music player the song plays on, as the\n"
+        "                              game's song table names it (default: bgm; a sound\n"
+        "                              effect's player has 3 / 9 / 1 tracks and its own\n"
+        "                              position in SoundMain's MPlayMain chain)\n"
         "  --psg-log <file>            (--song) log every PSG register write with its CPU cycle\n"
         "  --seq-log <file>            (--song) log each frame's modeled CgbSound entry cycle\n"
         "  --extended-clocks           Song is built with mid2agb -X (48 clocks/beat),\n"
@@ -781,7 +785,18 @@ typedef struct {
     int loopCount;
     const char *psgLogPath;      /* --psg-log: every PSG register write with its CPU cycle */
     const char *seqLogPath;      /* --seq-log: the sequencer's per-frame CgbSound entry cycle */
+    int player;                  /* --player: M4A_PLAYER_* the song plays on */
 } SongRenderOpts;
+
+/* --player bgm|se1|se2|se3 -> M4A_PLAYER_*, or -1 */
+static int parse_player(const char *name)
+{
+    static const char *const names[M4A_PLAYER_COUNT] = { "bgm", "se1", "se2", "se3" };
+    for (int i = 0; i < M4A_PLAYER_COUNT; i++)
+        if (strcmp(name, names[i]) == 0)
+            return i;
+    return -1;
+}
 
 /* --psg-log: one line per PSG register write, "cycle reg value", on the
  * same cycle clock as test/accuracy/ref/mgba_probe.c logs mgba's writes. */
@@ -854,6 +869,12 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
 
     M4ASequencer seq;
     m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_set_player(&seq, o->player);
+    if (o->player != M4A_PLAYER_BGM)
+        printf("  Music player: SE%d (%u tracks)\n", o->player, seq.maxTracks);
+    if (song->trackCount > seq.maxTracks)
+        printf("  Note: the player has %u tracks; the song's other %u are not played\n",
+               seq.maxTracks, song->trackCount - seq.maxTracks);
     if (o->psgLogPath) {
         sPsgLog.f = fopen(o->psgLogPath, "w");
         sPsgLog.engine = &engine;
@@ -1065,6 +1086,7 @@ int main(int argc, char *argv[])
     double      totalDurSeconds = -1.0; /* -1 = not set */
     const char *psgLogPath    = NULL;
     const char *seqLogPath    = NULL;
+    int         player        = M4A_PLAYER_BGM;
 
     for (int i = firstOpt; i < argc; i++) {
         if (strcmp(argv[i], "--midi") == 0 && i + 1 < argc) {
@@ -1108,6 +1130,12 @@ int main(int argc, char *argv[])
             psgLogPath = argv[++i];
         } else if (strcmp(argv[i], "--seq-log") == 0 && i + 1 < argc) {
             seqLogPath = argv[++i];
+        } else if (strcmp(argv[i], "--player") == 0 && i + 1 < argc) {
+            player = parse_player(argv[++i]);
+            if (player < 0) {
+                fprintf(stderr, "Error: --player must be bgm, se1, se2 or se3\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--tail") == 0 && i + 1 < argc) {
             tailSeconds = atof(argv[++i]);
             if (tailSeconds < 0.0) tailSeconds = 0.0;
@@ -1147,6 +1175,9 @@ int main(int argc, char *argv[])
 
     double sampleRate = (double)sampleRateHz;
 
+    if (midiPath && player != M4A_PLAYER_BGM)
+        fprintf(stderr, "Note: --player only applies to --song (the MIDI path has no music player)\n");
+
     if (songPath) {
         if (songVolumeSet || reverbSet)
             fprintf(stderr, "Note: --song-volume / --reverb are ignored with --song "
@@ -1160,6 +1191,7 @@ int main(int argc, char *argv[])
             .totalDurSeconds = totalDurSeconds, .loopCount = loopCount,
             .psgLogPath = psgLogPath,
             .seqLogPath = seqLogPath,
+            .player = player,
         };
         float *sl, *sr;
         uint64_t sTotal, sFade;
