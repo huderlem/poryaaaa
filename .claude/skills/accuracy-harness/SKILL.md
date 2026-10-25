@@ -42,7 +42,8 @@ never save a midi run as the song-input baseline.  What separates the two
 paths today is not the mix grid (both paths mix the same SoundMainRAM
 frame, bit-identical when a note lands on the same frame) but the MIDI
 path's time origin (ROM cycle 0 where the song's tick 0 is frame 3's
-SoundMain: every event after the first frame 3 frames early) and its
+SoundMain: an event after the first frame 3 frames early on ticks that
+are multiples of 4, 4 frames on others from tick 21) and its
 tempo grid (exact BPM where the ROM ticks on tempoC / 150); plan,
 "Milestone 5 slice 1".
 

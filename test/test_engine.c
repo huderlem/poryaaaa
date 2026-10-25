@@ -6028,17 +6028,27 @@ static void test_event_latch(void)
     m4a_engine_cc(&engine, 0, 7, 127);
     ASSERT_EQ(engine.tracks[0].rawVolume, 127, "latch off: CC applies at once again");
 
-    /* --- a full queue applies the overflow at once and counts it --- */
+    /* --- a full queue is applied in order before the next event queues:
+     * a note-off that overflows still follows its own queued note-on --- */
     m4a_engine_set_quantize_events(&engine, true);
-    for (int i = 0; i < M4A_EVENT_QUEUE_CAPACITY; i++)
+    m4a_engine_note_on(&engine, 0, 65, 127);
+    for (int i = 1; i < M4A_EVENT_QUEUE_CAPACITY; i++)
         m4a_engine_cc(&engine, 0, 10, 64);
     ASSERT_EQ(engine.eventQueueCount, M4A_EVENT_QUEUE_CAPACITY, "queue full");
     ASSERT_EQ(engine.eventQueueOverflow, 0, "no overflow yet");
-    m4a_engine_cc(&engine, 0, 7, 50);
-    ASSERT_EQ(engine.tracks[0].rawVolume, 50, "overflow: the event applied at once");
+    m4a_engine_note_off(&engine, 0, 65);
     ASSERT_EQ(engine.eventQueueOverflow, 1, "overflow counted");
+    ASSERT_EQ(engine.eventQueueCount, 1, "overflow: the full queue applied, the note-off queued after it");
+    ch = NULL;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        if ((engine.pcmChannels[i].status & CHN_ON) && engine.pcmChannels[i].midiKey == 65)
+            ch = &engine.pcmChannels[i];
+    ASSERT(ch != NULL && !(ch->status & CHN_STOP), "overflow: the note-on applied before its note-off");
     m4a_engine_tick(&engine);
-    ASSERT_EQ(engine.eventQueueCount, 0, "the full queue drained");
+    ASSERT_EQ(engine.eventQueueCount, 0, "the queue drained");
+    ASSERT(ch != NULL && ((ch->status & CHN_STOP) || ch->gateTime == 1),
+           "overflow: the note-off reached its note (not stuck)");
+    if (ch) ch->status = 0;
 
     /* --- the frame hook (the sequencer) bypasses the latch --- */
     engine.frameHook = latch_hook;

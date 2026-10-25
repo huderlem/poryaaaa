@@ -49,9 +49,10 @@ only differences left between the two renders are in synthesis: the mixer
 and output stage (milestones 2 and 3).  `--input midi` keeps the plugin's
 MIDI path measurable (milestone 5 compares the two); `--midi-quantize`
 adds `poryaaaa_render --quantize`, the MIDI event latch (every event
-applied at the top of the next VBlank tick, in arrival order, where
-MPlayMain runs a track's commands).  A midi-input report (`"input":
-"midi"`, `"midi_quantize"` true / false) is a separate baseline family,
+applied in the next VBlank tick after the gate walk, in arrival order,
+where MPlayMain runs a track's commands).  A midi-input report (`"input":
+"midi"`; `"midi_quantize"` true / false, absent in reports written
+before slice 1) is a separate baseline family,
 `baselines/<date>_midi-path-*.json`; it is never compared against a
 song-input baseline.
 

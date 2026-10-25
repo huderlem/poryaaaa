@@ -696,16 +696,21 @@ void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
  * The MIDI event latch (m4a_engine.h, quantizeEvents)
  * ------------------------------------------------------------------------ */
 
+static void drain_events(M4AEngine *engine);
+
 /* Queue `ev` when the latch is on and we are outside a tick.  Returns false
- * when the caller must apply it now: latch off, inside a tick (the frame
- * hook's sequencer), or the queue full (counted). */
+ * when the caller must apply it now: latch off, or inside a tick (the frame
+ * hook's sequencer, a drain).  A full queue is applied first, in order, so
+ * the overflowing event still follows everything that arrived before it
+ * (a note-off overtaking its own queued note-on would leave the note
+ * stuck); the overflow is counted. */
 static bool queue_event(M4AEngine *engine, M4AQueuedEvent ev)
 {
     if (!engine->quantizeEvents || engine->inTick)
         return false;
     if (engine->eventQueueCount >= M4A_EVENT_QUEUE_CAPACITY) {
         engine->eventQueueOverflow++;
-        return false;
+        drain_events(engine);
     }
     engine->eventQueue[engine->eventQueueCount++] = ev;
     return true;

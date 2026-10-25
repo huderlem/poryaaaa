@@ -363,8 +363,9 @@ typedef struct {
     uint8_t b;       /* velocity / value */
     int16_t bend;    /* M4A_EV_BEND */
 } M4AQueuedEvent;
-/* Enough for a DAW block's worth of events; beyond it an event applies at
- * once and eventQueueOverflow counts it. */
+/* Enough for a DAW block's worth of events; a full queue is applied at
+ * once, in order, before the next event is queued (eventQueueOverflow
+ * counts it). */
 #define M4A_EVENT_QUEUE_CAPACITY 1024
 
 /* Frame hook: called at the start of every VBlank tick (m4a_engine_tick),
@@ -449,7 +450,7 @@ struct M4AEngine {
     bool inTick;
     M4AQueuedEvent eventQueue[M4A_EVENT_QUEUE_CAPACITY];
     int eventQueueCount;
-    uint32_t eventQueueOverflow; /* events applied at once because the queue was full */
+    uint32_t eventQueueOverflow; /* times a full queue was applied early to make room */
 
     /* Polyphony-overflow debugging.  Overflow events (dropped notes, stolen
      * channels) are always counted; when polyDebugInvert is on, the normal
@@ -817,8 +818,10 @@ void m4a_engine_all_sound_off(M4AEngine *engine);
  * step -- the frame edge a GBA note can start on.  A latched note-off that
  * finds its note still START (started in the same frame) sets the channel's
  * gateTime to 1 instead of STOP, so the next tick's gate walk stops it: the
- * GBA's one-tick note (mid2agb rounds a shorter note up to one clock),
- * where START | STOP would be killed silently by SoundMainRAM.  Turning the
+ * GBA's one-tick note (mid2agb rounds a shorter note up to one clock) when
+ * one frame is one song tick -- this gate counts frames, the GBA's counts
+ * song ticks -- where START | STOP would be killed silently by
+ * SoundMainRAM.  Turning the
  * latch off applies whatever is queued at once, in order. */
 void m4a_engine_set_quantize_events(M4AEngine *engine, bool enabled);
 /* Apply every queued event now, in arrival order (what the tick does). */

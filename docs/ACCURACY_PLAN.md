@@ -4695,8 +4695,9 @@ row 0.0; unit 1521/1521, blip 49112/0, songs 561/561), and that gate must
 read the same after.
 
 **Step 1, the MIDI path as it stands** (`accuracy.py --input midi`, the
-default test set: 44 rows -- 31 micro, 7 songs, 6 SEs; the 10 cries and
-the 2 cry-over rows are skipped since they have no MIDI):
+default test set: 44 rows -- 31 micro, 7 songs, 6 SEs; the 20 cry rows and
+the 2 cry-over rows of the 66-row song-input set are skipped since they
+have no MIDI):
 `baselines/2026-10-25_midi-path-start.json` / `.txt`, **0/44** at -40 dB.
 A separate baseline family: the report's `input` field says `midi`; a
 midi-input report is never compared against a song-input one.  Lag about
@@ -4704,10 +4705,13 @@ midi-input report is never compared against a song-input one.  Lag about
 pcm_drum 50.2, pcm_reverb 50.2, pcm_bass 50.2, pan 50.2, tune 50.1,
 tune_psg 49.7; pcm 34.8, vol 30.8, vel 19.2; pcm_hi 160.5, lfo_trem 110.6,
 lfo_psg 196.3; sq1_sweep, noise, pcm_cmp, psg_mix 0.0; sq2 -19.1,
-pcm_chord -11.2, lfo_vib -4.2, lfo_delay -3.5, pcm_psg -15.3), gain from
--0.1 (tune_psg) to -8.4 dB (noise), null -12.2 (tune_psg) .. +0.9 (noise);
+pcm_chord -11.2, lfo_vib -4.2, lfo_delay -3.5, pcm_psg -15.3); on the micro
+rows gain from -0.1 (tune_psg) to -8.4 dB (noise), null -12.2 (tune_psg) ..
++0.9 (noise), over all 44 rows gain down to -19.4 (se_truck_unload) and
+null up to +2.3 (the songs);
 every song drifts 4.2 .. 5.1 ms/s; the `ref` / `test` RMS columns agree
-within 0.0 .. 0.5 dB on every row (sq1 -16.9 / -17.0, noise -20.0 / -20.0,
+within 0.0 .. 0.4 dB on every micro row and within 1.0 dB on every row
+(sq1 -16.9 / -17.0, noise -20.0 / -20.0,
 vel -26.6 / -27.0, se_contest_place -27.0 / -28.0), so the gain column is
 the least-squares gain of two misaligned signals, not a level offset.
 
@@ -4750,17 +4754,19 @@ should do to lag, gain and null:
    mixed in before (below, 12).  The alignment choice (MIDI time 0 at frame
    3's SoundMain, as the ROM's `MPlayStart` places it) is slice 2's.
 2. **The tempo grid.**  mid2agb writes `TEMPO 120*tbs/2` (agb.cpp 506:
-   round(60e6 / us-per-beat) = the BPM; `tbs` = clocks per beat, 1 without
+   round(60e6 / us-per-beat) = the BPM; `tbs` = the clock multiplier on 24 clocks per beat, 1 without
    -X), `ply_tempo` doubles the byte (m4a_sequencer.c 399-403, m4a_1.s
    ply_tempo): tempoD = 120, tempoI = tempoD x tempoU >> 8 = 120; a tick
    runs when tempoC += tempoI reaches 150 -> **0.8 ticks per frame, 47.78
    ticks/s** at 59.7275 Hz.  The MIDI path places events by
    `tick_to_sample` at the exact 500000 us per beat (24 ticks per beat ->
    **48.00 ticks/s**) and uses tempoI = 120 only for the LFO
-   (`m4a_engine_set_tempo_bpm`).  The GBA is 0.4564 % slower: predicted
+   (`m4a_engine_set_tempo_bpm`).  The GBA is 0.456 % slower (48 / 47.782 - 1 = 0.4562 %): predicted
    **drift 4.56 ms/s** on every song (measured 4.2 .. 5.1 before the latch:
    the aligner's 4 s segments resolve it coarsely), the second micro note
-   (tick 36) 3.4 ms early on top of (1) and the third (tick 72) 6.8 ms, so
+   (tick 36) 3.4 ms early on top of (1) and the third (tick 72) 6.8 ms in
+   continuous time -- which the frame quantization absorbs for these two
+   ticks (both land exactly 3 frames early, measured 50.3 ms each) -- so
    the lag estimates scatter by that much between tests (49.7 .. 50.2 on
    the aligned rows) and later notes decorrelate; a 24-tick note spans 30
    frames on the ROM and 29.86 frames of MIDI time (29 or 30 SoundMains),
@@ -4771,18 +4777,20 @@ should do to lag, gain and null:
    -> 8, ..., 121..124 -> 124, 125..127 -> 127); the MIDI path passes the
    raw byte.  The micro tests use 127 and (`vel`) 64 and 24, all fixed
    points of the table -> **no effect on any micro row**; on the songs up
-   to 3/127 per note (0.1 .. 0.8 dB on a quiet note).  Slice 3.
+   +3 per note: 0.1 .. 0.8 dB for velocity 33 and up, more on quieter
+   notes (2.5 dB at 9 -> 12, 12 dB at 1 -> 4); the songs' velocities not
+   checked.  Slice 3.
 4. **VOL / PAN / BEND / the controllers: identical.**  `VOL v*mvl/mxv`
    (agb.cpp 357) with `-V127` is v x 127 / 127 = v; the engine's CC 7 is
    v x songMasterVolume / 127 = v with `--song-volume 127`
    (m4a_engine.c 1407-1410).  The VOL mid2agb inserts before the first
    note when the track has none (agb.cpp 434-442) is the engine's default
-   127.  `PAN c_v+(v-64)` (360) = `(int8_t)(v - 64)` (1411); `BEND
-   c_v+(MSB-64)` (513, param2 = the bend's MSB, midi.cpp 496) =
+   127.  `PAN c_v+(v-64)` (360) = `(int8_t)(v - 64)` (1412-1413); `BEND
+   c_v+(MSB-64)` (513, param2 = the bend's MSB, midi.cpp 507) =
    `(int16_t)(((MSB << 7) | LSB) - 8192) >> 7` = MSB - 64 (the arithmetic
    shift floors; the LSB never carries); BENDR 0x14, MOD 1, LFOS 0x15,
    MODT 0x16, TUNE 0x18 `c_v+(v-64)`, LFODL 0x1A, VOICE: the same numbers
-   on both sides (agb.cpp 351-396 / 509, m4a_engine_cc).  Reverb: `-R50`
+   on both sides (agb.cpp 351-396 / 510, m4a_engine_cc).  Reverb: `-R50`
    -> `pcm_reverb_rev = reverb_set+50` applied by `MPlayStart`
    (m4a.c 661) = `--reverb 50`.  Predicted: no gain or null effect; the
    `ref` / `test` RMS columns agree, which the start baseline shows.
@@ -4796,9 +4804,11 @@ should do to lag, gain and null:
    tick grid matches (it does not: 1 and 2).  A note shorter than the gap
    to the next SoundMain leaves the channel START | STOP, which
    SoundMainRAM kills silently (m4a_1.s `_081DCF6A` -> `_081DCFB0`,
-   statusFlags := 0; m4a_channel.c 118-122 and 639 the same) where the
+   statusFlags := 0; m4a_channel.c 118-122; on the CGB side CgbSound's
+   oscillator_off, m4a.c 987-1004, m4a_channel.c 639) where the
    GBA plays the one-clock note mid2agb wrote.  No micro note is that
-   short (the shortest is 24 ticks) -> no harness effect; the latch's
+   short (the shortest are pcm_drum's and pcm_adsr's 6-tick notes, 7.5
+   frames) -> no harness effect; the latch's
    same-frame rule (a latched note-off against a channel still START sets
    gateTime 1, so the next tick's gate walk stops it, as the GBA's N01)
    restores the one-tick note for the plugin.
@@ -4816,8 +4826,11 @@ should do to lag, gain and null:
 7. **The CgbSound entry.**  Without a sequencer `cgbEntryCycles` is the
    steady one-track value (`m4a_engine_init`: `M4A_CYC_CGB_ENTRY_BASE +
    M4A_CYC_PER_TRACK - M4A_CYC_SOUNDMAIN_ENTRY`) on every frame; the
-   ROM's varies with MPlayMain's work (the start tick 4077 on frame 3,
-   about 1600 on a steady frame, the per-command costs of step 3).  The
+   ROM's varies with MPlayMain's work (the micro probes' `.frames`, cycles
+   from line 160: frame 3's start tick 4069 sq1 / 4088 pcm / 5125 lfo_vib /
+   10304 psg_mix, a steady frame 1402 without a tick and 1866 with one; the
+   MIDI path's fixed 1205 after SoundMain is 1402 from line 160, the ROM's
+   no-tick value, 464 cycles early on every tick frame).  The
    PSG writes land hundreds to thousands of cycles off on note frames.
    Squares are insensitive (duty phase free-running), so their shallow
    nulls are 1 and 2; wave and noise phase runs on the CPU clock, so wave
@@ -4847,7 +4860,8 @@ should do to lag, gain and null:
     once or at the top of tick k + 1, and no MIDI-path entry point writes
     hardware at call time (`preserve_stolen_cgb` runs only in the
     polyphony-debug invert mode; `m4a_engine_kill_channel`'s CgbOscOff is
-    reached from CC 120 / 123, which no micro or corpus MIDI carries).
+    reached from CC 120 only (CC 123 is `all_notes_off`, STOP only), which
+    no micro or corpus MIDI carries).
     Predicted: every row of the latch baseline equal to the start baseline
     and every WAV byte-identical.  What the latch buys is the plugin's
     sample-accurate CLAP event loop (`m4a_plugin.c` `plugin_process`,
@@ -4861,8 +4875,8 @@ sequencer-path change).  `engine->quantizeEvents`,
 points -- `m4a_engine_note_on` (returns `M4A_CHANNEL_QUEUED`, -2),
 `_note_off`, `_cc`, `_program_change`, `_pitch_bend`, `_xcmd` -- called
 outside a tick push an `M4AQueuedEvent` onto `eventQueue` (1024 entries;
-a full queue applies the event at once and counts it in
-`eventQueueOverflow`) instead of acting.  `m4a_engine_tick` sets `inTick`
+a full queue is applied at once, in order, before the event queues, counted
+in `eventQueueOverflow` -- the review fix below) instead of acting.  `m4a_engine_tick` sets `inTick`
 for its duration (an entry point called from the frame hook, the
 sequencer's `ply_*`, always applies at once), runs the hook, c15, the PCM
 gate walk and the CGB gate walk (the latter moved out of the CgbSound
@@ -4896,8 +4910,9 @@ takes it START -> attack, the next tick's gate walk STOP -> release); CC
 7, bend, BENDR and XCMD latched the same way and the bend reaching the
 sounding channel at the tick; all-sound-off dropping the queue; disabling
 the latch flushing in order; the 1025th event applying at once and
-counted; a note-on from the frame hook applying at once with the latch
-on.  Unit **1578/1578** (1521 + 57).
+counted (since the review: a note-on queued first and its note-off
+overflowing, the note-off still reaching its note); a note-on from the
+frame hook applying at once with the latch on.  Unit **1578/1578** (1521 + 57).
 
 **Step 4, the measurement** (`accuracy.py --input midi` without and with
 `--midi-quantize` on the slice's build, against the same references;
@@ -4960,34 +4975,47 @@ expected):
 
 Attribution of the residual, per step 2's list, with the numbers:
 
-- **The time origin (1) is the lag.**  Within the 3 s micro window every
-  event after the first frame lands exactly **3 frames early**: the ROM
-  runs tick n on frame 3 + ceil(1.25 n) (`MPlayStart`'s tempoC 0 and
-  tempoI 150 give the start tick on frame 3, then TEMPO 120 -> 0.8 ticks
-  per frame), the MIDI path's tick n is dispatched at n x 349525.33
-  cycles from cycle 0 and mixed on frame 3 + ceil(1.2443 n - 3.147); the
-  difference 0.0057 n + 3.147 stays 3 frames until tick about 150 (3.1 s
-  at 48 ticks/s), past the window.  pcm's measured onsets (note 2 at tick
-  36: 773.7 vs 824.0 ms, note 3 at tick 72: 1527.1 vs 1577.4: both 50.3
-  ms = 3 frames of 16.743 ms early) and the lag column (49.7 .. 50.2 on
-  sq1, sq1_env, sq1_alt, sq2_alt, wave, wave_alt, pcm_adsr, pcm_drum,
-  pcm_reverb, pcm_bass, pan, tune, tune_psg, se_contest_place,
-  se_low_health: 15 rows) say so.  **The lag is the ROM's start offset:
-  the first tick on frame 3 (883882 cycles, 52.68 ms, which the boot's
-  construction already hands the first frame's events), while MIDI time 0
-  sits at ROM cycle 0.**  The first note cannot be aligned at the same
-  time as the rest (it is on time), which bounds the null at a few dB
-  whatever lag the aligner picks; the rows with another lag (pcm 34.8,
-  vol 30.8, vel 19.2, noise7 67.0, bend 55.7, lfo_pan 64.8, pcm_hi 160.5,
-  lfo_trem 110.6, lfo_psg 196.3, and the 0.0 / negative ones) are the
-  aligner choosing among equally shallow candidates, not a different
-  offset (their null is -6.6 .. +0.9 dB).  The alignment choice -- MIDI
-  time 0 at frame 3's SoundMain, as `MPlayStart` on frame 2 places the
-  song -- is slice 2's; with it, tick n lands on frame 3 + ceil(1.2443 n),
-  equal to the ROM's frame for every micro event (n <= 120).
+- **The time origin (1) is the lag.**  The ROM runs tick n on frame
+  3 + ceil(1.25 n) (`MPlayStart`'s tempoC 0 and tempoI 150 give the start
+  tick on frame 3, then TEMPO 120 -> 0.8 ticks per frame); the MIDI path's
+  tick n is dispatched at n x 349525.33 cycles from cycle 0 and mixed on
+  frame 3 + ceil(1.2443 n - 3.147).  The difference is **3 frames for
+  every tick that is a multiple of 4 up to about tick 150** -- pcm's 0, 24,
+  36, 60, 72, 120, and the micro set's usual 24 / 36 / 48 / 72 / 96 / 120
+  -- **and 4 frames on other ticks from tick 21 on** (n = 1 mod 4 from 21,
+  2 mod 4 from 66, 3 mod 4 from 110; review of slice 1, recomputed from
+  the 31 MIDIs): bend (21, 33, 45, 57, 66, 69, 78, 81, 90, 93, 102, 126),
+  pcm_adsr's note-off at 78, psg_mix (78, 90, 102, 114), lfo_vib /
+  lfo_trem / lfo_pan (102, 126), vol's ramp (110 .. 130).  pcm's measured
+  onsets (note 2 at tick 36: 773.7 vs 824.0 ms, note 3 at tick 72: 1527.1
+  vs 1577.4: both 50.3 ms = 3 frames of 16.743 ms early) and the lag
+  column (49.7 .. 50.2 on sq1, sq1_env, sq1_alt, wave, wave_alt,
+  pcm_adsr, pcm_drum, pcm_reverb, pcm_bass, pan, tune, tune_psg,
+  se_contest_place, se_low_health: 14 rows; sq2_alt 47.9) say so.  **The
+  lag is the ROM's start offset: the first tick on frame 3 (883882
+  cycles, 52.68 ms, which the boot's construction already hands the first
+  frame's events), while MIDI time 0 sits at ROM cycle 0.**  The first
+  note cannot be aligned at the same time as the rest (it is on time),
+  which bounds the null at a few dB whatever lag the aligner picks; the
+  rows with another lag (pcm 34.8, vol 30.8, vel 19.2, noise7 67.0, bend
+  55.7, lfo_pan 64.8, pcm_hi 160.5, lfo_trem 110.6, lfo_psg 196.3, and the
+  0.0 / negative ones) are the aligner choosing among equally shallow
+  candidates, not a different offset (their null is -6.4 .. +0.9 dB).
+  The formulas take an event as applied at the first SoundMain after its
+  exact cycle; `m4a_engine_process` runs the machine in 1024-cycle steps
+  until the resampler holds the samples, so an event is dispatched up to a
+  few thousand cycles late, which moves an event only when it falls that
+  close before a SoundMain.  The alignment choice -- MIDI time 0 at frame
+  3's SoundMain, as `MPlayStart` on frame 2 places the song -- is slice
+  2's; with it, tick n lands on frame 3 + ceil(1.2443 n), **equal to the
+  ROM's frame for every micro event except** bend (45, 57, 69, 81, 90, 93,
+  102, 126), lfo_vib / lfo_trem / lfo_pan (102, 126), psg_mix (90, 102,
+  114) and vol (110 .. 130): one frame early there, the tempo grid (2)
+  showing through within the window.
 - **The tempo grid (2) is the drift**: 4.2 .. 5.1 ms/s on the seven songs
-  against the predicted 4.56 (0.4564 %; the aligner's 4 s segments resolve
-  it to the frame), and the test RMS 0.0 .. 0.5 dB under the ref on the
+  against the predicted 4.56 per MIDI second (0.4562 %; 4.54 against ref
+  time; the aligner's 4 s segments resolve
+  it to the frame), and the test RMS 0.0 .. 0.4 dB under the ref on the
   micro rows (a 24-tick note spans 30 ROM frames and 29 or 30 MIDI-path
   frames).  Slice 3: place MIDI ticks on the tempoC / 150 grid.
 - **Velocity (3)**: no micro effect (127, 64, 24 are fixed points of the
@@ -5043,6 +5071,101 @@ one tick as well (today it is killed, as the GBA kills START | STOP).
 Slice 3 is then the tempo grid (tempoC / 150 per frame, the GBA's
 rounding), the velocity table and the LFO / CgbSound order for the MIDI
 path, each measured alone with `--input midi` against the latch baseline.
+
+**Code review of slice 1 (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: the latch against MPlayMain's frame order in m4a_1.s
+-- the chain walk, the track start, the command loop, the LFO step, the
+VOLCHG / PITCHG pass, CgbSound and SoundMainRAM -- SoundMainRAM's and
+CgbSound's START | STOP handling, the one-clock note, the CGB countdown
+move on the song path and both MIDI modes, the shadow pool, the queue's
+order, re-entrancy, panic and flush paths, every caller of
+`m4a_engine_note_on`'s return value, the plugin's CLAP loop, the renderer
+wiring, the unit test assertion by assertion; reviewer 2: step 2 against
+mid2agb's main.cpp / midi.cpp / tables.cpp / agb.cpp, MPlayDef.s,
+MPlayStart and the ply_* handlers, the renderer's option handling and
+conversions, the boot constants and every cycle / ms / frame number
+recomputed, the micro MIDIs' event ticks, the runner switch, the baselines
+field by field, the docs).  The first launch of both reviews stopped on an
+API rate limit before reporting; both were relaunched with the same briefs.
+
+*Acted on, each tested alone with `claim_check.sh`:*
+
+- **The overflow broke arrival order** (reviewer 1): a full queue applied
+  the new event at once, ahead of the 1024 queued -- a note-off
+  overflowing past its own queued note-on found no channel and left the
+  note stuck.  Fixed: a full queue is applied in order first, then the
+  event queues.  Harness-neutral by construction (no micro or corpus run
+  fills the queue): `claim_check.sh` 59 diffed, 0 moved, 57/66, 0
+  regressions, every row 0.0; the latched midi run 0 field differences on
+  44 rows against `2026-10-25_midi-path-latch.json`.  Its gate is the unit
+  test (the overflow block of `test_event_latch` now queues a note-on,
+  fills the queue and checks the overflowing note-off reaches the note).
+  Unit **1580/1580**; blip 49112/0, songs 561/561.
+- **Drain only on frames with a song tick** (reviewer 1: MPlayMain runs
+  its track loop only while tempoC >= 150, one frame in five skipped at
+  tempoI 120; the latch drains every frame).  Applied alone (`if (seq ||
+  tempoC + tempoI >= 150)` before the drain): **rejected by measurement**
+  -- `accuracy.py --input midi --midi-quantize` against the latch
+  baseline, **16 regressions** over 1 dB (wave +6.0, wave_alt +6.3, vol
+  +6.2, pan +5.1, tune +5.2, vel +5.0, sq1_env +4.0, pcm_adsr +2.0,
+  tune_psg +2.1, sq2 +1.9, se_faint +1.8, pcm_psg +1.6, psg_mix +1.5,
+  pcm_bass +1.2, mus_weather_groudon +1.0, ...) against 5 improvements
+  (lfo_trem / lfo_pan -2.5, pcm_chord -2.2, pcm_hi -1.7, pcm_reverb
+  -1.1).  The engine's accumulator on the MIDI path is not the ROM's
+  (its tempoC phase starts at boot, tempoI is the MIDI tempo and MIDI time
+  0 is not frame 3), so gating on it moves events off the ROM's frames.
+  Reverted; the question belongs with the tempo grid of slice 3, where the
+  MIDI clock is put on tempoC / 150 and the gating would follow from it.
+- **The one-tick note counts frames, the GBA's gate counts song ticks**
+  (reviewer 1): the header comment now says so (equal when one frame is
+  one tick; at tempoI < 150 the GBA's STOP can come two frames after the
+  start, at tempoI > 150 a frame with two ticks gives START | STOP and
+  drops the note).  No code change: it is the same tick-grid question.
+- **Plan text** (reviewer 2, every item recomputed here before the edit):
+  the "exactly 3 frames early" statement holds for ticks that are
+  multiples of 4 only -- other ticks are 4 frames early from tick 21 (bend,
+  pcm_adsr's note-off at 78, psg_mix, the three lfo rows at 102 / 126,
+  vol's ramp), recomputed from the 31 MIDIs' event ticks; the slice-2
+  alignment matches the ROM's frame on every micro event except bend, the
+  lfo rows, psg_mix and vol (one frame early there), corrected in the
+  attribution, the slice-2 paragraph's claim and the skill; 20 cry rows,
+  not 10; the RMS agreement 0.0 .. 0.4 dB on the micro rows and within 1.0
+  dB on all (se_contest_place 0.96, se_rain_stop 0.99); 14 rows in 49.7 ..
+  50.2 (sq2_alt 47.9); the other-lag rows' null -6.4 .. +0.9; the step-1
+  gain / null ranges are the micro rows'; item 2's 3.4 / 6.8 ms absorbed
+  by the frame quantization; item 3's velocity effect larger below 33; the
+  shortest micro notes 6 ticks (pcm_drum, pcm_adsr); item 7's ROM entries
+  from the micro probes (4069 / 4088 / 5125 / 10304 on frame 3, 1402 / 1866
+  steady) and the MIDI path's 1402 equal to the no-tick value; CC 123 does
+  not reach `kill_channel`; line references (midi.cpp 507, PAN 1412-1413,
+  agb.cpp 510); 0.4562 %, 4.54 ms/s against ref time; `tbs` the
+  multiplier; the CGB START | STOP via CgbSound's oscillator_off; the
+  dispatch caveat (up to a few thousand cycles after the event's cycle);
+  README: "after the gate walk" and the start baseline's missing
+  `midi_quantize` field.
+
+*Recorded, not acted on:* the step-2 line numbers are the pre-change
+file's (accurate at 857f74a; m4a_engine.c moved by about 80 lines and
+poryaaaa_render.c by 5 / 10 at the slice commit); the order of commands
+within one tick is per track on the GBA and by arrival in the queue, which
+matters only when a gate expiring on one track changes another track's
+channel scan in the same tick (on the MIDI path gates exist only through
+the one-tick rule); the one-tick rule also applies to a note-off applied
+by a flush, and CC 123 (`all_notes_off`) inside a drain sets STOP on a
+START channel with no one-tick treatment; c15 is decremented before the
+drain where CgbSound decrements it at its head (nothing in the drain
+reads it); an overflowed CC 0x1D / 0x1F counts two overflows; mid2agb
+applies the velocity table twice (idempotent); the accuracy.py docstring's
+one long line.  **For slice 2** (the plugin, from reviewer 1):
+`m4a_engine_reset_portamento` on the transport edge does not touch the
+queue, so note-ons queued before a stop record portamento history after
+it -- the transport-edge handler should flush or drop the queue first; a
+CLAP NOTE_CHOKE goes through `note_off` and is therefore deferred to the
+tick (and in the note's own frame becomes a one-tick note rather than a
+cut) -- a choke should probably bypass the latch; events in the first
+block drain during the quiet boot, as they apply there today; the
+1024-event capacity spans every block until the next SoundMain (dense
+automation reaches the in-order overflow, no longer a correctness issue).
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
