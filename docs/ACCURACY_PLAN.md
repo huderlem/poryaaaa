@@ -1817,6 +1817,97 @@ audit against the ROM bytes (the four corpus .bin files already match the
 ROM byte for byte), the `XCMD 0x0D` start offset, a second cry while one plays (cry 1's
 position, `SetPokemonCryTone`'s clock rule), and a cry over music.
 
+### Done: milestone 4 slice 3, cry variants (2026-10-24)
+
+Three cries with `PlayCryInternal`'s non-default pitch / pan / volume join
+the corpus (`songs.json` cry entries take optional `"pitch"`, `"pan"`,
+`"volume"` keys, `SetPokemonCryPitch` / `Panpot` / `Volume`'s arguments;
+the runner passes them to `mgba_render --pitch/--pan/--volume` and to
+`poryaaaa_render --cry-pitch/--cry-pan/--cry-volume`, `claim_check.sh`
+likewise; `mgba_probe` takes them as its ninth to eleventh arguments).
+The values are the game's (`src/sound.c`): 14440 is CRY_MODE_FAINT's
+pitch, 15800 CRY_MODE_HIGH_PITCH's, 90 CRY_MODE_ENCOUNTER / HIGH_PITCH's
+volume; pan 63 is the opponent-side value `battle_anim_throw.c` uses (for
+an SE; the cry callers pass -25 / 25 / 63 / -63).  Chorus, length, release
+and the reverse cries stay out (the next slices), so each variant takes one
+parameter path the defaults never took.  Baseline
+`baselines/2026-10-24_cry-variants.json` / `.txt`: **46/51 pass at -40 dB**;
+the 48 previous tests are unchanged to the decimal (`compare_reports.py
+2026-10-24_cry.json 2026-10-24_cry-variants.json`: 0 regressions, 0
+improvements, every -inf still -inf, every row 0.0; cry_pidgey, cry_jynx
+and se_rain_stop FAIL on the documented floor as before).
+`poryaaaa_unit_tests` 1220/1220 (45 new), `poryaaaa_blip_tests` 49112/0,
+`poryaaaa_song_tests` 561/561.  `claim_check.sh`: 44 probed tests (the
+three variants added), 0 moved writes.
+
+| test | gCryTable | pitch / pan / volume | sample | null | worst 1 s | ref dBFS |
+|---|---|---|---|---|---|---|
+| cry_jynx_faint | 123 | 14440 / 0 / 120 | 23524 samples, 2.75 s at this pitch: cut by the EOT at 2.38 s | -61.2 | -56.1 | -25.7 |
+| cry_bulbasaur_howl | 0 | 15800 / 63 / 120 | 8183 samples, 0.72 s; PAN 0x7F, the left side exactly silent | -47.9 | -39.4 (FAIL) | -25.4 |
+| cry_pidgey_quiet | 15 | 15360 / 0 / 90 | 1902 samples, 0.18 s; VOL 0x5A | -43.1 | -38.5 (FAIL) | -36.0 |
+
+**Measured constants** (probe section, step 6): `ply_endtie` with the
+first chained channel holding the key is **82** from RAM against the empty
+chain's 54, so `M4A_CYC_ENDTIE_MATCH` is **28 measured** where slice 2 had
+derived it as the ROM 89 minus the RAM 61; the harness needed no new
+number (the port reproduced cry_jynx_faint's frame 143 at 1928 = 1810 + 20
++ 28 + 70 from its existing constants, the +70 being step 3's ply_fine
+with one live channel).  `_SKIP` 18 stays est. (no run puts two channels on
+a cry track; `test_sequencer_endtie_walk` pins the model's relative
+charges).  The template bytes of each variant (the step-6 table) were
+worked by hand from the setters before the first render and are confirmed
+by the probe's track key after the EOT (0x38 / 0x3E / 0x3C) and by
+`test_cry_song`.
+
+**Per-test sequencer residual**: `entry_diff.py` 0 on all 177 complete
+frames of each of the three, `cmd_diff.py` 0, `track_diff.py` 0 (the
+probe's incomplete frame 179 excepted), including cry_jynx_faint's EOT
+with the chained channel and its FINE unlinking a live channel.
+
+**Residual attribution** (skill, "Attributing a residual below -40 dB";
+every run of differing output samples above 20 int16 LSB against the
+probe's `L timer0 ... slot` crossings): cry_jynx_faint 1 crossing (cycle
+28146944, 1.6777 s), 1 run at 1.6779 s, one output sample, 2.9 PCM LSB,
+on both sides; cry_pidgey_quiet 1 crossing (3428099, 0.2043 s, as
+cry_pidgey), 1 run at 0.2045 s, 5.9 LSB; cry_bulbasaur_howl 6 crossings
+(0.3383 .. 0.7401 s), 6 runs on the right side each 0.2 ms after a
+crossing (2.9 / 1.8 / 1.0 / 1.6 / 15.4 / 0.6 LSB; the 15.4-LSB one at
+0.6733 s alone puts the worst second at -39.4) and none on the left,
+whose reference and render are both exactly zero (PAN 0x7F gives the left
+volume 0).  No run anywhere else: the release-0 cut at cry_jynx_faint's
+EOT (SF_STOP on frame 143, the channel gone on 144) differs by nothing,
+the pitch and pan arithmetic by nothing.  The two FAILs are item 1c's
+scheduler-lateness floor, as cry_pidgey's and cry_jynx's; they stay in the
+corpus for the same reason.  cry_jynx_faint's -61 is the deepest cry: the
+lower pitch halves the per-output-sample jumps a late slot exposes, and
+its one crossing falls on a quiet stretch.
+
+**XCMD 0x0D** (`unk_3C`, the sample start offset; slice 2's review item
+R1#6) is ported: `ply_xcmd_0D` stores the little-endian word in the
+track (`M4ATrack.sampleStart`), `ply_note`'s DirectSound path hands it to
+the channel as its count (`_081DDCCE`) and SoundMainRAM's SF_START pass
+turns it into `currentPointer = data + count`, `count = size - count`
+(`m4a_pcm_channel_start_at`, applied at note-on since nothing on the GBA
+reads either field before that frame); the compressed path reads the
+pointer back as the sample index, so an offset inside a DPCM block decodes
+that block and starts mid-way; the track's start tick clears it
+(Clear64byte covers 0x3C).  Harness-neutral by construction (every
+`PlayCryInternal` mode and the test ROM pass progress 0): gated by
+`test_pcm_start_offset` (an uncompressed FIX ramp at offset 3; DPCM at a
+block-aligned 64 and a non-aligned 37 against `make_dpcm_wave`'s decoded
+array, the channel stopping after size - offset samples) and
+`test_sequencer_xcmd_0D` (the word through the parser and the sequencer
+into the channel, persistence across notes, the reset at the track's
+start).  `--cry-progress` reaches `M4ACryParams.progress` from the CLI
+(four lines; no reference can check it since the ROM's StartCry passes 0).
+
+The work, in order (commits on `accuracy-harness` after d2a7086): the
+probe arguments and step 6; the engine (0x0D, the CLI flags, the unit
+tests, `test_sequencer_cycles_cry_faint`: Cry_Jynx's length and rate at
+pitch 14440 through the real mixer, frames 3..145 against the probe with
+the channel alive at the EOT); the corpus, runner, `claim_check.sh`,
+README and skill; this section and the baseline.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
