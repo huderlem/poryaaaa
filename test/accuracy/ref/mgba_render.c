@@ -19,8 +19,8 @@
  *
  *   mgba_render <rom.gba> <out.wav> --frames N [--rate 48000]
  *               [--type song|cry|micro|none] [--id N] [--pitch N] [--pan N]
- *               [--volume N] [--length N] [--release N] [--start-frame N]
- *               [--native-resampler]
+ *               [--volume N] [--length N] [--release N] [--chorus N]
+ *               [--start-frame N] [--native-resampler]
  */
 #include <mgba/core/blip_buf.h>
 #include <mgba/core/config.h>
@@ -50,6 +50,7 @@ struct Params {
 	int volume;
 	int length;   /* cry: SetPokemonCryLength's u16 (PlayCryInternal's 140) */
 	int release;  /* cry: SetPokemonCryRelease's u8 (PlayCryInternal's 0) */
+	int chorus;   /* cry: SetPokemonCryChorus's s8 (PlayCryInternal's 0; its u32 192 is the s8 -64) */
 	int startFrame;
 };
 
@@ -102,7 +103,7 @@ static void usage(const char* prog) {
 	fprintf(stderr,
 	        "Usage: %s <rom.gba> <out.wav> --frames N [--rate HZ] [--type song|cry|micro|none]\n"
 	        "          [--id N] [--pitch N] [--pan N] [--volume N] [--length N] [--release N]\n"
-	        "          [--start-frame N]\n"
+	        "          [--chorus N] [--start-frame N]\n"
 	        "          [--native-resampler]\n",
 	        prog);
 }
@@ -142,6 +143,7 @@ static int patchParams(uint8_t* rom, size_t size, const struct Params* p) {
 			b[8] = (uint8_t) (p->length & 0xFF);
 			b[9] = (uint8_t) ((p->length >> 8) & 0xFF);
 			b[10] = (uint8_t) p->release;
+			b[11] = (uint8_t) (int8_t) p->chorus;
 			return 1;
 		}
 	}
@@ -199,7 +201,7 @@ int main(int argc, char** argv) {
 	const char* outPath = argv[2];
 	long frames = -1;
 	int rate = 48000;
-	struct Params p = { TYPE_NONE, 0, 15360, 0, 120, 140, 0, 1 };
+	struct Params p = { TYPE_NONE, 0, 15360, 0, 120, 140, 0, 0, 1 };
 
 	for (i = 3; i < argc; ++i) {
 		const char* a = argv[i];
@@ -229,6 +231,8 @@ int main(int argc, char** argv) {
 			p.length = atoi(v); ++i;
 		} else if (!strcmp(a, "--release") && v) {
 			p.release = atoi(v); ++i;
+		} else if (!strcmp(a, "--chorus") && v) {
+			p.chorus = atoi(v); ++i;
 		} else if (!strcmp(a, "--start-frame") && v) {
 			p.startFrame = atoi(v); ++i;
 		} else {

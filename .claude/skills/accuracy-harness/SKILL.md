@@ -152,26 +152,27 @@ the `CgbSound_*` addresses appended for the compiled CgbSound:
 ```sh
 arm-none-eabi-nm build/accuracy/rom/accuracy_test.elf > build/probe/syms.nm
 cat >> build/probe/syms.nm <<'EOF2'
-08001050 t CgbSound_loop
-08001066 t CgbSound_active
-080010e0 t CgbSound_step2
-080010f8 t CgbSound_start
-080011d6 t CgbSound_nostart
-080011fa t CgbSound_oscoff
-08001248 t CgbSound_step
-0800125c t CgbSound_modvol
-0800133c t CgbSound_stepdone
-0800134e t CgbSound_envdone
-08001358 t CgbSound_pit
-080013d0 t CgbSound_vol
-0800144c t CgbSound_done
-08001450 t CgbSound_next
+0800106c t CgbSound_loop
+08001082 t CgbSound_active
+080010fc t CgbSound_step2
+08001114 t CgbSound_start
+080011f2 t CgbSound_nostart
+08001216 t CgbSound_oscoff
+08001264 t CgbSound_step
+08001278 t CgbSound_modvol
+08001358 t CgbSound_stepdone
+0800136a t CgbSound_envdone
+08001374 t CgbSound_pit
+080013ec t CgbSound_vol
+08001468 t CgbSound_done
+0800146c t CgbSound_next
 EOF2
 ```
-(addresses of the 2026-10-24 ROM with the cry length / release parameters,
-CgbSound at 0x8001020: the slice 4 StartCry grew main.c by 0x30 bytes and
-every ROM symbol after it moved by +0x30 with the bodies unchanged -- the
-earlier ROM had CgbSound at 0x8000ff0 and each label 0x30 lower.
+(addresses of the 2026-10-25 ROM with the cry chorus parameter, CgbSound
+at 0x800103c: the slice 6 StartCry / StartTest grew main.c by 0x1c bytes
+and every ROM symbol after it moved by +0x1c with the bodies unchanged --
+the 2026-10-24 ROM with the length / release parameters had CgbSound at
+0x8001020 and each label 0x1c lower, the one before that 0x8000ff0.
 Re-derive from `arm-none-eabi-objdump -d` of CgbSound if m4a.c, main.c or
 the toolchain changes -- the header of mgba_probe.c names each one.  The
 ELF and map the CMake target writes are `build/accuracy/rom/accuracy_test.elf`

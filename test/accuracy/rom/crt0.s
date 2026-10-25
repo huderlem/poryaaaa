@@ -38,7 +38,8 @@ gAccParams:
 	.byte 1             @ start frame (VBlank count at which the test is started)
 	.2byte 140          @ cry length (SetPokemonCryLength; PlayCryInternal's default)
 	.byte 0             @ cry release (SetPokemonCryRelease; PlayCryInternal's default)
-	.space 9            @ reserved
+	.byte 0             @ cry chorus (SetPokemonCryChorus, s8; PlayCryInternal's default: one track)
+	.space 8            @ reserved
 
 	.align 2, 0
 Init:
