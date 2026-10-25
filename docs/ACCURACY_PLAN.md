@@ -6640,6 +6640,23 @@ from the code, not run).
 - The step-1 and step-3 texts are kept as written; this paragraph says
   where the review changed them.
 
+**Decision (2026-10-25, the user).**  The harness passes
+`--gba-tempo-grid` on every `--input midi` run (`--no-gba-tempo-grid`
+opts out; `accuracy.py`'s `--gba-tempo-grid` switch is gone, the grid
+being the default), as it does `--gba-start-delay`: the grid removes a
+difference already understood (the drift that decorrelated every song)
+so that what is left can be attributed, and slice 3b's LFO-grid fix is
+only exact on it.  The renderer's own default stays off: a user's MIDI
+with no first-MTrk tempo at tick 0 would play at 150 BPM, other tracks'
+tempos would be ignored, an odd BPM would lose one, and for the 480 / 960
+ticks-per-beat files a DAW writes the note ends are not yet mid2agb's
+(the converted length and the LUT without `-E` are not modelled), so
+"plays as the game" would be promised where it does not fully hold; the
+plugin cannot use the grid at all.  To revisit once the note-length
+conversion and a `-E` switch exist, possibly as one "as the game"
+preset with the start delay.  The tempo-grid pair is now the midi
+baseline the next slice compares against; the aligned pair is history.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

@@ -23,7 +23,7 @@ test/accuracy/tools/accuracy.py --tests micro      # or song, se, or name,name
 test/accuracy/tools/accuracy.py --input midi       # the plugin's MIDI path instead of the .s
 test/accuracy/tools/accuracy.py --input midi --midi-quantize   # ... with poryaaaa_render --quantize (the frame latch)
 test/accuracy/tools/accuracy.py --input midi --no-gba-start-delay  # ... with the first MIDI note at output time 0
-test/accuracy/tools/accuracy.py --input midi --gba-tempo-grid  # ... with each MIDI tick on the ROM's tempoC / 150 frame
+test/accuracy/tools/accuracy.py --input midi --no-gba-tempo-grid  # ... with the MIDI's exact tempo map instead of the ROM's tick frames
 test/accuracy/tools/accuracy.py --committed-refs   # no mgba build needed, micro-tests only
 build/poryaaaa_song_tests build/accuracy/rom       # .s parser vs ROM, byte for byte
 ```
@@ -43,13 +43,17 @@ the ROM starts the song, frame 3's SoundMain (883882 cycles), every event dispat
 later at 48 kHz -- the last sample a blip frame (2048 cycles) before that
 SoundMain, since the machine sits up to a blip frame past a sample's cycle
 when the sample is dispatched; the nominal 2529 would start every first
-note on frame 4.  **The midi-input reports are their own baseline family**
+note on frame 4.  It also passes `poryaaaa_render --gba-tempo-grid`
+(slice 3a, the renderer's default off; `--no-gba-tempo-grid` leaves it
+out): each MIDI tick on the frame MPlayMain's tempoC / 150 plays it.
+**The midi-input reports are their own baseline family**
 (`baselines/<date>_midi-path-*.json`, the report's `"input"` field says
 `midi`, `"midi_quantize"` and `"gba_start_delay"` say which form; the two
 2026-10-25 baselines without the delay are `midi-path-start` / `-latch`,
 with it `midi-path-aligned` / `-aligned-latch`, with it and
 `--gba-tempo-grid` `midi-path-tempo-grid` / `-tempo-grid-latch`, the
-report's `"gba_tempo_grid"` true): never
+report's `"gba_tempo_grid"` true -- the runner's default since slice 3a's
+decision, so the tempo-grid pair is the midi baseline): never
 compare one against a song-input baseline with `compare_reports.py`, and
 never save a midi run as the song-input baseline.  What separates the two
 paths today is not the mix grid (both paths mix the same SoundMainRAM

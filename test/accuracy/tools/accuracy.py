@@ -18,9 +18,8 @@ Steps (all idempotent, cached under --build-dir):
      -G -> voicegroup); --midi-quantize adds --quantize (the MIDI event
      latch), and poryaaaa_render always gets --gba-start-delay (MIDI time 0
      where the ROM starts the song, frame 3's SoundMain; --no-gba-start-delay
-     leaves it out); --gba-tempo-grid adds --gba-tempo-grid (each MIDI tick on
-     the ROM's tempoC / 150 frame; off unless asked, --no-gba-tempo-grid
-     says so explicitly).  A midi-input report (its "input" field says midi) is a
+     leaves it out) and --gba-tempo-grid (each MIDI tick on the ROM's
+     tempoC / 150 frame; --no-gba-tempo-grid leaves it out).  A midi-input report (its "input" field says midi) is a
      separate baseline family, never compared against a song-input one.  A sound effect (songs.json "type": "se") is an
      m4aSongNumStart of its song id in the ROM and plays on the music player
      the song table names (sound/song_table.inc, the `ms` field: SE1 / SE2 /
@@ -383,11 +382,9 @@ def main():
     ap.add_argument("--no-gba-start-delay", dest="gba_start_delay", action="store_false",
                     help="with --input midi: do not pass --gba-start-delay to poryaaaa_render "
                          "(the first MIDI note at output time 0 instead of where the ROM starts the song)")
-    ap.add_argument("--gba-tempo-grid", dest="gba_tempo_grid", action="store_true", default=False,
-                    help="with --input midi: pass --gba-tempo-grid to poryaaaa_render "
-                         "(each MIDI tick on the frame MPlayMain's tempo accumulator plays it; default: off)")
     ap.add_argument("--no-gba-tempo-grid", dest="gba_tempo_grid", action="store_false",
-                    help="with --input midi: the exact MIDI tempo map (the default)")
+                    help="with --input midi: do not pass --gba-tempo-grid to poryaaaa_render "
+                         "(the MIDI's exact tempo map instead of the frame MPlayMain's tempo accumulator plays each tick on)")
     ap.add_argument("--update-refs", action="store_true", help="store micro-test references in test/accuracy/refs/micro")
     ap.add_argument("--committed-refs", action="store_true", help="ignore mgba_render and compare against the committed micro-test references")
     ap.add_argument("--force", action="store_true", help="re-render references even if cached")
