@@ -3168,6 +3168,80 @@ labelled est.; a channel in pseudo-echo is passed over by both (the `0x83`
 mask excludes SF_IEC), a confirmation.  No engine code changed after the
 baseline, so `2026-10-25_cry-two-chain-release.json` stands as saved.
 
+### Done: milestone 4 slice 8a, a second cry while one plays -- the ground truth (2026-10-25)
+
+The ROM, the two patchers, the probe and the measurements only; **no
+engine, `poryaaaa_render`, runner or `songs.json` change and no new corpus
+test** (probe step 11 above has every number and the ROM story).  Baseline
+`baselines/2026-10-25_second-cry-rom.json` / `.txt`: **53/62 pass at -40
+dB**, every one of the 62 rows identical to `2026-10-25_cry-two-chain-release.json`
+in every field of report.json but the ref path (the ROM changed; refs
+`56b288f4b49f-mGBA_0.10.5+m4a_blip`; `compare_reports.py` 0 regressions, 0
+improvements, every row 0.0, the nine documented floor / open-bus FAILs as
+before).  `claim_check.sh` against the previous baseline: 55 probed tests
+diffed, 0 moved writes; `poryaaaa_unit_tests` 1395/1395, `poryaaaa_blip_tests`
+49112/0, `poryaaaa_song_tests` 561/561.  The gates of slices 4 and 6: the
+cry_jynx_faint_full probe re-run under the new ROM gives a `.frames` file
+identical to the old ROM's, and pcm / pcm_cmp / cry_bulbasaur / sq1 render
+byte-identical to the baseline references.
+
+**The ROM** (`test/accuracy/rom/main.c`, `crt0.s`): `AccParams` + `u16 id2`
+(block offset 20) + `u8 startFrame2` (22), 5 reserved bytes left, 28 bytes;
+`StartCry(id2, 0, 120, 15360, 140, 0, 0)` on VBlank `startFrame2` through
+the game's `SetPokemonCry*` / `SetPokemonCryTone` path; `mgba_render --id2 /
+--start-frame2`; `mgba_probe` arguments 15 / 16 and `symbol[N]` as the
+eighth.  Symbol shift **+0x40** from `AgbMain` on (`CgbSound` 0x800107c, the
+`CgbSound_*` labels +0x40 in the skill and the probe header, IWRAM
+unchanged).  **The rule learnt**: `AgbMain`'s boot path and per-frame loop
+must stay instruction-identical across ROM changes -- a two-instruction
+prologue change moved the timer-0 start 6 cycles and every DirectSound
+reference with it, invisible to the `.frames` gate; the second cry's wait
+therefore lives in `StartTest`.  Check pcm / pcm_cmp / cry_bulbasaur
+byte for byte before the harness after any ROM change.
+
+**What slice 8b needs** (all from step 11; nothing derived or fitted):
+- **Player**: the second cry lands on **cry player 1** (`SetPokemonCryTone`'s
+  first free player: player 0's track 0 has MPT_FLG_EXIST, player 1's has
+  flags 0 and `chan` 0; when neither is free the larger `clock` is replaced);
+  `MPlayStart` always starts it (the cry players' `unk_B` is 0).  Its song
+  copy is `gPokemonCrySongs[1]` (IWRAM, the same 7-per-byte costs), its
+  tracks 0x030022F8 / 0x03002348.
+- **Entry position**: cry 1 is the first MPlayMain entry of the frame (291)
+  and its body runs **last**, after cry 0's: FadeOutBody **88** after cry
+  0's `_081DDA6C`, `_081DD9BC` **54** later (the 142 head), its own body,
+  then CgbSound **55** after its `_081DDA6C`.  Alone: 889 / 977 / 1031 / 55.
+  A playing cry player costs the frame **79 + its body** whichever it is;
+  frame = 1007 + Σ (79 + body) over playing players, cry 0's body before cry
+  1's.
+- **Skeleton**: 1596 one playing, **2185** both playing steadily (bodies
+  510 each), the second's start tick **4736** (= 1596 + 79 + 3061, the 3061 =
+  the first's 2991 + the scan pass-over 70), unlink ticks + 93 (2278 / 2258 /
+  1689), dead tracks - 20 (2165 / 2145 / 1576), the EOT + 234 on an empty
+  chain (2379 with cry 1's track dead, 2399 with its channel alive, 1810
+  alone), the finished tick + 185 (1761 / 1781 / 1192).
+- **Channels**: the first cry on channel 0 (0x03000FC0), the second on
+  **channel 1** (0x03001000): `ply_note`'s index-order scan passes over the
+  live channel 0 at **70** cycles (`M4A_CYC_SCAN_ON` 20 + `SCAN_ON_CMP` 4 +
+  `SCAN_CMP` 12 + `SCAN_EARLIER_TRACK` 22 + `SCAN_NEXT` 12 -- equal priority
+  10, the earlier track pointer) and takes channel 1 at `SCAN_FREE` 14.
+- **Deaths**: all through the count path, no `_081DCFB0` stamps: Pidgey (cry
+  1) frame 33 = 22 + 11, Bulbasaur (cry 0) 50; Jynx (cry 0) 137, Wailord
+  (cry 1) 181 = 62 + 119; every EOT (143 / 162; 143 / 202) on an empty chain.
+  `startFrame2` N starts the second's tick on frame **N + 2**.
+- **Crossings**: (a) 3 at 0.2043 / 0.2713 / 0.3383 s; (b) 24, listed in
+  step 11 (`build/probe/cry_second_*.txt.events`).
+- **Chains**: one channel per track always; `_SKIP` 18 stays est.
+
+**The handoff**: the engine runs **one sequencer per render** (one
+`frameHook`, `m4a_sequencer_set_player` picking one player's chain
+position).  Slice 8b makes two players run concurrently on one frame -- cry
+player 0's body then cry player 1's, each with its own tracks, template copy
+and chain position, sharing the twelve channels' index-order scan and
+SoundMainRAM -- then adds `poryaaaa_render --cry2 N --cry2-start F`, a
+`songs.json` key, the runner, and corpus entries for the two runs above
+(expected: the skeleton and deaths of step 11, both EOTs on empty chains, the
+floor residual at the listed crossings).  Cries over music stay later still.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
