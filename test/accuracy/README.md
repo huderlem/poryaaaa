@@ -104,7 +104,7 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   them): the runner passes `--id2 N --start-frame2 F` to `mgba_render` and
   `--cry2 N --cry2-start-frame F` to `poryaaaa_render`, the reference frame
   count stays `seconds -> frames + 2` (182 for 3 s, 241 for 4 s), and
-  `--input midi` skips the entry like any cry.  The two entries are
+  `--input midi` skips the entry like any cry.  `--id2 / --start-frame2` (and the probe's fifteenth / sixteenth arguments) also start that cry over a `--type song` run -- an SE or a song -- with no ROM change, since `StartTest` runs the second-cry block after its type switch: the probe logs `build/probe/cry_over_se.txt` (se_exp, Cry_Bulbasaur from VBlank 30) and `cry_over_bgm.txt` (mus_littleroot, from VBlank 60) are plan step 12 (slice 9a, ground truth only; the cry over music steals a releasing BGM channel on its start frame).  The two entries are
   cry_second_bulbasaur_pidgey (id 0, id2 15, start_frame2 20, 3 s) and
   cry_second_jynx_wailord (id 123, id2 381, start_frame2 60, 4 s), the two
   probed runs (`build/probe/cry_second_*.txt`, 180 / 240 frames;

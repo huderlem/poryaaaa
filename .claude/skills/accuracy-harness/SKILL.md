@@ -332,6 +332,13 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   any cry, and `claim_check.sh` adds the two flags to its cry line and
   renders a 240-frame probe for 4 s.  Their residual is the one-cry
   rows' floor (-60 / -45 dB, every run a one-sample slot crossing).
+  The same `--id2 / --start-frame2` (probe arguments 15 / 16) start a cry
+  over a `--type song` run too -- an SE or a song, no ROM change, `StartTest`
+  running the second-cry block after its type switch: `build/probe/
+  cry_over_se.txt` (se_exp + Cry_Bulbasaur from VBlank 30, no steal) and
+  `cry_over_bgm.txt` (mus_littleroot + Cry_Bulbasaur from VBlank 60: the
+  cry steals a releasing BGM channel on frame 62), plan step 12; the engine
+  side is slice 9b, not yet implemented.
   Optional `"pitch"`, `"pan"`, `"volume"`, `"length"`, `"release"`,
   `"chorus"` keys (SetPokemonCryPitch / Panpot / Volume / Length / Release
   / Chorus's arguments; take the values from `PlayCryInternal`'s modes in

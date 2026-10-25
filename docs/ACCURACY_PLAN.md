@@ -1706,6 +1706,219 @@ frameHook), so it cannot run cry player 1's body after cry player 0's on
 the same frame -- slice 8b.
 
 
+### SoundMain timing probe, step 12: a cry over an SE and over music (2026-10-25, milestone 4 slice 9a)
+
+Ground truth only: no engine, plugin, `cmd/`, `test_engine.c`, `songs.json`,
+runner, ROM or baseline change.  Before anything, `claim_check.sh` against
+`2026-10-25_two-cry-rows.json` reproduced the baseline (57 diffed, 0 moved,
+55/64, 0 regressions, every row 0.0; unit 1471/1471, blip 49112/0, songs
+561/561).
+
+**The premise held: no ROM change.**  Read, not assumed: `rom/main.c`'s
+`StartTest` runs its `startFrame2` block *after* the type switch, for every
+type, so `--type song --id <se or song id> --id2 N --start-frame2 F` starts
+`gCryTable[N]` at CRY_MODE_NORMAL's defaults on VBlank F over the playing SE
+or song through the same `StartCry` path; `mgba_render.c`'s parser sets
+`p.id2` / `p.startFrame2` and `patchParams` writes block bytes 12..14 with no
+test of `p.type`, and `mgba_probe.c`'s fifteenth / sixteenth arguments go
+through its `patchParams` the same way.  The ROM, `syms.nm` (CgbSound
+0x800107c) and every reference are the slice-8a ones.
+
+**The runs** (type 0, 180 frames, `... 15360 0 120 140 0 0 <id2> <F>`;
+each twice, the raw logs identical, only the `.frames` summary's player
+differing): `build/probe/cry_over_se.txt` (se_exp, id 33, SE1, 3 tracks,
+Cry_Bulbasaur = gCryTable[0] from VBlank **30**: start tick on frame **32**;
+eighth argument `gPokemonCryMusicPlayers`) and `cry_over_se_se.txt`
+(`gMPlayInfo_SE1`); `cry_over_bgm.txt` (mus_littleroot, id 405, BGM, 9 of
+10 tracks, Cry_Bulbasaur from VBlank **60**: frame **62**) and
+`cry_over_bgm_bgm.txt` (`gMPlayInfo_BGM`).  The `cry_` prefix without a
+`songs.json` entry makes `claim_check.sh` skip them.  For like-for-like
+comparison the two songs were re-probed alone on the current ROM into
+`build/scratch/littleroot_alone.txt` / `se_exp_alone.txt` (their `.frames`
+cycles identical to the step-3 / step-4 logs `littleroot.txt` /
+`se_exp.txt` on every complete frame; the alone logs below are those), and
+a 240-frame `build/scratch/cry_over_bgm_240.txt` covers the cry's EOT over
+music (frame 202, past the 180-frame run).  `mgba_render --type song --id
+33 --id2 0 --start-frame2 30 --frames 182` and `--id 405 ... --start-frame2
+60` rendered `build/scratch/cry_over_se.wav` / `cry_over_bgm.wav` (582348
+bytes each) for slice 9b; not listened to, not compared.  Cycles from
+VBlank line 160; "alone" = the song's own probe without the cry.
+
+**Reading method.**  Per frame and per player the raw log gives the
+MPlayMain entry, `FadeOutBody`, `_081DD9BC` and `_081DDA6C` (r7 = the
+MusicPlayerInfo), so each playing player's body (`_081DD9BC` ->
+`_081DDA6C`) is measured directly; `bodies.py`-style sums check step 11's
+rule **CgbSound = 1007 + sum over playing players of (79 + body)** on every
+frame, with the paused players' terms (BGM 71, the others 63, the tail 55)
+exactly as step 4 gives them.  The BGM's / SE1's body with the cry is
+compared with its body alone on the same frame, and where they differ the
+two label sequences are diffed segment by segment.
+
+**Run (a), cry over se_exp.**  The SE's note (frame 3, `ply_note` vt = 01:
+a square-1 voice) takes a CGB channel through the `_081DDBC4` path, so no
+DirectSound channel is ON when the cry starts: its scan is `_081DDBFA` ->
+`_081DDC40` **14** (`SCAN_FREE`, channel 0, 0x03000FC0), then the lone
+cry's sequence label for label (`ClearChain` 12, `RealClearChain` 33,
+`_081DDC54` 48 = `NOTE_UNLINK_NONE` 44 + `CHAIN_EMPTY` 4).  The priority
+compare is never reached; SE1's `priority` is 5 (`se_exp_pri`, no PRIO
+command), the cry's 10.  No steal.  SE1's body is **identical to its body
+alone on every frame** (3..102: alone CGB - 1086, 0 mismatches); the
+cry's body takes only step 5 / 11 values: start **2991**, steady **510**,
+unlink tick **603** (+93), dead track **490**, EOT **724**, finished tick
+**106**.  The whole run composes from step 4's chain rule, step 5's cry
+costs and step 11's 1007 + (79 + body) -- no exception:
+
+| frames | state | CgbSound | = alone + | alone |
+|---|---|---|---|---|
+| 2..31 | SE alone | the alone values | 0 | 1007, 3987, 2117, ... |
+| 32 | the cry's start tick | **5672** | 79 + 2991 = 3070 | 2602 |
+| 33..78 | both playing | alone + **589** | 79 + 510 | 1412..2950 |
+| 79 | Bulbasaur's unlink (32 + 47, as alone 3 -> 50) | **2793** | 79 + 603 = 682 | 2111 |
+| 80..100 | SE playing, cry's track dead | alone + **569** | 79 + 490 | |
+| 101 / 102 | the SE's FINE / finished tick | **2340** / **1795** | 569 | 1771 / 1226 |
+| 103..171 | cry alone, dead track | **1576** | 569 | 1007 |
+| 172 / 173 | the cry's EOT (32 + 140) / finished tick | **1810** / **1192** | 803 / 185 | 1007 |
+| 174 on | all paused | **1007** | 0 | 1007 |
+
+The cry's death is the count path (no `_081DCFB0` stamp in the log; none
+in the SE's either), the unlink `RealClearChain` under 0x03001F88 on frame
+79 with prev 0 / next 0; the EOT finds the chain empty (`ply_endtie` ->
+`_081DD938` 54, `ply_fine` -> `_done` 16).  The SE's 284 PSG writes are the
+alone run's (frame, register, value) sequence exactly; each write's cycle
+moves by the frame's delta above.  `.events`: 6 `timer0` slot crossings
+(first at cycle 9046022 = 0.539 s; se_exp alone has 0: the crossings come
+with the PCM channel's mixer work).
+
+**Run (b), cry over mus_littleroot.**  Frames 2..61 are the alone frames;
+the BGM's body on frame 62 is its alone body (2734 = 3820 - 1086: the
+`MPlayStart` between SoundMains touched only the cry player).  **The
+cross-player steal of slice 8b-i's review is exercised.**  On frame 62 all
+five DirectSound channels are ON when the cry's `ply_note` scans
+(`_081DDBEC` r3 = 5 = `maxChans`): channel 0 (0x03000FC0) ON | STOP on BGM
+track 1 (0x03000090), channel 1 (0x03001000) ON | STOP on the same track,
+channels 2 / 3 (0x03001040 / 0x03001080) ON, channel 4 (0x030010C0) ON
+with the BGM's note of this very frame.  The walk, label for label against
+m4a_1.s: channel 0 `_081DDBFA` -> `_081DDC32` 32 -> `_081DDC34` 2
+(`SCAN_FIRST_STOP` 34: ON | STOP with r2 = 0, `adds r2, 1`, r6 := its
+priority 0, r7 := its track -- the note's own priority 10 in r6 is
+**overwritten**, a stopping candidate wins regardless of priority) ->
+`_081DDBFA` 12; channel 1 -> `_081DDC18` 24 (`SCAN_STOP`) -> `_081DDC24` 12
+(`SCAN_CMP`: priority 0 against r6 0, the taken `bcs`) -> `_081DDC32` 16 ->
+`_081DDC34` 2 (`SCAN_SAME_TRACK` 18: `ldr r0, track` = 0x03000090 = r7, the
+taken `bls`, the not-taken `bcc`, so the later channel of the same track
+is recorded) -> 12; channels 2, 3, 4 -> `_081DDC14` 20 -> `_081DDC34` 10
+(`SCAN_ON` + `SCAN_ON_SKIP`: a stopping candidate exists) -> 12 each (the
+last `_081DDC34` -> `_081DDC40` 12, `SCAN_DONE`); the scan is **238**
+against the lone cry's 14.  Then `ClearChain` 12, `RealClearChain` 33 and
+`RealClearChain` -> `_081DDC54` **70** on the stolen channel 0x03001000
+(trk = 0x03000090, prev = 0x03001080, next = 0x03000FC0, the cry's own
+chain empty) = `NOTE_UNLINK_11` 66 + `NOTE_CHAIN_EMPTY` 4 -- the GBA
+unlinks the channel from BGM track 1's chain at once, through
+`channel->track`, inside the cry's `ply_note`.  The start body is **3237** =
+2991 + 224 (scan) + 22 (unlink), every term an existing constant; the frame
+7136 = 3820 + 79 + 3237.  The stolen note: BGM track 1 took channel 1 on
+frame 53 (`_081DDC40` r4 = 0x03001000, raw f54), its gate expired on frame
+58 (`_081DD8B4` r0 = 0x40), and alone its envelope reached zero on frame 68
+(`_081DCFB0` stamp raw f69, r3 = 0x0808C970) with the walk dropping it on
+69 (`RealClearChain` under 0x03002008, prev 0x03001080, next 0, 127 cycles:
+`_081DD8AE` 14 + `ClearChain` 12 + 33 + `WALK_UNLINK_10` 56 + `WALK_NEXT`
+12); with the cry it is cut on frame 62, six frames into its release, and
+neither the stamp nor the drop occurs (the stamp list with the cry lacks
+alone's f69 and f101 and has an f127 alone lacks: the later reallocation).
+The cry's channel priority 10 (`mplayInfo->priority` 10 + track priority 0)
+against the BGM's 0 (`mus_littleroot_pri` 0, no PRIO command) is compared
+only later, by BGM notes scanning past the cry's live channel 1 without a
+stopping candidate: `_081DDC18` -> `_081DDC24` 12 (0xA >= 0) -> `_081DDC34`
+**8** (the taken `bhi`): six times (frames 87, 95, 103, twice each, r0 =
+0x0A, r4 = 0x03001000) -- `M4A_CYC_SCAN_HIGHER`'s *est.* 8 **measured for
+the first time** (no other log in `build/probe/` has the segment), equal to
+the estimate.  No BGM note was dropped: 52 `ply_note` entries in frames
+<= 178 in both logs, 52 took a channel.  Every frame obeys the chain rule
+(1007 + (79 + body) per playing player, both players' bodies measured; 0
+exceptions on 2..178 and on the 240-frame run's 2..238), and the cry's body
+takes only its known values: 3237 (frame 62), 510 (63..108), 603 (109, the
+unlink, 62 + 47), 490 (110..201), 724 (202, EOT, 62 + 140), 106 (203):
+
+| frames | state | CgbSound | alone | delta = 79 + cry body + BGM delta |
+|---|---|---|---|---|
+| 2..61 | BGM alone | the alone values | | 0 |
+| 62 | the cry's start tick (steal) | **7136** | 3820 | 79 + 3237, BGM 0 |
+| 63..108 | both playing | alone + 589 + BGM delta | | BGM delta 0 on no-tick frames; **-32** on tick frames 63, 65..67, 88, 90..92, 94, 97..99, 105..108 (one channel fewer in track 1's walk: `WALK_GATE0` 20 + `WALK_NEXT` 12); -127 on 69 (the drop that no longer happens); +126 on 78, +84 on 87, -28 on 95 (= -32 + 4), +172 on 103 (BGM notes' scans and unlinks over a different channel landscape); 0 on 70..77, 79..86 |
+| 109 | Bulbasaur's unlink (cry player 0's walk, `RealClearChain` raw f110) | **3196** | 2546 | 79 + 603 - 32 |
+| 110..178 | BGM playing, cry's track dead | alone + 569 + BGM delta | | -32 on 110, 112 (-274 total: a free take instead of a steal), 113 -95, +32 on 115..119 (a channel more in a walk), 120 +10, 127 +95, 128 -276, 135 -95, 137 +324, 145 -30, 153 -78, 162 +88, 170 +42, 178 -56; 0 elsewhere |
+| 202 / 203 (240-frame run) | the cry's EOT / finished tick | **3818** / **4693** | 3015 / 4438 | 79 + 724 / 79 + 106 + 70 |
+| 204..238 | BGM alone again | alone on 31 frames; +4 / +58 / +70 / +80 on four note frames | | 0 |
+
+Every BGM-body difference is **state, not cost**: the segment multiset diff
+(with minus alone) of every differing frame on 2..178 contains only
+`_081DD892`+12 / `_081DD8B4`+20 (`WALK_NEXT` / `WALK_GATE0`), `_081DD8AE`+14
+/ `ClearChain`+12 / `RealClearChain`+33 / `_081DD8B4`+56 (the walk's dead
+drop, `WALK_UNLINK_10`), and the scan / take segments `_081DDBFA`+12,
+`_081DDC14`+20, `_081DDC34`+10, `_081DDC18`+4 / +24, `_081DDC24`+12,
+`_081DDC34`+8 / +22, `_081DDC32`+32 / +18 / +16 with `_081DDC34`+2,
+`_081DDC40`+12 / +14 and `_081DDC54`+44 / +48 / +64 / +72 / +74 / +70 --
+each the engine's `SCAN_*` / `NOTE_UNLINK_*` (+ `CHAIN_EMPTY`) constant for
+that state, and every (segment, state) -> value pair but the two named
+above (70 on the cross-player steal, 8 on `SCAN_HIGHER`) occurs in the
+alone song log or the lone cry log with the same value.  **No new
+constant is derived, fitted or changed.**  The BGM's 156 PSG writes are the
+alone run's (frame, register, value) sequence exactly (the stolen channel
+is PCM); `.events`: 20 crossings (first 3996161 = 0.238 s; alone 14; the
+240-frame run 21).  The cry's death is the count path (its channel's
+`_081DCFB0` never appears; the 12 stamps in the log are BGM channels'), the
+EOT (frame 202) finds its chain empty.
+
+**Deaths and unlinks summary**: (a) cry on frame 79 (count path), SE FINE
+101; (b) the stolen BGM note cut on 62 (no death of its own), the cry on
+109 (count path), EOT 202.  The `.frames` of the song players (`_se` /
+`_bgm` logs) show the cry only through the CgbSound entry and the shifted
+write cycles: the stolen note is audible in the PCM mix alone (the
+`build/scratch` renders, for 9b).
+
+**What slice 9b needs -- structural statement only, nothing implemented.**
+(1) `MAX_TRACKS` 16 in `plugin/m4a_engine.h` holds both chains: BGM (10) ->
+cry 0 (2) with trackBase 10 (engine tracks 10..11), SE1 (3) -> cry 0 with
+trackBase 3 (tracks 3..4); a BGM -> SE1 -> cry 0 chain is 10 + 3 + 2 = 15.
+(2) `m4a_sequencer_init_chained(outer, inner, trackBase)` today refuses an
+inner with an outer, a trackBase below `inner->trackBase + inner->maxTracks`
+or at `MAX_TRACKS`, and an inner that is cry player 1; it then calls
+`m4a_sequencer_set_player(outer, inner->player + 1)` -- the **next** player
+-- so a BGM -> cry 0 chain (players 0 -> 4) or SE1 -> cry 0 (1 -> 4) needs
+the caller to re-select cry 0 with `set_player` afterwards, which its
+checks allow (`player <= inner->player` refused, any higher player and a
+fitting track range accepted).  The chain's frame code already charges the
+paused players between two members, `(o->player - last->player - 1) *
+M4A_CYC_MP_IDLE` (SE1 / SE2 / SE3's 63 each for BGM -> cry 0, SE2 / SE3's
+for SE1 -> cry 0), as step 11's 1007 + (79 + body) requires and run (a) /
+(b) confirm (SE1 -> cry 0 on frame 32: 637 + 142 + body + 63 + 63 + 142 +
+body + 63 + 55).  (3) **The cross-player steal's cycle model, now measured**: the taking
+player's `ply_note` must find the stolen channel's current owner across the
+whole chain (the GBA's `channel->track`; today each sequencer's
+`chainOwner[]` knows only its own tracks, so `m4a_sequencer.c`'s note path
+would charge `NOTE_UNLINK_NONE` 44 instead of the measured `NOTE_UNLINK_11`
+66 -- -22 on frame 62 -- and leave the channel in BGM track 1's
+`chainOwner` so the BGM's next walks count it live, +32 per tick frame
+against the GBA, never dropping it since the channel is ON for the cry),
+unlink it from that owner's chain at once with the owner's prev / next
+(`unlink_cost` run against the owner sequencer), and clear the owner's
+`chainOwner[h]`; the owner's walk then sees one channel fewer (the -32).
+The reverse direction (a BGM note over the cry's channel) is the existing
+`SCAN_HIGHER` path; the engine's allocation (`m4a_engine_note_on`'s shared
+scan) already picks channel 1 since it follows the GBA's scan over the
+shared channels.  (4) `songs.json`: an `"se"` or `"song"` entry carrying
+the same `"id2"` / `"start_frame2"` pair (both or neither) -- the runner's
+`mgba_render` line already appends `--id2 / --start-frame2` for any entry
+with `cry2`, but its `poryaaaa_render` line does so only inside the
+`t.get("cry")` branch, so the song / SE branch needs the `--cry2 N
+--cry2-start-frame F` pair, and `poryaaaa_render` itself today requires
+`--cry` with `--cry2` and chains cry 1 after cry 0; a cry over a song needs
+cry 0 chained after the song's player (BGM or SE1) with the second cry's
+sample as its voicegroup and `m4a_cry_choose_player` from silence (cry 0).
+Suggested rows, named after the logs: `cry_over_se` (se_exp, id2 0,
+start_frame2 30, 3 s) and `cry_over_bgm` (mus_littleroot, id2 0,
+start_frame2 60, 3 s or 4 s to cover the EOT 202).  `claim_check.sh`'s SE /
+song argument lines would need the two flags as its cry line has them.
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`
