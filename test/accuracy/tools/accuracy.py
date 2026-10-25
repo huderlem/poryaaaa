@@ -22,8 +22,11 @@ Steps (all idempotent, cached under --build-dir):
      A cry ("type": "cry", "id": the gCryTable index) is the ROM's StartCry
      (mgba_render --type cry --id N, PlayCryInternal's CRY_MODE_NORMAL
      defaults) and poryaaaa_render --cry N: the cry song template on cry
-     player 0 with the cry's DPCM sample as its one voice.  Cries have no
-     MIDI, so --input midi skips them.
+     player 0 with the cry's DPCM sample as its one voice.  Optional
+     "pitch", "pan", "volume" keys (SetPokemonCryPitch / Panpot / Volume's
+     arguments) go to both renderers (mgba_render --pitch / --pan /
+     --volume, poryaaaa_render --cry-pitch / --cry-pan / --cry-volume).
+     Cries have no MIDI, so --input midi skips them.
   4. metrics.compare on each pair; a table on stdout and a JSON report.
 
 Typical use (after `make` in test/accuracy/rom and building mgba_render and
@@ -132,7 +135,8 @@ def build_tests(args):
                     continue
                 tests.append(dict(name=name, group="cry", type="cry", id=int(s["id"]), midi=None, song=None,
                                   voicegroup=None, volume=None, reverb=None, extended=False,
-                                  seconds=float(s.get("seconds", 2.0)), player=None, cry=int(s["id"])))
+                                  seconds=float(s.get("seconds", 2.0)), player=None, cry=int(s["id"]),
+                                  cry_params={k: int(s[k]) for k in ("pitch", "pan", "volume") if k in s}))
                 continue
             const = name.upper()
             if const not in ids:
@@ -248,6 +252,8 @@ def render_reference(args, t, ref_dir):
         raise SystemExit(f"no mgba_render and no committed reference for {t['name']}")
     cmd = [args.mgba_render, args.rom, wav, "--frames", str(frames_for(t["seconds"])),
            "--rate", str(args.rate), "--type", t["type"], "--id", str(t["id"])]
+    for k, v in sorted(t.get("cry_params", {}).items()):      # StartCry's pitch / pan / volume
+        cmd += ["--" + k, str(v)]
     if run(cmd, wav + ".log") != 0:
         raise SystemExit(f"mgba_render failed for {t['name']}, see {wav}.log")
     return wav
@@ -263,6 +269,8 @@ def render_poryaaaa(args, t, overlay, out_dir):
             return None
         # The cry song template with gCryTable[id]'s sample, on cry player 0.
         cmd = [args.poryaaaa_render, overlay, "--cry", str(t["cry"])] + common
+        for k, v in sorted(t.get("cry_params", {}).items()):
+            cmd += ["--cry-" + k, str(v)]
     elif args.input == "song":
         if not t["song"] or not os.path.exists(t["song"]):
             raise SystemExit(f"compiled song {t['song']} not found; build the ROM or use --input midi")

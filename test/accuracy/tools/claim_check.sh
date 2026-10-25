@@ -13,8 +13,8 @@
 # The write diff needs the probe logs (build/probe/<name>.txt from
 # mgba_probe; not committed) and renders each test for the probe's length:
 # micro-tests 1.2 s (70 frames) or 3 s (180), songs 20 s (1200) or 10 s
-# (600), SEs 3 s with --player, cries 3 s with --cry (the id from
-# songs.json).
+# (600), SEs 3 s with --player, cries 3 s with --cry (the id and any
+# pitch / pan / volume from songs.json).
 set -u
 cd "$(dirname "$0")/../../.."
 BASE=${1:-$(ls -t test/accuracy/baselines/*.json | head -1)}
@@ -41,7 +41,9 @@ fi
 cries=$(python3 -c '
 import json
 for s in json.load(open("test/accuracy/songs.json")):
-    if s.get("type") == "cry": print(s["name"], s["id"])')
+    if s.get("type") == "cry":
+        extra = " ".join("--cry-%s %d" % (k, s[k]) for k in ("pitch", "pan", "volume") if k in s)
+        print(s["name"], "--cry %d %s" % (s["id"], extra))')
 moved=0; checked=0
 for f in build/probe/*.txt; do
     n=$(basename "$f" .txt)
@@ -50,9 +52,8 @@ for f in build/probe/*.txt; do
     args=""
     case $n in
         cry_*)      src=""
-                    id=$(echo "$cries" | awk -v n="$n" '$1 == n { print $2 }')
-                    [ -n "$id" ] || continue
-                    args="--cry $id";;
+                    args=$(echo "$cries" | awk -v n="$n" '$1 == n { $1 = ""; print }')
+                    [ -n "$args" ] || continue;;
         littleroot) src=songs/mus_littleroot.s;;
         groudon)    src=songs/mus_weather_groudon.s;;
         credits|mt_chimney|rg_vs_trainer|vs_trainer|vs_wild) src=songs/mus_$n.s;;

@@ -18,7 +18,7 @@ tooling; the plugin builds without it.
 | `tools/probe_diff.py` | Diffs the PSG register writes of a probe log against `poryaaaa_render --song ... --psg-log <file>`, write by write, in cycles. The check that the timing model reproduces mgba's write cycles. |
 | `../test_song_parser.c` (`poryaaaa_song_tests`) | Byte-exact check of the `.s` parser (`plugin/m4a_song.c`) against the ROM: every song under `build/accuracy/rom/{micro,songs}` is parsed, relocated to its address from `accuracy_test.map` and compared with `accuracy_test.gba`. Runs as part of the `accuracy` target. |
 | `tools/gen_micro_midis.py` | Generates `rom/micro/*.mid` and `micro.cfg`. Re-run after editing; then rebuild the ROM. |
-| `songs.json` | Vanilla corpus (name, type, seconds, note). Songs: PSG + DirectSound (littleroot), pure PSG (weather_groudon), DirectSound-heavy battle (vs_wild), noise (mt_chimney), FRLG drumset (rg_vs_trainer), MEMACC (vs_trainer), long (credits, 60 s). Sound effects (`"type": "se"`, played by `m4aSongNumStart` on the player `sound/song_table.inc` names, which the runner passes to `poryaaaa_render --player`): se_exp and se_faint (SE1, 3 tracks), se_contest_place and se_truck_unload (SE2, 9 tracks), se_low_health and se_rain_stop (SE3, 1 track). Cries (`"type": "cry"`, `"id"` = the gCryTable index; the ROM's `StartCry` with `PlayCryInternal`'s CRY_MODE_NORMAL defaults, `poryaaaa_render --cry N`: the cry song template on cry player 0, `plugin/m4a_cry.c`): cry_pidgey (the shortest sample), cry_bulbasaur, cry_wailord, cry_jynx (the longest; no cry sample loops). Cries are the only DPCM (compressed) material besides the `pcm_cmp` micro-test. |
+| `songs.json` | Vanilla corpus (name, type, seconds, note). Songs: PSG + DirectSound (littleroot), pure PSG (weather_groudon), DirectSound-heavy battle (vs_wild), noise (mt_chimney), FRLG drumset (rg_vs_trainer), MEMACC (vs_trainer), long (credits, 60 s). Sound effects (`"type": "se"`, played by `m4aSongNumStart` on the player `sound/song_table.inc` names, which the runner passes to `poryaaaa_render --player`): se_exp and se_faint (SE1, 3 tracks), se_contest_place and se_truck_unload (SE2, 9 tracks), se_low_health and se_rain_stop (SE3, 1 track). Cries (`"type": "cry"`, `"id"` = the gCryTable index; the ROM's `StartCry` with `PlayCryInternal`'s CRY_MODE_NORMAL defaults, `poryaaaa_render --cry N`: the cry song template on cry player 0, `plugin/m4a_cry.c`): cry_pidgey (the shortest sample), cry_bulbasaur, cry_wailord, cry_jynx (the longest; no cry sample loops), and three of `PlayCryInternal`'s other parameter values (`"pitch"` / `"pan"` / `"volume"` keys): cry_jynx_faint (pitch 14440, the sample outliving the 140-tick EOT), cry_bulbasaur_howl (pitch 15800, pan 63), cry_pidgey_quiet (volume 90). Cries are the only DPCM (compressed) material besides the `pcm_cmp` micro-test. |
 | `refs/micro/` | Committed micro-test references (FLAC) and `manifest.json` (ROM hash, mgba version). Lets the micro-tests run without an mgba build. |
 | `baselines/` | Saved reports. |
 
@@ -70,6 +70,12 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   0, pitch 15360, length 140, priority 10), poryaaaa through `poryaaaa_render
   --cry N` (the cry song template with the cry's DPCM sample as voice 0, on
   cry player 0).  Cries have no MIDI: `--input midi` skips them with a
-  message.  `--tests cry` runs them alone.  To probe one: `mgba_probe ... 180
-  1 N build/probe/syms.nm gPokemonCryMusicPlayers` and `probe_mplay.py
-  --player CRY0`; render with `--cry N` for the diffs.
+  message.  `--tests cry` runs them alone.  Optional `"pitch"`, `"pan"`,
+  `"volume"` keys are `SetPokemonCryPitch` / `Panpot` / `Volume`'s
+  arguments (the values `PlayCryInternal`'s modes use: pitches
+  14440..15800, volumes 70 / 90 / 120); the runner passes them to both
+  renderers (`mgba_render --pitch/--pan/--volume`, `poryaaaa_render
+  --cry-pitch/--cry-pan/--cry-volume`).  To probe one: `mgba_probe ... 180
+  1 N build/probe/syms.nm gPokemonCryMusicPlayers [pitch [pan [volume]]]`
+  and `probe_mplay.py --player CRY0`; render with `--cry N` (and the same
+  `--cry-*` flags) for the diffs.

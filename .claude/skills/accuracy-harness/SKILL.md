@@ -283,6 +283,12 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   one: `mgba_probe ... 180 1 N build/probe/syms.nm gPokemonCryMusicPlayers`
   (type 1 = cry) and `probe_mplay.py --player CRY0 ...`; render with
   `--cry N` for the entry / cmd / track diffs (cries have no PSG writes).
+  Optional `"pitch"`, `"pan"`, `"volume"` keys (SetPokemonCryPitch /
+  Panpot / Volume's arguments; take the values from `PlayCryInternal`'s
+  modes in `src/sound.c`, never invented ones) go to both renderers
+  (`mgba_render --pitch/--pan/--volume`, `poryaaaa_render --cry-pitch/
+  --cry-pan/--cry-volume`) and to the probe as its ninth / tenth / eleventh
+  arguments after the player symbol.
   Cry samples are 10512 Hz DPCM, none loops, the longest (Jynx) ends
   before the 140-tick EOT; the residual of a cry is the PCM
   scheduler-lateness floor (one-sample runs at the `.events` slot

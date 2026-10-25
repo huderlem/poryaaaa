@@ -97,5 +97,30 @@
     "id": 123,
     "seconds": 3.0,
     "note": "the longest cry sample (23524 samples, 2.24 s), still over before the 140-tick EOT; no cry sample loops"
+  },
+  {
+    "name": "cry_jynx_faint",
+    "type": "cry",
+    "id": 123,
+    "pitch": 14440,
+    "seconds": 3.0,
+    "note": "Cry_Jynx at CRY_MODE_FAINT's pitch 14440 (TIE key 56, TUNE 116): the sample would run 2.75 s, so it is still sounding at the 140-tick EOT -- the first cry whose ply_endtie finds a chained channel holding the key (the measured +28) and whose release-0 cut is audible; ply_fine then unlinks the live channel"
+  },
+  {
+    "name": "cry_bulbasaur_howl",
+    "type": "cry",
+    "id": 0,
+    "pitch": 15800,
+    "pan": 63,
+    "seconds": 2.0,
+    "note": "Cry_Bulbasaur at CRY_MODE_HIGH_PITCH's pitch 15800 (TIE key 62, TUNE 28; Howl's pitch without its chorus / length / release) panned hard right (pan 63 as the game's opponent side, PAN byte 0x7F): a non-zero pan through ChnVolSetAsm"
+  },
+  {
+    "name": "cry_pidgey_quiet",
+    "type": "cry",
+    "id": 15,
+    "volume": 90,
+    "seconds": 2.0,
+    "note": "Cry_Pidgey at volume 90 (CRY_MODE_ENCOUNTER / HIGH_PITCH's value, VOL byte 0x5A) at the default pitch and pan"
   }
 ]
