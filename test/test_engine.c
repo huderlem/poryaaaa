@@ -6065,6 +6065,206 @@ static void test_gba_tempo_grid(void)
     free(wd);
 }
 
+/* One render of the MIDI path's LFO clock: an engine with no notes, track 0
+ * modulated (MOD 1, LFOS 1, so lfoSpeedC counts its LFO steps), the tempo
+ * events dispatched as poryaaaa_render dispatches them on the grid (each on
+ * its tick's grid frame's sample); `mechanism` is --gba-tempo-grid's
+ * m4a_engine_start_song_tempo at the origin and m4a_engine_set_tick_tempo,
+ * otherwise m4a_engine_set_tempo_bpm (the flag-off call).  steps[j] = the
+ * LFO steps on grid frame j (frame j + 3). */
+static void lfo_grid_steps(bool mechanism, bool latch, const int *tempoTick, const uint32_t *tempoUs,
+                           int nTempo, int nFrames, int *steps)
+{
+    const double rate = 48000.0;
+    M4AEngine engine;
+    m4a_engine_init(&engine, (float)rate);
+    m4a_engine_boot(&engine, true);
+    m4a_engine_set_quantize_events(&engine, latch);
+    m4a_engine_cc(&engine, 0, 0x15, 1);
+    m4a_engine_cc(&engine, 0, 0x1, 1);
+
+    float buf[2 * 4096];
+    uint64_t pos = 0;
+    uint64_t s0 = gba_tempo_grid_sample(0, rate);
+    m4a_engine_process(&engine, buf, buf + 4096, (int)s0);
+    pos = s0;
+    if (mechanism)
+        m4a_engine_start_song_tempo(&engine);
+
+    GbaTempoGrid g;
+    gba_tempo_grid_init(&g, 24, 24);
+    int k = 0;
+    uint64_t tick = 0;
+    for (int j = 0; j < nFrames; j++) {
+        /* the TEMPOs of grid frame j's ticks, in order */
+        while (k < nTempo) {
+            while (tick < (uint64_t)tempoTick[k])
+                gba_tempo_grid_frame(&g, tick++);
+            if (gba_tempo_grid_frame(&g, (uint64_t)tempoTick[k]) != j)
+                break;
+            gba_tempo_grid_set_tempo(&g, tempoUs[k]);
+            if (mechanism)
+                m4a_engine_set_tick_tempo(&engine, (uint16_t)gba_tempo_grid_tempo_i(tempoUs[k], 24));
+            else
+                m4a_engine_set_tempo_bpm(&engine, 60000000.0 / tempoUs[k]);
+            k++;
+        }
+        uint8_t before = engine.tracks[0].lfoSpeedC;
+        uint64_t next = s0 + gba_tempo_grid_sample(j + 1, rate) - gba_tempo_grid_sample(0, rate);
+        m4a_engine_process(&engine, buf, buf + 4096, (int)(next - pos));
+        pos = next;
+        steps[j] = (uint8_t)(engine.tracks[0].lfoSpeedC - before);
+    }
+    m4a_engine_destroy(&engine);
+}
+
+/* The walker's ticks per grid frame for the same tempo list. */
+static void lfo_grid_walker(const int *tempoTick, const uint32_t *tempoUs, int nTempo, int nFrames, int *ticks)
+{
+    GbaTempoGrid g;
+    gba_tempo_grid_init(&g, 24, 24);
+    memset(ticks, 0, sizeof(int) * (size_t)nFrames);
+    int k = 0;
+    for (uint64_t n = 0;; n++) {
+        int64_t f = gba_tempo_grid_frame(&g, n);
+        if (f >= nFrames)
+            break;
+        ticks[f]++;
+        while (k < nTempo && (uint64_t)tempoTick[k] == n)
+            gba_tempo_grid_set_tempo(&g, tempoUs[k++]);
+    }
+}
+
+/*
+ * poryaaaa_render --gba-tempo-grid also puts the engine's own tempo
+ * accumulator (the MIDI path's LFO clock) on the walker's frames: MPlayStart's
+ * tempoI 150 / tempoC 0 at the origin, and a TEMPO dispatched on its tick's
+ * frame counting from the next frame's add (ply_tempo runs after
+ * _081DD86C's add).  Without the two calls the accumulator runs as before:
+ * from the boot's tick, the tempo added on the frame it is dispatched
+ * before.  A sequencer-driven engine ignores both (plan, milestone 5 slice
+ * 3b).
+ */
+static void test_engine_lfo_grid(void)
+{
+    printf("Testing the engine's LFO clock on the --gba-tempo-grid frames...\n");
+    char msg[160];
+    enum { NF = 400 };
+    int steps[NF], ticks[NF];
+
+    static const int t0[] = { 0 };
+    static const uint32_t us120[] = { 500000 }, us240[] = { 250000 };
+    static const int tChange[] = { 0, 2 };
+    static const uint32_t usChange[] = { 250000, 1000000 };
+    static const uint32_t us512[] = { 117188 };   /* TEMPO byte 0 */
+    struct { const char *name; const int *tick; const uint32_t *us; int n; } cases[] = {
+        { "120", t0, us120, 1 },
+        { "240", t0, us240, 1 },
+        { "240 -> 60 at tick 2", tChange, usChange, 2 },
+        { "512 (tempo 0)", t0, us512, 1 },
+    };
+    for (int q = 0; q < 2; q++) {
+        for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+            lfo_grid_steps(true, q == 1, cases[c].tick, cases[c].us, cases[c].n, NF, steps);
+            lfo_grid_walker(cases[c].tick, cases[c].us, cases[c].n, NF, ticks);
+            int bad = -1;
+            for (int j = 0; j < NF && bad < 0; j++)
+                if (steps[j] != ticks[j])
+                    bad = j;
+            snprintf(msg, sizeof(msg), "%s%s: the LFO steps on the walker's frames, grid frames 0 .. %d (first mismatch %d)",
+                     cases[c].name, q ? " latched" : "", NF - 1, bad);
+            ASSERT(bad < 0, msg);
+        }
+    }
+
+    /* The frames, spelled out (grid frame j = frame j + 3) */
+    lfo_grid_steps(true, false, t0, us120, 1, NF, steps);
+    static const int on120[] = { 0, 2, 3, 4, 5, 7, 8, 9, 10, 12 };
+    int ok = 1, n = 0;
+    for (int j = 0; j < 13; j++)
+        if (steps[j]) ok &= n < 10 && on120[n++] == j && steps[j] == 1;
+    ASSERT(ok && n == 10, "120: LFO steps on frames 3, 5, 6, 7, 8, 10, ... (3 + ceil(1.25 n))");
+    lfo_grid_steps(true, false, t0, us240, 1, NF, steps);
+    static const int per240[] = { 1, 1, 2, 1, 2, 2, 1, 2 };
+    ok = 1;
+    for (int j = 0; j < 8; j++) ok &= steps[j] == per240[j];
+    ASSERT(ok, "240: 1, 1, 2, 1, 2, 2, 1, 2 steps on frames 3 .. 10");
+    lfo_grid_steps(true, false, tChange, usChange, 2, NF, steps);
+    static const int perChange[] = { 1, 1, 2, 0, 1, 0, 0, 1, 0, 1 };
+    ok = 1;
+    for (int j = 0; j < 10; j++) ok &= steps[j] == perChange[j];
+    ASSERT(ok, "240 -> 60 at tick 2: tick 3 still on frame 5 (two steps), then frames 7, 10, 12");
+    lfo_grid_steps(true, false, t0, us512, 1, NF, steps);
+    ok = steps[0] == 1;
+    for (int j = 1; j < NF; j++) ok &= steps[j] == 0;
+    ASSERT(ok, "tempo 0: the step of tick 0, then none (the accumulator stops, as the walker)");
+
+    /* Without the calls: as before the change.  The boot's frame-2 tick has
+     * taken MPlayStart's 150, the tempo dispatched before frame 3 is added
+     * on frame 3. */
+    for (int q = 0; q < 2; q++) {
+        lfo_grid_steps(false, q == 1, t0, us120, 1, NF, steps);
+        ok = 1; n = 0;
+        for (int j = 0; j < NF; j++) {
+            if (!steps[j]) continue;
+            ok &= steps[j] == 1 && j == 1 + n + n / 4;   /* frame 4 + n + floor(n / 4) */
+            n++;
+        }
+        snprintf(msg, sizeof(msg), "flag off%s, 120: LFO step n on frame 4 + n + floor(n / 4) (%d steps)", q ? " latched" : "", n);
+        ASSERT(ok && n == 320, msg);
+        lfo_grid_steps(false, q == 1, t0, us240, 1, NF, steps);
+        static const int old240[] = { 1, 2, 1, 2, 2, 1, 2, 1 };
+        ok = 1;
+        for (int j = 0; j < 8; j++) ok &= steps[j] == old240[j];
+        snprintf(msg, sizeof(msg), "flag off%s, 240: 1, 2, 1, 2, 2, 1, 2, 1 steps on frames 3 .. 10", q ? " latched" : "");
+        ASSERT(ok, msg);
+        lfo_grid_steps(false, q == 1, tChange, usChange, 2, NF, steps);
+        static const int oldChange[] = { 1, 2, 0, 1, 0, 0, 1, 0, 1 };
+        ok = 1;
+        for (int j = 0; j < 9; j++) ok &= steps[j] == oldChange[j];
+        snprintf(msg, sizeof(msg), "flag off%s, 240 -> 60 at tick 2: 1, 2, 0, 1, 0, 0, 1, 0, 1 (60 added on its own frame)",
+                 q ? " latched" : "");
+        ASSERT(ok, msg);
+    }
+
+    /* A sequencer-driven engine: both calls are no-ops, its LFO is the
+     * sequencer's (one step per song tick) and the engine's accumulator
+     * stays where it was. */
+    ToneData voices[128];
+    seq_test_voices(voices);
+    M4ASong *song = seq_song(
+        "\t.byte\tTEMPO , 75\n"
+        "\t.byte\t\tVOICE , 0\n"
+        "\t.byte\t\tLFOS  , 1\n"
+        "\t.byte\t\tMOD   , 64\n"
+        "\t.byte\t\tTIE   , Cn3 , v127\n"
+        "\t.byte\tW96\n"
+        "\t.byte\tW96\n"
+        "\t.byte\tEOT\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "sequencer song parses");
+    if (!song) return;
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+    engine.tempoI = 77;
+    engine.tempoC = 33;
+    for (int i = 0; i < 100; i++) {
+        if (i == 10) m4a_engine_start_song_tempo(&engine);
+        if (i == 20) m4a_engine_set_tick_tempo(&engine, 60);
+        m4a_engine_tick(&engine);
+    }
+    ASSERT(engine.tempoI == 77 && engine.tempoC == 33 && !engine.tempoINextSet,
+           "sequencer: start_song_tempo / set_tick_tempo leave the engine's accumulator alone");
+    ASSERT_EQ(engine.tracks[0].lfoSpeedC, 100, "sequencer: one LFO step per song tick, as without the calls");
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
 static void test_event_latch(void)
 {
     printf("Testing the MIDI event latch (quantizeEvents)...\n");
@@ -6872,6 +7072,7 @@ int main(void)
     test_latch_mode();
     test_gba_start_delay_origin();
     test_gba_tempo_grid();
+    test_engine_lfo_grid();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

@@ -504,6 +504,10 @@ struct M4AEngine {
     uint16_t tempoU;
     uint16_t tempoI;
     uint16_t tempoC;
+    /* m4a_engine_set_tick_tempo: a TEMPO of the coming tick, stored after
+     * the next frame's add (ply_tempo's order); unused by the plugin. */
+    bool     tempoINextSet;
+    uint16_t tempoINext;
 
     /* Loaded voice data */
     ToneData *voiceGroup;   /* array of 128 ToneData entries */
@@ -887,6 +891,16 @@ void m4a_engine_set_song_volume(M4AEngine *engine, uint8_t volume);
 /* Set tempo from DAW BPM.  The GBA relationship is tempoI ≈ BPM
  * (24 ticks per quarter note at ~59.7 Hz VBlank gives BPM ≈ tempoI). */
 void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm);
+
+/* poryaaaa_render --gba-tempo-grid (plan, milestone 5 slice 3b): the LFO
+ * clock on the ROM's tick grid.  start_song_tempo is MPlayStart's seed
+ * (tempoI 150, tempoC 0, nothing held), called at the song's origin before
+ * frame 3's SoundMain; set_tick_tempo is a TEMPO played in the coming tick
+ * (tempoI as ply_tempo stores it), held and stored after the next frame's
+ * add, so it first counts on the frame after.  Both are no-ops while a
+ * sequencer drives the engine; the plugin uses set_tempo_bpm. */
+void m4a_engine_start_song_tempo(M4AEngine *engine);
+void m4a_engine_set_tick_tempo(M4AEngine *engine, uint16_t tempoI);
 
 /* Audio processing */
 void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamples);

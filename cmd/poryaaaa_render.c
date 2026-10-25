@@ -811,8 +811,9 @@ static void print_usage(const char *prog)
         "                              time the tempo accumulator reaches 150, MPlayStart's 150\n"
         "                              before the first TEMPO) instead of at the MIDI's exact\n"
         "                              tempo (at an even BPM about 0.46 %% faster; mid2agb drops\n"
-        "                              an odd BPM by one).  With --gba-start-delay each tick\n"
-        "                              lands on the ROM's frame.\n"
+        "                              an odd BPM by one), the LFO stepping on the same ticks\n"
+        "                              (MPlayStart's tempo at the song start).  With\n"
+        "                              --gba-start-delay each tick lands on the ROM's frame.\n"
         "                              Default: the exact tempo map\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
@@ -1378,9 +1379,11 @@ static uint64_t grid_expand_limit(uint64_t totalSamples, const TempoEvent *tempo
     return (uint64_t)(k * ((double)totalSamples + (4.0 * frameSec + 2.0 * clockSec) * sampleRate)) + 1;
 }
 
-/* Dispatch one RenderEvent to the engine */
+/* Dispatch one RenderEvent to the engine.  gridClocksPerBeat != 0
+ * (--gba-tempo-grid): a TEMPO the ROM plays reaches the engine as the
+ * grid's tempoI from the next frame's add, the others not at all. */
 static void dispatch_event(M4AEngine *engine, const RenderEvent *ev,
-                            int useTrackIndex)
+                            int useTrackIndex, uint32_t gridClocksPerBeat)
 {
     /* For Type 1 MIDIs, use the SMF track number as the engine track index
      * so that tracks sharing the same MIDI channel get separate engine tracks.
@@ -1389,6 +1392,12 @@ static void dispatch_event(M4AEngine *engine, const RenderEvent *ev,
 
     switch (ev->type) {
     case RENDER_EVT_TEMPO: /* Synthetic tempo change — drives LFO/portamento rate */
+        if (gridClocksPerBeat) {
+            if (ev->gridTempoUs != 0)
+                m4a_engine_set_tick_tempo(engine,
+                                          (uint16_t)gba_tempo_grid_tempo_i(ev->gridTempoUs, gridClocksPerBeat));
+            break;
+        }
         m4a_engine_set_tempo_bpm(engine,
                                  (double)(((int)ev->data1 << 7) | ev->data0));
         break;
@@ -2145,18 +2154,31 @@ oom:
     fflush(stdout);
 
     uint64_t samplePos = 0;
+    /* --gba-tempo-grid: the engine's LFO clock starts with the song, as
+     * MPlayStart seeds it, at the origin (before frame 3's SoundMain). */
+    const uint32_t gridClocksPerBeat = gbaTempoGrid ? (extendedClocks ? 48 : 24) : 0;
+    bool songTempoStarted = !gbaTempoGrid;
     for (int i = 0; i < renderEvtCount; i++) {
         const RenderEvent *ev = &renderEvts[i];
 
         uint64_t evPos = ev->samplePos + midiOrigin;
         if (evPos >= totalSamples) break; /* safety: don't write past buffer */
 
+        if (!songTempoStarted) {
+            if (midiOrigin > samplePos) {
+                render_frames(&engine, outL, outR, samplePos, midiOrigin - samplePos);
+                samplePos = midiOrigin;
+            }
+            m4a_engine_start_song_tempo(&engine);
+            songTempoStarted = true;
+        }
+
         /* Render audio up to this event */
         if (evPos > samplePos)
             render_frames(&engine, outL, outR, samplePos, evPos - samplePos);
 
         samplePos = evPos;
-        dispatch_event(&engine, ev, useTrackIndex);
+        dispatch_event(&engine, ev, useTrackIndex, gridClocksPerBeat);
     }
 
     /* Render remaining frames (tail / fadeout section) */

@@ -6657,6 +6657,331 @@ conversion and a `-E` switch exist, possibly as one "as the game"
 preset with the start delay.  The tempo-grid pair is now the midi
 baseline the next slice compares against; the aligned pair is history.
 
+### Milestone 5 slice 3b: the engine's LFO grid (2026-10-25)
+
+Scope, small on purpose: the engine's `!seq` tempo accumulator (the MIDI
+path's LFO and opt-in portamento clock) steps on the frames of the
+renderer's grid walker, under `poryaaaa_render --gba-tempo-grid` only.
+Out of scope: the LFO / CgbSound order (slice 1 item 6), the CgbSound
+entry, per-tick command batching (a VOL before a note, ply_fine's unlink),
+mid2agb's note-length conversion and `-E`, `-P`; the plugin (its tempo
+comes from the host per block: `m4a_plugin.c`'s `m4a_engine_set_tempo_bpm`
+path stays); the sequencer path and the flag-off renderer (byte-identical).
+Before any change the baselines reproduced: `claim_check.sh` against
+`2026-10-25_cry-over-song-rows.json` 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0 (0 field differences on 66 rows), unit
+1824/1824, blip 49112/0, songs 561/561; `accuracy.py --input midi` 0 field
+differences on 44 rows against `2026-10-25_midi-path-tempo-grid.json`,
+with `--midi-quantize` against `-tempo-grid-latch.json`, with
+`--no-gba-tempo-grid` against `-aligned.json` and `-aligned-latch.json`.
+
+**Step 1, the reading (before the code).**
+
+*MPlayMain's per-track tick* (`~/pokeemerald/src/m4a_1.s` 1173-1359).
+For each track with `MPT_FLG_EXIST`: the chain walk (gate countdown,
+`_081DD892`), the track start (`MPT_FLG_START`: Clear64byte, lfoSpeed 22),
+then the commands while `wait == 0` (`_081DD8E0`); after a command the
+track is re-checked (`ldrb flags; cmp 0; beq _081DD994`: a FINE, which
+clears the flags, skips the rest of the tick); then `wait -= 1` and **the
+LFO step** (`_081DD938` .. `_081DD990`): nothing if lfoSpeed or mod is 0;
+else if lfoDelayC != 0 decrement it and stop; else `lfoSpeedC += lfoSpeed`
+(the untruncated sum kept in r1), the triangle, `modM' = mod x tri >> 6`,
+and on a change of modM's low byte store it and flag PITCHG (modT 0) or
+VOLCHG.  So in one tick a track's note-on comes **before** its LFO step.
+After all ticks of the frame (the `while (tempoC >= 150)` loop), one
+VOLCHG / PITCHG pass (`_081DD9C8`): TrkVolPitSet, then each chained
+channel's volume / frequency (`ChnVolSetAsm`, MidiKeyToFreq or the CGB
+freq with `MO_PIT` / `MO_VOL`), flags `&= 0xF0`.  *ply_note*
+(`_081DDC54`): the new channel linked, `lfoDelayC = lfoDelay`, and with a
+delay `clear_modM` (modM = lfoSpeedC = 0, PITCHG or VOLCHG), then
+TrkVolPitSet.  *ply_mod* / *ply_lfos* (1887-1909): store; a 0 calls
+clear_modM.  *ply_lfodl* (1019-1025): stores lfoDelay only (the next note
+loads it).  *ply_modt* (1027-1041): on a change, VOLCHG | PITCHG.
+*ply_tempo* (920-931): tempoD = byte << 1, tempoI = tempoD x tempoU >> 8,
+read by the next frame's add (`_081DD86C`, before the frame's first tick).
+*MPlayStart* (`m4a.c` 634-637): tempoD = tempoI = 150, tempoU 0x100,
+tempoC 0.  *MPlayProcessPortamento* (pokeemerald ccd2ad2e, the opt-in
+portamento's source): called after the VOLCHG / PITCHG pass, so it reads
+the tempoI a TEMPO of this frame's ticks already stored.
+
+*The engine* (`plugin/m4a_engine.c`).  `m4a_engine_tick`: gates, the
+latched drain, CgbSound, then `if (!seq) { tempoC += tempoI; while (tempoC
+>= 150) { tempoC -= 150; m4a_lfo_tick } }`, portamento (`elapsed +=
+tempoI`), PWM.  `m4a_lfo_tick` is the LFO step with the VOLCHG / PITCHG
+pass folded in (on a modM change it updates the track and its channels at
+once; the frame's last step wins, as the ROM's single pass).  The note-on
+(`note_on_restart_lfo_delay`, 1069-1083) sets lfoDelayC and, with a delay,
+clear_modM; MOD (CC 1) / LFOS (0x15) store and clear on 0; LFODL (0x1A)
+stores; MODT (0x16) re-evaluates on a change -- the ROM's handlers, applied
+when dispatched or drained, i.e. before the frame's LFO steps, as the
+ROM's commands precede the LFO step.  `m4a_engine_set_tempo_bpm`:
+tempoI = round(bpm), at once, so it is added on the frame it is
+dispatched before.  Callers: the renderer's RENDER_EVT_TEMPO (every SMF
+track's tempos and the synthetic 120 BPM default at sample 0) and the
+plugin's `plugin_process` per block with the host tempo.  Init: tempoI
+150, tempoC 0; `m4a_engine_boot` ends right after frame 2's SoundMain, and
+that tick consumes the 150 (tempoC 0, one LFO step on frame 2).
+
+*The renderer* (`cmd/poryaaaa_render.c`).  `make_tempo_event` carries
+round(BPM); `parse_midi` prepends the 120 default when the file has no
+tempo at tick 0 and sets `gridTempoUs` on first-MTrk tempos (0 on the
+default, other tracks', and since slice 3a's review a TEMPO on the loop
+end's tick); with the grid every event sits at its grid frame's dispatch
+sample (between frame j - 1's SoundMain and frame j's, grid frame 0 at
+the origin).
+
+*Today* (grid on): the TEMPO of tick 0 is dispatched before frame 3's
+SoundMain and frame 3 adds it, from tempoC 0 left by the boot's tick.  At
+120 the engine's LFO steps on frames **4, 5, 6, 7, 9, ...** (4 + n +
+floor(n / 4)) where the ROM's (and the walker's) ticks are on **3, 5, 6, 7,
+8, 10, ...** (3 + ceil(1.25 n)): one frame late on n = 0 mod 4.  At 240
+the steps per frame from frame 3 are 1, 2, 1, 2, 2, 1, 2, 1, ... where the
+walker's are 1, 1, 2, 1, 2, 2, 1, 2, ...  A tempo change (240, then 60 at
+tick 2): today 1, 2, 0, 1, 0, 0, 1, 0, 1 steps on grid frames 0 .. 8, the
+walker 1, 1, 2, 0, 1, 0, 0, 1, 0, 1 on 0 .. 9 (written first with 0, 0, 1 at
+the end: 60 is 2.5 frames a tick, the unit test's walker corrected it).
+
+*The mechanism.*  Two engine calls, used by the renderer under
+`--gba-tempo-grid` only:
+- `m4a_engine_start_song_tempo`: MPlayStart's tempo (tempoD = tempoI =
+  150, tempoU 0x100, tempoC 0, no TEMPO pending), called once at the
+  origin (output sample O, before frame 3's SoundMain; without
+  `--gba-start-delay` sample 0, which the boot also leaves short of frame
+  3's SoundMain, so both forms start the engine's grid on frame 3).
+- `m4a_engine_set_tick_tempo(tempoI)`: a TEMPO played in the coming tick:
+  the value is held and stored after the next frame's add (the `!seq`
+  block: `tempoC += tempoI`, then the held value, then the ticks), as
+  ply_tempo's store lands after `_081DD86C`'s add.  Several before one
+  SoundMain: the last wins, as the ROM's last ply_tempo of the frame.
+The renderer passes `gba_tempo_grid_tempo_i(gridTempoUs, clocksPerBeat)`
+for a TEMPO with `gridTempoUs != 0` and nothing for the others (the
+synthetic default, other tracks' tempos, the loop end's), so the engine
+runs the grid's tempoI (mid2agb's byte doubled, -X included, MPlayStart's
+150 until the first TEMPO).  Then the engine's accumulator is the
+walker's, frame for frame: both start at frame 3 with tempoC 0 and add
+150, both take a TEMPO dispatched on grid frame j (the frame of its tick)
+from frame j + 1's add, and both run `while (tempoC >= 150)`.  A TEMPO
+byte of 0 stops both.  Why it is the ROM's: it is MPlayStart's seed and
+ply_tempo's store order, nothing fitted.  Untouched: the plugin and the
+flag-off renderer never call the two functions (`set_tempo_bpm` keeps its
+dispatch-frame tempo, and with nothing held the `!seq` block runs as
+today); a sequencer-driven engine ignores both (they return under
+`externalSequencer`; its tempo is the sequencer's own).
+*Portamento* (opt-in, off in the harness): it adds `engine->tempoI` after
+the LFO block, so on the frame a TEMPO is dispatched before it adds the
+new tempoI -- today too, and as MPlayProcessPortamento after the
+frame's ticks.  What changes for it: MPlayStart's 150 until the first
+TEMPO (the 120 default is gone) and the grid's tempoI.
+*Not covered* (within one frame, not the frames): with two ticks in a
+frame the ROM interleaves (tick n's commands, its LFO step, tick n + 1's
+commands, its step) where the engine has all of the frame's events before
+its steps.  It differs only for an LFO-state command in the second tick:
+a MOD from 0 (the ROM skips tick n's step), an LFOS or MODT change on a
+modulated track, a note-on with an LFO delay.  On the corpus (MIDIs walked
+on the grid in their windows; LFODL is never set): vs_wild 7 MOD 0 -> 5
+(the first on frame 903, 15.1 s), rg_vs_trainer 2 MOD 0 -> 4 (frame
+903); none elsewhere.
+
+*Predictions* (grid on, both latch forms the same; flag off and the
+song input byte-identical):
+
+1. **Flag off: 0 field differences** on both aligned runs; the song gate
+   unchanged (59 / 0 moved / 57/66 / 0 regressions / every row 0.0).
+2. **Rows without MOD byte-identical** to their tempo-grid WAVs: every
+   micro row but the five lfo rows (no other micro MIDI sets MOD) and all
+   six SEs (none sets MOD in its MIDI) -- 32 WAVs.  The engine's LFO steps
+   only on a track with mod and lfoSpeed set, and portamento is off.
+3. **lfo_vib, lfo_trem, lfo_pan: -inf, bit-identical to their `--song`
+   renders** over the whole file (PCM voice 10; the LFO grid was their
+   only difference since slice 3a: no LFO delay, MOD 0 before the tick-96
+   note end and before FINE, so ply_fine's unlink meets no LFO).
+4. **lfo_delay: identical to its `--song` render up to tick 96** (frame
+   123) and not after: tick 96 carries the note's end and FINE, and
+   ply_fine clears the track's flags, so the ROM's track takes no LFO step
+   from tick 96 on (the `beq _081DD994` after a command) while the MIDI
+   path's track 0 keeps mod 24 and steps through the release (voice 10's
+   release 165, about 12 frames).  The ply_fine family (as vol), not the
+   grid.  Null deep but not -inf: -20 .. -35.
+5. **lfo_psg**: changes from frame 3 (its first LFO step), still far from
+   passing (the LFO value reaches the PSG one CgbSound late, item 6, and
+   the CgbSound entry): moves, sign not predicted.
+6. **The songs** (all seven set MOD): change, first difference from the
+   tempo-grid render on frame 3 or 4 on any song with MOD at tick 0 on a
+   track, small null changes only (their residual is the PSG entry, the
+   VOL batching and the track numbering), drift 0.0 stays; none passes.
+7. **The latch**: grid-on runs with and without `--midi-quantize`
+   byte-identical (the held tempo is not latched and the latched drain
+   precedes the LFO block in either form).
+
+**Step 2, the code.**  `plugin/m4a_engine.h` / `.c`: `tempoINextSet` /
+`tempoINext` in M4AEngine; `m4a_engine_start_song_tempo` and
+`m4a_engine_set_tick_tempo` (both return under `externalSequencer`); in
+`m4a_engine_tick`'s `!seq` block the held tempoI is stored after
+`tempoC += tempoI`, before the `while`.  `cmd/poryaaaa_render.c`:
+`dispatch_event` takes `gridClocksPerBeat` (0 without the flag): with
+it a TEMPO with `gridTempoUs != 0` calls `m4a_engine_set_tick_tempo(
+gba_tempo_grid_tempo_i(us, 24 or 48))` and any other TEMPO nothing;
+without it `m4a_engine_set_tempo_bpm` as before.  The render loop calls
+`m4a_engine_start_song_tempo` once before the first event, after
+rendering to the origin (the first event is at the origin under the grid,
+so the render chunks are the same).  The usage text of `--gba-tempo-grid`
+says the LFO steps on the same ticks.  No new flag: the walker's frames
+are what `--gba-tempo-grid` promises, and the engine's LFO is part of
+"each tick on the frame the game would".  The plugin and the sequencer
+code are untouched (`m4a_plugin.c` not in the diff).
+
+**Step 3, the unit test** (`test_engine_lfo_grid`, 21 assertions): an
+engine with no notes and track 0 at MOD 1 / LFOS 1 (lfoSpeedC counts the
+LFO steps), tempo events dispatched on their tick's grid-frame sample as
+the renderer does; with the two calls, the steps per frame equal the
+walker's ticks per frame (`gba_tempo_grid_frame`) on grid frames 0 .. 399
+for 120, 240, 240 -> 60 at tick 2 and 512 BPM (tempo 0), latched and not;
+spelled out: 120 on frames 3, 5, 6, 7, 8, 10, ...; 240 1, 1, 2, 1, 2, 2,
+1, 2 on frames 3 .. 10; 240 -> 60 1, 1, 2, 0, 1, 0, 0, 1, 0, 1; tempo 0
+one step then none.  Without the calls (`m4a_engine_set_tempo_bpm`, both
+latch forms): 120 step n on frame 4 + n + floor(n / 4) (320 steps in 400
+frames), 240 1, 2, 1, 2, 2, 1, 2, 1, the change 1, 2, 0, 1, 0, 0, 1, 0, 1
+-- today's numbers of step 1.  A sequencer-driven engine: the calls
+leave tempoI / tempoC and nothing held, one LFO step per song tick (100
+in 100).  Unit **1845/1845** (1824 + 21).
+
+**Step 4, the measurement.**  Song-input gate: `claim_check.sh` against
+`2026-10-25_cry-over-song-rows.json` 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0, 0 field differences on 66 rows; unit
+1845/1845, blip 49112/0, songs 561/561.  Flag off: `--no-gba-tempo-grid`
+0 field differences on 44 rows against `-aligned.json`, with
+`--midi-quantize` against `-aligned-latch.json`, and the 44 WAVs of each
+byte-identical to the runs before the change.  Grid on (the default):
+`baselines/2026-10-25_midi-path-lfo-grid.json` / `.txt` and
+`-lfo-grid-latch.json` / `.txt`, **17/44** (tempo-grid 14/44: + lfo_vib,
+lfo_trem, lfo_pan); the latched run 0 field differences against the
+unlatched one and its 44 WAVs byte-identical.  `compare_reports.py`
+tempo-grid -> lfo-grid: 1 regression over 1 dB, groudon (below).  Both
+latch forms are this table:
+
+| test | lag ms | gain dB | null | worst1s | drift | tempo-grid lag / null / worst1s / drift | WAV |
+|------|-------:|--------:|-----:|--------:|------:|------------------------------------:|-----|
+| sq1 | 0.0 | -0.0 | -37.2 | -32.9 | - | 0.0 / -37.2 / -32.9 / - | identical |
+| sq1_env | 0.2 | -2.2 | -3.5 | -1.2 | - | 0.2 / -3.5 / -1.2 / - | identical |
+| sq1_sweep | 0.0 | -0.0 | -43.1 | -37.1 | - | 0.0 / -43.1 / -37.1 / - | identical |
+| sq1_alt | 0.0 | -0.0 | -35.5 | -30.6 | - | 0.0 / -35.5 / -30.6 / - | identical |
+| sq2 | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| sq2_alt | 0.0 | -0.0 | -34.5 | -29.7 | - | 0.0 / -34.5 / -29.7 / - | identical |
+| wave | 0.2 | -0.3 | -11.8 | -9.4 | - | 0.2 / -11.8 / -9.4 / - | identical |
+| wave_alt | 0.1 | -0.4 | -10.6 | -8.2 | - | 0.1 / -10.6 / -8.2 / - | identical |
+| noise | 0.0 | -1.5 | -5.1 | -3.1 | - | 0.0 / -5.1 / -3.1 / - | identical |
+| noise7 | 0.0 | -1.2 | -6.0 | -2.9 | - | 0.0 / -6.0 / -2.9 / - | identical |
+| pcm | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| pcm_hi | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| pcm_adsr | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| pcm_drum | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| pcm_cmp | 0.0 | 0.0 | -55.0 | -50.2 | - | 0.0 / -55.0 / -50.2 / - | identical |
+| pcm_reverb | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| pcm_chord | 0.0 | -0.0 | -55.7 | -51.9 | - | 0.0 / -55.7 / -51.9 / - | identical |
+| pcm_bass | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| pan | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| vol | 0.0 | -0.0 | -47.2 | -41.4 | - | 0.0 / -47.2 / -41.4 / - | identical |
+| vel | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| bend | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| lfo_vib | 0.0 | 0.0 | -inf | -inf | - | -0.1 / -2.0 / -0.7 / - | moved |
+| lfo_trem | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -27.4 / -26.2 / - | moved |
+| lfo_pan | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -27.5 / -26.4 / - | moved |
+| lfo_delay | 0.0 | -0.0 | -20.3 | -7.0 | - | -3.5 / -2.3 / -1.2 / - | moved |
+| lfo_psg | 21.6 | -7.2 | 0.4 | 2.3 | - | -18.8 / 0.2 / 1.0 / - | moved |
+| tune | 0.0 | 0.0 | -inf | -inf | - | 0.0 / -inf / -inf / - | identical |
+| tune_psg | 0.0 | -0.0 | -33.5 | -26.5 | - | 0.0 / -33.5 / -26.5 / - | identical |
+| psg_mix | 0.0 | -2.1 | -3.8 | -2.0 | - | 0.0 / -3.8 / -2.0 / - | identical |
+| pcm_psg | 0.0 | -0.1 | -17.3 | -14.4 | - | 0.0 / -17.3 / -14.4 / - | identical |
+| mus_littleroot | 0.0 | -0.4 | -10.3 | -6.3 | 0.0 | 0.0 / -9.3 / -4.0 / 0.0 | moved |
+| mus_weather_groudon | -2.4 | -4.2 | -1.1 | 2.9 | 0.0 | -14.3 / -2.7 / 1.2 / -0.5 | moved |
+| mus_vs_wild | 0.0 | -0.4 | -10.1 | -5.0 | 0.0 | 0.0 / -10.0 / -5.0 / 0.0 | moved |
+| mus_mt_chimney | 0.0 | -2.2 | -3.6 | -0.2 | 0.0 | 0.0 / -2.6 / 2.0 / 0.0 | moved |
+| mus_rg_vs_trainer | 0.0 | -1.5 | -5.1 | -0.4 | 0.0 | 0.0 / -4.9 / -0.7 / 0.0 | moved |
+| mus_vs_trainer | 0.0 | -0.2 | -12.7 | -4.7 | 0.0 | 0.0 / -12.4 / -4.7 / 0.0 | moved |
+| mus_credits | 0.0 | -0.1 | -14.4 | -7.0 | 0.0 | 0.0 / -14.4 / -7.0 / 0.0 | identical |
+| se_exp | 0.2 | -4.6 | -0.8 | 1.6 | - | 0.2 / -0.8 / 1.6 / - | identical |
+| se_faint | 0.0 | -1.3 | -5.5 | -2.4 | - | 0.0 / -5.5 / -2.4 / - | identical |
+| se_contest_place | 0.0 | -0.4 | -10.8 | -8.6 | - | 0.0 / -10.8 / -8.6 / - | identical |
+| se_truck_unload | 0.0 | -8.8 | 1.1 | 1.1 | - | 0.0 / 1.1 / 1.1 / - | identical |
+| se_low_health | 7.9 | -3.4 | -1.9 | -0.5 | - | 7.9 / -1.9 / -0.5 / - | identical |
+| se_rain_stop | 0.0 | 0.0 | -32.9 | -23.4 | - | 0.0 / -32.9 / -23.4 / - | identical |
+
+**Which predictions held.**
+
+1. *Flag off identical*: held (fields and WAVs; the song gate).
+2. *Rows without MOD byte-identical*: held, the 32 WAVs (26 micro rows,
+   six SEs) -- and a 33rd, credits: its MIDI sets MOD only after its
+   60 s window (none before ROM frame 4000, 67 s), so no track of
+   its render is modulated.  My "all seven songs set MOD" was the .s
+   count, not the window.
+3. *lfo_vib / lfo_trem / lfo_pan -inf, bit-identical to `--song`*:
+   **held** (the three WAVs identical to their `--song` renders sample
+   for sample; tempo-grid -2.0 / -27.4 / -27.5).
+4. *lfo_delay identical to `--song` up to tick 96*: **held**: first
+   difference from its `--song` render in output frame 124, the frame
+   after tick 96's SoundMain (frame 123), 7808 samples (the release),
+   max 5366; null -20.3 / worst -7.0 (tempo-grid -2.3 / -1.2), inside
+   the -20 .. -35 predicted, near its shallow end.
+5. *lfo_psg moves, still failing*: held (0.2 -> 0.4, worst 1.0 -> 2.3,
+   lag -18.8 -> 21.6: uncorrelated before and after); against its
+   `--song` render the first difference stays frame 3 (the CgbSound entry)
+   and the differing samples go 102316 -> 102743 (no closer).
+6. *The songs*: partly.  Each moved song's first difference from its
+   tempo-grid render is 1 .. 5 frames after its first MOD > 0 (the first
+   modM change): littleroot 71 (MOD at tick 45, frame 66), groudon 97
+   (96), vs_wild 731 (729), mt_chimney 21 (MOD 1 at tick 0 -- mod 1 needs
+   the triangle past 63 before modM moves), rg_vs_trainer 905 (903, the
+   two-tick-frame MOD 0 -> 4 of step 1's "not covered"), vs_trainer 1041
+   (1040); not "frame 3 or 4": only mt_chimney sets MOD at tick 0, and
+   at depth 1.  Against their `--song` renders the first difference is
+   unchanged on every song (frame 3, 13 or 20: the PSG entry, PSG note
+   frames) and the differing samples drop on six (littleroot 905383 ->
+   891267, mt_chimney 945808 -> 913310, vs_trainer 484653 -> 398897,
+   vs_wild 883499 -> 883497, rg_vs_trainer 957431 -> 957421, groudon
+   957183 -> 957079).  Nulls: littleroot -9.3 -> -10.3, mt_chimney -2.6 ->
+   -3.6, vs_trainer -12.4 -> -12.7, rg_vs_trainer -4.9 -> -5.1, vs_wild
+   -10.0 -> -10.1, groudon -2.7 -> -1.1 (worst 1.2 -> 2.9, lag -14.3 ->
+   -2.4, drift -0.5 -> 0.0): groudon is the pure-PSG song that does not
+   correlate (the skill: null and drift are noise there), and it moved
+   closer to its `--song` render, so its compare_reports "regression"
+   is the aligner's, not a step away from the ROM.  Drift 0.0 on all
+   seven.  None passes, as predicted.
+7. *The latch*: held, byte-identical.
+
+**Attribution of what is left on the default midi path** (each against
+its own `--song` render):
+
+- *ply_fine's unlink* (per-tick command batching, now with the LFO):
+  lfo_delay (the release after FINE keeps stepping the LFO on the MIDI
+  path; the ROM's track has no flags left), vol (the FINE tick's VOL).
+- *The CgbSound entry and the LFO / CgbSound order*: lfo_psg, every PSG
+  micro row, psg_mix, pcm_psg's PSG half, the SEs with PSG, the songs'
+  PSG tracks.
+- *Per-tick command batching*: se_rain_stop, se_contest_place, credits
+  from tick 384.
+- *Within a two-tick frame*: an LFO-state command in the second tick
+  (rg_vs_trainer frame 903, vs_wild 7 from frame 903): not taken apart;
+  the songs' PSG differences start on frame 3, long before.
+
+**What the LFO / CgbSound order slice needs.**  The engine's LFO now
+steps on the ROM's frames, but in `m4a_engine_tick` the `!seq` block
+(LFO, portamento, PWM) runs after the CgbSound passes, so a CGB pitch
+(`cgb_set_pitch`, MO_PIT) or tremolo volume (MO_VOL) set by frame F's
+LFO step is written to the PSG by frame F + 1's CgbSound, where the
+ROM's MPlayMain -- tick, LFO step, the VOLCHG / PITCHG pass, and in the
+eventide sources MPlayProcessPortamento / MPlayProcessPulseWidthMod --
+runs before CgbSound in the same SoundMain.  The slice moves the `!seq`
+block before the CgbSound passes (after the gates and the latched
+drain), which changes the plugin as well (it is `!seq` too), so it needs
+the user's decision whether the plugin takes it or only the renderer;
+PCM rows are unaffected (SoundMainRAM reads the frequency after both).
+lfo_psg is its test row, but lfo_psg's first difference from its `--song`
+render is frame 3, the fixed CgbSound entry (1205 cycles after SoundMain
+where the ROM's varies with MPlayMain's work), so the order slice alone
+should leave it far from -inf; the measure there is the write log
+(`--psg-log` on the MIDI path against the `--song` one: the LFO's NRx3 /
+NRx4 writes one CgbSound earlier, the residual offset the entry's).
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

@@ -687,6 +687,26 @@ void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm)
     engine->tempoI = (uint16_t)(bpm + 0.5);
 }
 
+void m4a_engine_start_song_tempo(M4AEngine *engine)
+{
+    if (engine->externalSequencer)
+        return;
+    /* MPlayStart: tempoD = tempoI = 150, tempoU 0x100, tempoC 0 */
+    engine->tempoD = 150;
+    engine->tempoU = 0x100;
+    engine->tempoI = 150;
+    engine->tempoC = 0;
+    engine->tempoINextSet = false;
+}
+
+void m4a_engine_set_tick_tempo(M4AEngine *engine, uint16_t tempoI)
+{
+    if (engine->externalSequencer)
+        return;
+    engine->tempoINext = tempoI;
+    engine->tempoINextSet = true;
+}
+
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
 {
     engine->voiceGroup = voiceGroup;
@@ -2115,6 +2135,12 @@ void m4a_engine_tick(M4AEngine *engine)
      * tempoC += tempoI each VBlank; fires one LFO tick per 150 accumulated. */
     if (!seq) {
         engine->tempoC += engine->tempoI;
+        /* A TEMPO held by m4a_engine_set_tick_tempo: ply_tempo runs inside
+         * the frame's ticks, after _081DD86C's add. */
+        if (engine->tempoINextSet) {
+            engine->tempoI = engine->tempoINext;
+            engine->tempoINextSet = false;
+        }
         while (engine->tempoC >= 150) {
             engine->tempoC -= 150;
             m4a_lfo_tick(engine);
