@@ -3487,6 +3487,68 @@ crossings), and the baseline with the two new rows.  Cries over music,
 and a second cry while both players are busy (the `maxClock`
 replacement), stay later.
 
+**Code review of slice 8b-i (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: the chain against SoundMain's `o_SoundInfo_MPlayMainHead`
+call and MPlayMain's `_081DD82E` call-before-body, `MPlayOpen`'s prepend
+and `m4aSoundInit`'s order giving bodies BGM, SE1, SE2, SE3, cry 0, cry 1;
+the paused 63 / head 142 / tail 55 composition against steps 4, 5 and 11;
+the lone player's path operand by operand against the old code and the FIFO
+stall's half-open range (additive over the 63 + 55 split in every reachable
+case); `SetPokemonCryTone`'s free test, loop and `goto start_song` against
+`m4a_sequencer_player_free` / `m4a_cry_choose_player`; `MPlayStart`'s
+precondition (never failing for a cry player, `unk_B` 0, ident set) and its
+own-tracks-only init against `m4a_sequencer_start`; `ply_note`'s scan walked
+label for label for the second cry's note over the first's live channel
+(`_081DDBFA` / `_081DDC14` / `_081DDC18` / `_081DDC24` / the taken `bls`
+and `bcc` / `_081DDC34` / `_081DDC40`, 20 + 4 + 12 + 22 + 12 + 14) and the
+reverse case (a later-track candidate recorded, the free channel still
+taken), the CGB steal compare, the address order `gPokemonCryTracks[0]` <
+`[2]` as engine index 0 < 2; every engine-track access routed through
+`trackBase`; the second start's window against `StartTest`'s main-loop
+call between two SoundMains.  Reviewer 2: the four frame states derived
+from the code against the `.frames` files and step 11's table, the idle
+term 0 for the cry pair and step 4's rule for a sparser chain; every
+piece-wise value of the three expected-value functions checked frame by
+frame against the probe `.frames` files (0 mismatches on 3..178 / 3..238 /
+3..145), the sample sizes against the ROM's WaveData headers, the deaths
+and unlinks against the raw logs' `RealClearChain` cycles (no `_081DCFB0`
+in either log), the start frames against cry 1's `ply_note` cycles; the
+three diff tools on the merged log (one frame line, both players' lines in
+SoundMain's order, nothing dropped, 0 / 0 / 0 on both runs); the flags'
+ranges against the ROM's `u16 id2` / `u8 startFrame2` and `mgba_render`,
+the checks and messages, every exit path's frees, the dynamic-end
+condition, the shared trace file, `claim_check.sh` skipping the
+`cry_second_*` logs, the README / skill text, the callers of the struct.)
+**No divergence** on any path the two runs exercise; every number
+confirmed.  **Adopted** (none can touch a stock render; one `claim_check.sh`
+over the batch: 55 diffed, 0 moved, 53/62, 0 regressions, every row 0.0,
+unit 1471/1471, blip 49112/0, songs 561/561): `m4a_sequencer_init_chained`
+refuses an inner that is cry player 1 (nothing is opened after it) and
+fails when `set_player` fails instead of linking a player-0 / zero-track
+chain; `set_player` also refuses a track count that would run into the
+outer's `trackBase`; the unused `sCry2.user` field dropped and the
+"second cry on cry player 0" summary line reworded (the counts printed are
+the restart's); run (a)'s unit-test bound 180 -> 178, the 180-frame probe's
+last complete frame; `entry_diff.py` skips the probe's -999999 sentinel row
+(the incomplete last frame), so the summary line reads 0 differ on a
+probe-length render -- the one tool change of the slice; a comment at
+`ply_note`'s ClearChain charge for the latent case below.  **Not acted on,
+recorded**: a cross-player channel steal (player A's note taking a channel
+player B's track still chains) would charge `UNLINK_NONE` and leave the
+channel in B's `chainOwner` until B's next walk, where the GBA's
+`RealClearChain` drops it at once through `channel->track` -- cycle model
+only, unreachable with two cry players (at most four channels of five) and
+noted for a BGM + cry chain; the `maxClock` replacement when both cry
+players are busy is refused, not played (by design, fails loudly);
+`track_diff.py`'s "track i % 10" label is the breakpoint position, which on
+a cry-1-alone frame reads 0 / 1 for engine tracks 2 / 3 (diagnostic text
+only); `m4a_sequencer_start`'s second `track_stop` loop runs to
+`M4A_SONG_MAX_TRACKS` rather than the player's count (never-EXIST tracks
+return at once); a future `songs.json` key for the second cry needs
+`claim_check.sh`'s cry argument line (the `extra = ...` python) extended and
+a 4.0 s rung for the 240-frame probe; step 11's heading sentence "the
+engine runs one sequencer per render" is historical.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

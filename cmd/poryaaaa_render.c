@@ -877,8 +877,7 @@ static int grow_buffers(float **l, float **r, uint64_t *cap, uint64_t need, uint
  * free cry player, cry 1 while the first cry plays; neither free is
  * refused (the game's maxClock replacement, out of scope). */
 static struct {
-    M4AFrameHook hook;          /* the sequencer chain's hook, run after the check */
-    void *user;
+    M4AFrameHook hook;          /* the sequencer chain's hook, run after the check (with the engine's own user) */
     M4ASequencer *players[2];   /* cry player 0, cry player 1 */
     M4ASong *song;              /* pending; NULL once started or refused */
     const ToneData *voices;
@@ -953,7 +952,6 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
         sCry2.voices = vg2->voices;
         sCry2.startFrame = (uint32_t)startFrame2;
         sCry2.hook = engine.frameHook;
-        sCry2.user = engine.frameHookUser;
         engine.frameHook = cry2_hook;
         printf("  Second cry: StartCry on VBlank %d (its first tick on engine frame %d), cry player 1 if the first still plays\n",
                startFrame2, startFrame2 + 2);
@@ -1058,7 +1056,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
         if (sCry2.startedOn == 1)
             printf("  Second cry on cry player 1: %u notes, %u song ticks\n", seq2.noteCount, seq2.clock);
         else if (sCry2.startedOn == 0)
-            printf("  Second cry on cry player 0 (the first cry had finished): %u song ticks\n", seq.clock);
+            printf("  Second cry on cry player 0 (the first cry had finished before VBlank %d; the counts above are its restart)\n", startFrame2);
         else
             printf("  Second cry never started (the render ended before VBlank %d)\n", startFrame2);
     }

@@ -12,7 +12,7 @@ def main(frames, seqlog, limit=40):
     mg = {}
     for line in open(frames):
         m = re.match(r"frame\s+(\d+) \|.*?CGB\s+(-?\d+)", line)
-        if m:
+        if m and int(m.group(2)) >= 0:      # the probe's last, incomplete frame has no CgbSound entry (-999999)
             mg[int(m.group(1))] = int(m.group(2))
     en = {}
     for line in open(seqlog):

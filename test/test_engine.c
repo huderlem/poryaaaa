@@ -5428,8 +5428,9 @@ static void test_sequencer_cycles_cry_high_pitch_two_chain(void)
  * stand-in samples have the cries' lengths (Bulbasaur 8183, Pidgey 1902,
  * Jynx 23524, Wailord 20846 DPCM samples at 10512 Hz), so the channels
  * die on mgba's frames.  The expected CgbSound entries are the probes'
- * (build/probe/cry_second_bulbasaur_pidgey.txt.frames, frames 3..180;
- * cry_second_jynx_wailord.txt.frames, 3..238). */
+ * (build/probe/cry_second_bulbasaur_pidgey.txt.frames, frames 3..178, the
+ * 180-frame probe's complete frames; cry_second_jynx_wailord.txt.frames,
+ * 3..238). */
 static int two_cries_expect_a(int k)      /* Cry_Bulbasaur, Cry_Pidgey from VBlank 20 */
 {
     return k == 3 ? 4077 : k < 22 ? 1596 : k == 22 ? 4736 : k < 33 ? 2185 : k == 33 ? 2278
@@ -5575,7 +5576,7 @@ static void test_sequencer_cycles_two_cries(void)
     static const TwoCriesRun runs[] = {
         /* (a): Pidgey (cry 1, channel 1) dies after frame 32's mix, unlinked on 33 = 22 + 11; Bulbasaur after 49, unlinked on 50;
          *      cry 0's EOT on 143 with cry 1's track dead (2379), cry 1's on 162 = 22 + 140. */
-        { "cry_second_bulbasaur_pidgey", 8183, 1902, 20, 180, two_cries_expect_a, 49, 32, 143, 162 },
+        { "cry_second_bulbasaur_pidgey", 8183, 1902, 20, 178, two_cries_expect_a, 49, 32, 143, 162 },   /* the 180-frame probe's last complete frame is 178 */
         /* (b): Jynx (cry 0) dies after 136, unlinked on 137; Wailord (cry 1) after 180, unlinked on 181 = 62 + 119;
          *      cry 0's EOT on 143 with cry 1's channel alive (2399), cry 1's on 202 = 62 + 140. */
         { "cry_second_jynx_wailord", 23524, 20846, 60, 238, two_cries_expect_b, 136, 180, 143, 202 },

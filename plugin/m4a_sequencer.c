@@ -734,7 +734,14 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
     if (expect < 0)
         return;
 
-    /* ClearChain(channel) and the prepend to this track's chain. */
+    /* ClearChain(channel) and the prepend to this track's chain.  Only this
+     * player's chains are known here: a channel another chained player's
+     * track still holds would be charged UNLINK_NONE and linger in that
+     * player's chainOwner until its next walk, where the GBA's
+     * RealClearChain drops it at once through channel->track.  Not
+     * reachable with the two cry players (at most four channels of five,
+     * a free one always found; slice 8b-i review), noted for a BGM + cry
+     * chain. */
     cyc(s, M4A_CYC_NOTE_TAKE);
     int unlink;
     if (s->chainOwner[h] == 0)
@@ -1183,8 +1190,8 @@ void m4a_sequencer_init(M4ASequencer *s, M4AEngine *engine)
 int m4a_sequencer_init_chained(M4ASequencer *s, M4ASequencer *inner, int trackBase)
 {
     if (!inner || inner->outer || trackBase < inner->trackBase + inner->maxTracks
-        || trackBase >= MAX_TRACKS)
-        return -1;
+        || trackBase >= MAX_TRACKS || inner->player + 1 >= M4A_PLAYER_COUNT)
+        return -1;      /* nothing is opened after cry player 1 */
     memset(s, 0, sizeof(*s));
     s->engine = inner->engine;
     s->status = MUSICPLAYER_STATUS_PAUSE;
@@ -1192,9 +1199,12 @@ int m4a_sequencer_init_chained(M4ASequencer *s, M4ASequencer *inner, int trackBa
     s->trackBase = (uint8_t)trackBase;
     s->inner = inner;
     s->frameCount = inner->frameCount;
-    /* the next player up the chain; set_player checks the order */
-    m4a_sequencer_set_player(s, inner->player + 1 < M4A_PLAYER_COUNT ? inner->player + 1 : inner->player);
     inner->outer = s;
+    /* the next player up the chain; set_player checks the order and range */
+    if (m4a_sequencer_set_player(s, inner->player + 1) != 0) {
+        inner->outer = NULL;
+        return -1;
+    }
     return 0;
 }
 
@@ -1223,8 +1233,9 @@ int m4a_sequencer_set_player(M4ASequencer *s, int player)
     if (player < 0 || player >= M4A_PLAYER_COUNT)
         return -1;
     if ((s->inner && player <= s->inner->player) || (s->outer && player >= s->outer->player)
-        || s->trackBase + trackCounts[player] > MAX_TRACKS)
-        return -1;
+        || s->trackBase + trackCounts[player] > MAX_TRACKS
+        || (s->outer && s->trackBase + trackCounts[player] > s->outer->trackBase))
+        return -1;      /* an inner player's tracks must stay below its outer's */
     s->player = (uint8_t)player;
     s->maxTracks = trackCounts[player];
     /* Chain order (MPlayOpen appends to the head; MPlayMain calls the next
