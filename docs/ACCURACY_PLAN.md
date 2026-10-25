@@ -1375,6 +1375,107 @@ comment and the modulo in the FIFO stall test (R2#26, R2#31); the plan's
 code charges (R2#2); ply_endtie's walk over more than one chained channel
 (R1#16, measured 95 / 89 with one).
 
+### Done: milestone 4 slice 1, sound effects on the SE players (2026-10-24)
+
+Six vanilla sound effects join the corpus as test type `se`
+(`songs.json`, `"type": "se"`; `accuracy.py --tests se`): the ROM plays
+them by `m4aSongNumStart` on the music player the song table names, and
+the runner passes that player to `poryaaaa_render --player se1|se2|se3`
+(the sequencer's `m4a_sequencer_set_player`: 3 / 9 / 1 tracks and the
+player's MPlayMain chain position, probe section above).  Baseline
+`baselines/2026-10-24_se.json` / `.txt`: **43/44 pass at -40 dB**; the 38
+previous tests are unchanged to the decimal (`compare_reports.py
+2026-10-24_timing-3.json 2026-10-24_se.json`: 0 regressions, 0
+improvements, every -inf still -inf).  `poryaaaa_unit_tests` 1109/1109 (38
+new), `poryaaaa_blip_tests` 49112/0, `poryaaaa_song_tests` 561/561 (the SE
+`.s` files were already in it); `--input midi` still renders (the MIDI
+path has no music player; `--player` prints a note and is ignored there).
+
+| test | player | content | null | worst 1 s | ref dBFS |
+|---|---|---|---|---|---|
+| se_exp | SE1 | square 1, a TIE through pitch bends, EOT | **-inf** | -inf | -24.8 |
+| se_faint | SE1 (all 3 tracks) | DirectSound snare, square 1 with sweep 0x17, noise | -53.3 | -42.9 | -29.9 |
+| se_contest_place | SE2 (4 of 9) | DirectSound timpani, strings keysplit, square 1 + 2 | -53.7 | -44.7 | -26.9 |
+| se_truck_unload | SE2 | noise only, FINE with a chained channel | **-inf** | -inf | -39.2 |
+| se_low_health | SE3 | square 1, GOTO loop, XCMD pseudo-echo, priority 3 | **-inf** | -inf | -24.0 |
+| se_rain_stop | SE3 | DirectSound only, BEND / BENDR, priority 2 | -41.8 | -23.4 (FAIL) | -41.3 |
+
+The three pure-PSG SEs are bit-exact over their 2-3 s, one on each SE
+player.  The two mixed SEs sit at the PCM scheduler-lateness floor like the
+songs.  **se_rain_stop fails the worst-second gate on one PCM sample**: the
+render equals the reference everywhere except a single 13379 Hz sample at
+0.5394 s (2 LSB), and the probe's `.events` puts mgba's second timer-0
+slot crossing at cycle 9046019 = 0.5392 s (`se_rain_stop.txt.events`,
+`slot_crossed=2`; the first, at 0.0704 s, falls in the silence before the
+note).  That is item 1c, the deferred floor, landing in a tail 46 dB down
+where one sample is -23 dB of the window's energy; the full-file null
+(-41.8) passes.  The test stays in the corpus as the PCM-only SE: swapping
+it for one that happens to dodge a lateness crossing would hide the floor,
+not fix it.  Nothing in the engine changes it (the plan's 1c).
+
+**Measured SE-player constants** (probe section, step 4): a paused
+non-BGM player 63 (`M4A_CYC_MP_IDLE`), a playing SE player's head 142
+(`M4A_CYC_MP_SE_HEAD` = FadeOutBody 88 + 54), the last `_081DDA6C` ->
+CgbSound 55 (`M4A_CYC_MP_TAIL`); `_081DD9BC` at 716 / 779 / 842 / 905 and
+exit 370 / 307 / 244 / 181 for BGM / SE1 / SE2 / SE3; paused 1007 for all.
+Three paths measured for the first time and adopted: ply_fine 44 with an
+empty chain / 114 with one channel (`M4A_CYC_FINE_*`), the finished tick's
+`_081DD9A4` -> `_081DDA6C` 24 (`M4A_CYC_TICK_ALL_DONE`), square 1's second
+NR14 write 24 + 2 (`CGB_CYC_NR14_NR14` / `_DONE`, were *est.* 14 + 6).
+Each was checked by the write diff before the harness; together they moved
+no write of the previously probed corpus (the sweep in the probe section)
+and no harness number.
+
+**Per-SE write-cycle residual** (engine minus mgba, `probe_diff.py`
+threshold 0, 180 frames): se_exp 0 on 284 writes, se_faint 0 on 38,
+se_contest_place 0 on 51, se_truck_unload 0 on 22, se_low_health 0 on 100,
+se_rain_stop no PSG writes; `entry_diff.py`, `cmd_diff.py` and
+`track_diff.py` 0 divergences on every frame of all six.  Before the three
+corrections: +44 / +46 on each FINE frame (ply_fine) and -10 / -6 on
+se_faint's start frame (the NR14 path); the player positions themselves
+matched on every other frame from the first render.
+
+The work, in order (commits on `accuracy-harness` after 2fad88a):
+
+1. **Probe**: the player argument for the `.frames` summary and
+   `probe_mplay.py --player`; the six SEs probed; the numbers of the probe
+   section (step 4) recorded before use.
+2. **Sequencer**: `m4a_sequencer_set_player` (track count and chain
+   position derived from the measured constants; init selects BGM, start
+   clamps the song's tracks to the player's as MPlayStart does), the
+   measured ply_fine / finished-tick / NR14 costs, `poryaaaa_render
+   --player`; unit tests `test_sequencer_players` (the four players'
+   positions and counts, the paused 1007, the SE1 / SE2 no-tick frames of
+   se_faint / se_contest_place, a 4-track song on SE1 playing 3) and
+   `test_sequencer_cycles_se2` (se_truck_unload's 30 frames on SE2 against
+   its probe, FINE and the finished tick included).
+3. **Corpus and runner**: `songs.json` type `se`, the player from
+   `song_table.inc`, `--tests se`; README and skill.
+4. **Baseline and this section.**
+
+What the SE slice did not measure: a FINE with two or more chained
+channels (est. the walk's unlink costs for the continuing iterations), a
+SE on the BGM player or two players sounding at once (the probe's chain
+holds for any combination of paused players; a second *playing* player
+would add its body between the entries and is not modeled: the sequencer
+is one player), MPlayStart's priority / `unk_B` gating against an already
+playing song (the ROM starts one SE from silence), and the cry players
+(next slice).
+
+**Next slice: cries.**  `StartCry` in `test/accuracy/rom/main.c` plays
+`gCryTable[id]` through `SetPokemonCryTone` on one of the two cry players
+(`gPokemonCryMusicPlayers`, 2 tracks each, chain entries 291 and 346 and
+bodies after SE3's: a playing cry player resumes 63 x 3 after the BGM's
+`_081DDA6C` by the step-4 chain, to be measured, not assumed), with the
+cry song template's pan / volume / pitch and the compressed (DPCM) cry
+samples the micro-test pcm_cmp covers.  The runner needs a `cry` entry
+type (`--type cry --id N --pitch --pan --volume`), the engine a way to
+play a cry (the template song, `gPokemonCrySong`, with the tone pointer
+patched), and the probe's player argument already takes
+`gPokemonCryMusicPlayers`.  Before any change the harness must reproduce
+`baselines/2026-10-24_se.json` (43/44; 0 regressions, 0 improvements) and
+the three test binaries must pass as above.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
