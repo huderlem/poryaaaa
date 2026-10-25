@@ -15,7 +15,9 @@ Steps (all idempotent, cached under --build-dir):
      byte-identical to what mgba plays) through the MPlayMain sequencer
      port; with --input midi it plays the MIDI with the mid2agb options from
      the .cfg mapped to flags (-V -> --song-volume, -R -> --reverb,
-     -G -> voicegroup).  A sound effect (songs.json "type": "se") is an
+     -G -> voicegroup); --midi-quantize adds --quantize (the MIDI event
+     latch).  A midi-input report (its "input" field says midi) is a
+     separate baseline family, never compared against a song-input one.  A sound effect (songs.json "type": "se") is an
      m4aSongNumStart of its song id in the ROM and plays on the music player
      the song table names (sound/song_table.inc, the `ms` field: SE1 / SE2 /
      SE3 with 3 / 9 / 1 tracks), passed to poryaaaa_render as --player.
@@ -333,6 +335,8 @@ def render_poryaaaa(args, t, overlay, out_dir):
         cmd += ["--song-volume", str(t["volume"]), "--reverb", str(t["reverb"])]
         if t["extended"]:
             cmd.append("--extended-clocks")
+        if args.midi_quantize:
+            cmd.append("--quantize")         # the MIDI event latch (plan, milestone 5)
     if t.get("player"):
         cmd += ["--player", t["player"]]
     if t.get("cry") is None and t.get("cry2") is not None:
@@ -366,6 +370,8 @@ def main():
     ap.add_argument("--tests", default=None, help="comma-separated test names or groups (micro, song, se, cry)")
     ap.add_argument("--input", choices=("song", "midi"), default="song",
                     help="what poryaaaa_render plays: the compiled .s from the ROM build (default) or the MIDI")
+    ap.add_argument("--midi-quantize", action="store_true",
+                    help="with --input midi: pass --quantize to poryaaaa_render (events latched to the VBlank tick)")
     ap.add_argument("--update-refs", action="store_true", help="store micro-test references in test/accuracy/refs/micro")
     ap.add_argument("--committed-refs", action="store_true", help="ignore mgba_render and compare against the committed micro-test references")
     ap.add_argument("--force", action="store_true", help="re-render references even if cached")
@@ -441,6 +447,8 @@ def main():
     print(f"{n_pass}/{len(results)} pass at {args.gate:.0f} dB (raw null depth, full file and worst 1 s window)")
     report = {"rom": args.rom, "mgba": ver, "rate": args.rate, "gate_db": args.gate,
               "label": args.label, "input": args.input, "results": results}
+    if args.input == "midi":
+        report["midi_quantize"] = bool(args.midi_quantize)   # the two midi baseline families
     path = args.json or os.path.join(args.build_dir, "report.json")
     with open(path, "w") as f:
         json.dump(report, f, indent=1)

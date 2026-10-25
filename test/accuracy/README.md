@@ -39,7 +39,7 @@ cmake -B build -DACCURACY_POKEEMERALD_DIR=$HOME/pokeemerald -DACCURACY_MGBA_DIR=
 cmake --build build --target accuracy          # ROM + mgba_render + poryaaaa_render + comparison
 # or by hand:
 make -C test/accuracy/rom POKEEMERALD=$HOME/pokeemerald
-test/accuracy/tools/accuracy.py [--input song|midi] [--tests micro|song|name,...] [--gate -40] [--update-refs] [-- extra poryaaaa_render args]
+test/accuracy/tools/accuracy.py [--input song|midi] [--midi-quantize] [--tests micro|song|name,...] [--gate -40] [--update-refs] [-- extra poryaaaa_render args]
 build/poryaaaa_song_tests build/accuracy/rom        # parser vs ROM, byte for byte
 ```
 
@@ -47,7 +47,13 @@ The sequencer (`plugin/m4a_sequencer.c`, a port of MPlayMain) plays the
 compiled song inside poryaaaa's VBlank tick, so with `--input song` the
 only differences left between the two renders are in synthesis: the mixer
 and output stage (milestones 2 and 3).  `--input midi` keeps the plugin's
-MIDI path measurable (milestone 5 compares the two).
+MIDI path measurable (milestone 5 compares the two); `--midi-quantize`
+adds `poryaaaa_render --quantize`, the MIDI event latch (every event
+applied at the top of the next VBlank tick, in arrival order, where
+MPlayMain runs a track's commands).  A midi-input report (`"input":
+"midi"`, `"midi_quantize"` true / false) is a separate baseline family,
+`baselines/<date>_midi-path-*.json`; it is never compared against a
+song-input baseline.
 
 Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
 `out/` (poryaaaa WAVs and logs), `project/` (overlay), `report.json`.

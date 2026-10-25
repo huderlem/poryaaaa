@@ -777,6 +777,11 @@ static void print_usage(const char *prog)
         "  --respect-base-midi-key     Opt-in: treat a PCM voice's key as the sample's base MIDI note (default: off)\n"
         "  --portamento                Opt-in: enable the portamento glide effect, CC 5 (default: off)\n"
         "  --pwm                       Opt-in: enable pulse-width modulation on CGB square channels, CC 0x17/0x19 (default: off)\n"
+        "  --quantize                  --midi only: latch every MIDI event to the next VBlank tick\n"
+        "                              (note on / off, CC, program, bend applied where MPlayMain\n"
+        "                              runs a track's commands, in arrival order; a note shorter\n"
+        "                              than a frame plays one tick).  Default: events apply at\n"
+        "                              their sample position.  (--song / --cry already run on the tick.)\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
         "  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates\n"
@@ -1358,6 +1363,7 @@ int main(int argc, char *argv[])
     bool        respectBaseMidiKey = false;
     bool        portamento    = false;
     bool        pwm           = false;
+    bool        quantize      = false;  /* --quantize: the MIDI event latch */
     int         maxChannels   = 5;
     int         sampleRateHz  = 44100;
     int         pcmFreqMode   = M4A_PCM_FREQ_MODE_DEFAULT; /* SOUND_MODE_FREQ_13379 */
@@ -1446,6 +1452,8 @@ int main(int argc, char *argv[])
             if (reverbAmount > 127) reverbAmount = 127;
         } else if (strcmp(argv[i], "--respect-base-midi-key") == 0) {
             respectBaseMidiKey = true;
+        } else if (strcmp(argv[i], "--quantize") == 0) {
+            quantize = true;
         } else if (strcmp(argv[i], "--portamento") == 0) {
             portamento = true;
         } else if (strcmp(argv[i], "--pwm") == 0) {
@@ -1534,6 +1542,8 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Note: --player only applies to --song (the MIDI path has no music player)\n");
 
     if (songPath || cryId >= 0) {
+        if (quantize)
+            fprintf(stderr, "Note: --quantize only applies to --midi (the sequencer already runs on the tick)\n");
         if (songVolumeSet || reverbSet)
             fprintf(stderr, "Note: --song-volume / --reverb are ignored with --song / --cry "
                             "(the song data carries its own volume and reverb)\n");
@@ -1896,6 +1906,10 @@ oom:
     /* Keep the boot's output so MIDI and compiled-song renders of the same
      * material line up with each other and with an emulator recording. */
     m4a_engine_boot(&engine, true);
+    /* The frame latch (plan, milestone 5): events wait for the next tick. */
+    m4a_engine_set_quantize_events(&engine, quantize);
+    if (quantize)
+        printf("MIDI events latched to the VBlank tick (--quantize)\n");
 
     /* ---- Allocate output buffers ---- */
     float *outL = calloc(totalSamples, sizeof(float));

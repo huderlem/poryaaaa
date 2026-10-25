@@ -347,6 +347,26 @@ typedef struct {
 /* Forward declaration */
 typedef struct M4AEngine M4AEngine;
 
+/* One latched MIDI-path event (M4AEngine.eventQueue). */
+enum {
+    M4A_EV_NOTE_ON = 1,
+    M4A_EV_NOTE_OFF,
+    M4A_EV_CC,
+    M4A_EV_PROGRAM,
+    M4A_EV_BEND,
+    M4A_EV_XCMD
+};
+typedef struct {
+    uint8_t kind;    /* M4A_EV_* */
+    uint8_t track;
+    uint8_t a;       /* key / cc / program / xcmd */
+    uint8_t b;       /* velocity / value */
+    int16_t bend;    /* M4A_EV_BEND */
+} M4AQueuedEvent;
+/* Enough for a DAW block's worth of events; beyond it an event applies at
+ * once and eventQueueOverflow counts it. */
+#define M4A_EVENT_QUEUE_CAPACITY 1024
+
 /* Frame hook: called at the start of every VBlank tick (m4a_engine_tick),
  * before the envelopes advance -- where MPlayMain runs inside SoundMain on
  * the GBA.  Installed by the song sequencer (m4a_sequencer.c). */
@@ -416,6 +436,20 @@ struct M4AEngine {
     bool portamentoEnabled;  /* honor PORTAMENTO (CC 5) glides between notes */
     bool pwmEnabled;         /* honor pulse-width modulation (CC 0x17/0x19) */
     bool pwmActiveFlag;      /* true while any track has pulse-width modulation running */
+
+    /* MIDI event latch (milestone 5).  With quantizeEvents set, the event
+     * entry points (note on / off, CC, program change, pitch bend, XCMD)
+     * received outside a tick are queued and applied, in arrival order, at
+     * the top of the next m4a_engine_tick after the gate walk -- where
+     * MPlayMain consumes a track's commands -- instead of at the moment of
+     * the call.  Off (the default) they apply at once, as before.  inTick is
+     * set while m4a_engine_tick runs, so an entry point called from the
+     * frame hook (the sequencer's ply_* handlers) always applies at once. */
+    bool quantizeEvents;
+    bool inTick;
+    M4AQueuedEvent eventQueue[M4A_EVENT_QUEUE_CAPACITY];
+    int eventQueueCount;
+    uint32_t eventQueueOverflow; /* events applied at once because the queue was full */
 
     /* Polyphony-overflow debugging.  Overflow events (dropped notes, stolen
      * channels) are always counted; when polyDebugInvert is on, the normal
@@ -744,6 +778,9 @@ void m4a_engine_refresh_voices(M4AEngine *engine);
  * cgbChannels[i] -- or M4A_CHANNEL_NONE when no channel was taken (the note
  * was dropped, or the voice could not be resolved). */
 #define M4A_CHANNEL_NONE (-1)
+/* ... or M4A_CHANNEL_QUEUED when the event latch holds the note for the next
+ * tick (m4a_engine_set_quantize_events); the channel is taken then. */
+#define M4A_CHANNEL_QUEUED (-2)
 int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t velocity);
 /* The voice ply_note would play for `key` on `voice` (keysplit / rhythm
  * tables resolved), or NULL when the sub-voice is itself a split/rhythm
@@ -768,7 +805,24 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
 void m4a_engine_xcmd(M4AEngine *engine, int trackIndex, uint8_t command, uint8_t value);
 void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend);
 void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex);
+/* Silences everything at once and drops the latched events still queued
+ * (a host's panic / transport stop must not release queued note-ons at
+ * the next tick).  Called from inside a tick (CC 120 draining) it only
+ * silences: the events after it in the same frame keep their order. */
 void m4a_engine_all_sound_off(M4AEngine *engine);
+
+/* The MIDI event latch (plan, milestone 5): on, the event entry points
+ * queue and the queue drains at the top of the next tick, after the gate
+ * walk and before the CgbSound passes, the LFO and the mixer's envelope
+ * step -- the frame edge a GBA note can start on.  A latched note-off that
+ * finds its note still START (started in the same frame) sets the channel's
+ * gateTime to 1 instead of STOP, so the next tick's gate walk stops it: the
+ * GBA's one-tick note (mid2agb rounds a shorter note up to one clock),
+ * where START | STOP would be killed silently by SoundMainRAM.  Turning the
+ * latch off applies whatever is queued at once, in order. */
+void m4a_engine_set_quantize_events(M4AEngine *engine, bool enabled);
+/* Apply every queued event now, in arrival order (what the tick does). */
+void m4a_engine_flush_events(M4AEngine *engine);
 /* TrackStop's per-channel silence: PCM channels just stop; CGB channels also
  * get CgbOscOff on their PSG.  `handle` is a note-on return value. */
 void m4a_engine_kill_channel(M4AEngine *engine, int handle);

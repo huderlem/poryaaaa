@@ -692,6 +692,65 @@ void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
     engine->voiceGroup = voiceGroup;
 }
 
+/* ------------------------------------------------------------------------
+ * The MIDI event latch (m4a_engine.h, quantizeEvents)
+ * ------------------------------------------------------------------------ */
+
+/* Queue `ev` when the latch is on and we are outside a tick.  Returns false
+ * when the caller must apply it now: latch off, inside a tick (the frame
+ * hook's sequencer), or the queue full (counted). */
+static bool queue_event(M4AEngine *engine, M4AQueuedEvent ev)
+{
+    if (!engine->quantizeEvents || engine->inTick)
+        return false;
+    if (engine->eventQueueCount >= M4A_EVENT_QUEUE_CAPACITY) {
+        engine->eventQueueOverflow++;
+        return false;
+    }
+    engine->eventQueue[engine->eventQueueCount++] = ev;
+    return true;
+}
+
+static void apply_event(M4AEngine *engine, const M4AQueuedEvent *ev)
+{
+    switch (ev->kind) {
+    case M4A_EV_NOTE_ON:  (void)m4a_engine_note_on(engine, ev->track, ev->a, ev->b); break;
+    case M4A_EV_NOTE_OFF: m4a_engine_note_off(engine, ev->track, ev->a); break;
+    case M4A_EV_CC:       m4a_engine_cc(engine, ev->track, ev->a, ev->b); break;
+    case M4A_EV_PROGRAM:  m4a_engine_program_change(engine, ev->track, ev->a); break;
+    case M4A_EV_BEND:     m4a_engine_pitch_bend(engine, ev->track, ev->bend); break;
+    case M4A_EV_XCMD:     m4a_engine_xcmd(engine, ev->track, ev->a, ev->b); break;
+    default: break;
+    }
+}
+
+/* Drain the queue in arrival order.  The entry points apply at once while
+ * inTick is set; outside a tick the flush sets it for the drain so a
+ * re-entrant call from an applied event cannot re-queue. */
+static void drain_events(M4AEngine *engine)
+{
+    bool wasInTick = engine->inTick;
+    engine->inTick = true;
+    /* An applied event never queues (inTick), so the count is stable. */
+    int n = engine->eventQueueCount;
+    for (int i = 0; i < n; i++)
+        apply_event(engine, &engine->eventQueue[i]);
+    engine->eventQueueCount = 0;
+    engine->inTick = wasInTick;
+}
+
+void m4a_engine_flush_events(M4AEngine *engine)
+{
+    drain_events(engine);
+}
+
+void m4a_engine_set_quantize_events(M4AEngine *engine, bool enabled)
+{
+    if (!enabled && engine->quantizeEvents)
+        drain_events(engine);        /* nothing queued is lost on the way out */
+    engine->quantizeEvents = enabled;
+}
+
 /*
  * Program Change - select instrument from voicegroup
  */
@@ -712,6 +771,9 @@ void m4a_engine_program_change_from(M4AEngine *engine, int trackIndex,
 
 void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program)
 {
+    if (trackIndex >= 0 && trackIndex < MAX_TRACKS
+        && queue_event(engine, (M4AQueuedEvent){ M4A_EV_PROGRAM, (uint8_t)trackIndex, program, 0, 0 }))
+        return;
     m4a_engine_program_change_from(engine, trackIndex, NULL, program);
 }
 
@@ -982,6 +1044,8 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
     /* Keysplit/rhythm voices index 128-entry tables by key. */
     if (trackIndex < 0 || trackIndex >= MAX_TRACKS || key > 127)
         return M4A_CHANNEL_NONE;
+    if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_NOTE_ON, (uint8_t)trackIndex, key, velocity, 0 }))
+        return M4A_CHANNEL_QUEUED;
 
     M4ATrack *track = &engine->tracks[trackIndex];
     ToneData *voice = resolve_voice(&track->currentVoice, key);
@@ -1259,6 +1323,16 @@ void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key)
     /* No note-on ever registers a key above 127 (see m4a_engine_note_on). */
     if (trackIndex < 0 || trackIndex >= MAX_TRACKS || key > 127)
         return;
+    if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_NOTE_OFF, (uint8_t)trackIndex, key, 0, 0 }))
+        return;
+
+    /* With the latch on, a note-off reaching a channel that is still START
+     * was latched into the same tick as its note-on: a note shorter than a
+     * frame.  SoundMainRAM would kill START | STOP silently; the GBA plays
+     * such a note (mid2agb's one-clock minimum) for one tick, its gate
+     * expiring in the next tick's chain walk -- so hand it a gate of 1 and
+     * let m4a_engine_tick's gate walk set STOP next frame. */
+    bool oneTick = engine->quantizeEvents;
 
     /* Stop matching PCM channels (shadow channels release too, so a lost
      * sound audible in the overflow-debug mode ends at its note-off) */
@@ -1266,7 +1340,10 @@ void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key)
         M4APCMChannel *ch = &engine->pcmChannels[i];
         if ((ch->status & CHN_ON) && !(ch->status & CHN_STOP)
             && ch->trackIndex == trackIndex && ch->midiKey == key) {
-            ch->status |= CHN_STOP;
+            if (oneTick && (ch->status & CHN_START))
+                ch->gateTime = 1;
+            else
+                ch->status |= CHN_STOP;
         }
     }
 
@@ -1275,7 +1352,10 @@ void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key)
         M4ACGBChannel *ch = &engine->cgbChannels[i];
         if ((ch->status & CHN_ON) && !(ch->status & CHN_STOP)
             && ch->trackIndex == trackIndex && ch->midiKey == key) {
-            ch->status |= CHN_STOP;
+            if (oneTick && (ch->status & CHN_START))
+                ch->gateTime = 1;
+            else
+                ch->status |= CHN_STOP;
         }
     }
 }
@@ -1386,6 +1466,8 @@ static M4ACGBChannel *find_track_square_channel(M4AEngine *engine, int trackInde
 void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
 {
     if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
+        return;
+    if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_CC, (uint8_t)trackIndex, cc, value, 0 }))
         return;
 
     M4ATrack *track = &engine->tracks[trackIndex];
@@ -1536,6 +1618,8 @@ void m4a_engine_xcmd(M4AEngine *engine, int trackIndex, uint8_t command, uint8_t
 {
     if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
         return;
+    if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_XCMD, (uint8_t)trackIndex, command, value, 0 }))
+        return;
 
     M4ATrack *track = &engine->tracks[trackIndex];
 
@@ -1557,6 +1641,8 @@ void m4a_engine_xcmd(M4AEngine *engine, int trackIndex, uint8_t command, uint8_t
 void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend)
 {
     if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
+        return;
+    if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_BEND, (uint8_t)trackIndex, 0, 0, bend }))
         return;
 
     M4ATrack *track = &engine->tracks[trackIndex];
@@ -1610,6 +1696,8 @@ void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex)
  */
 void m4a_engine_all_sound_off(M4AEngine *engine)
 {
+    if (!engine->inTick)
+        engine->eventQueueCount = 0;    /* a panic drops what the latch still holds */
     for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
         engine->pcmChannels[i].status = 0;
     for (int i = 0; i < TOTAL_CGB_CHANNELS; i++)
@@ -1874,6 +1962,7 @@ static void m4a_pwm_tick(M4AEngine *engine)
  */
 void m4a_engine_tick(M4AEngine *engine)
 {
+    engine->inTick = true;
     /* The song sequencer runs first, like MPlayMain inside SoundMain. */
     if (engine->frameHook)
         engine->frameHook(engine, engine->frameHookUser);
@@ -1896,6 +1985,22 @@ void m4a_engine_tick(M4AEngine *engine)
                 ch->status |= CHN_STOP;
         }
     }
+    /* The CGB channels' gate times, the same walk (MPlayMain's chain walk
+     * precedes the track's commands, so it runs before the latched events
+     * below: a note that got gateTime 1 last frame stops here). */
+    for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
+        M4ACGBChannel *ch = &engine->cgbChannels[i];
+        if ((ch->status & CHN_ON) && !seq && ch->gateTime > 0) {
+            ch->gateTime--;
+            if (ch->gateTime == 0)
+                ch->status |= CHN_STOP;
+        }
+    }
+
+    /* The latched MIDI-path events: MPlayMain's commands for this frame, in
+     * arrival order, before CgbSound, the LFO and the mixer's envelope step. */
+    if (engine->eventQueueCount > 0)
+        drain_events(engine);
 
     /* Process CGB channel envelopes (VBlank rate): CgbSound.  Its register
      * writes are placed on the CPU clock: the entry follows MPlayMain's work
@@ -1915,11 +2020,6 @@ void m4a_engine_tick(M4AEngine *engine)
             if (!(ch->status & CHN_ON)) {
                 cursor += M4A_CYC_CGB_INACTIVE + m4a_gba_fifo_dma_stall(&engine->gba, cursor, cursor + M4A_CYC_CGB_INACTIVE);
                 continue;
-            }
-            if (!seq && ch->gateTime > 0) {
-                ch->gateTime--;
-                if (ch->gateTime == 0)
-                    ch->status |= CHN_STOP;
             }
             m4a_cgb_channel_tick(ch, engine->c15, &engine->psg[pool], &engine->gba, &cursor);
         }
@@ -1942,6 +2042,7 @@ void m4a_engine_tick(M4AEngine *engine)
     /* Advance pulse-width modulation duty cycles for square-wave channels,
      * matching MPlayProcessPulseWidthMod's placement in MPlayMain. */
     m4a_pwm_tick(engine);
+    engine->inTick = false;
 }
 
 /*

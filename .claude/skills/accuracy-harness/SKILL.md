@@ -21,6 +21,7 @@ cmake --build build --target accuracy
 test/accuracy/tools/accuracy.py                    # all tests, compiled-song input (default)
 test/accuracy/tools/accuracy.py --tests micro      # or song, se, or name,name
 test/accuracy/tools/accuracy.py --input midi       # the plugin's MIDI path instead of the .s
+test/accuracy/tools/accuracy.py --input midi --midi-quantize   # ... with poryaaaa_render --quantize (the frame latch)
 test/accuracy/tools/accuracy.py --committed-refs   # no mgba build needed, micro-tests only
 build/poryaaaa_song_tests build/accuracy/rom       # .s parser vs ROM, byte for byte
 ```
@@ -28,9 +29,22 @@ build/poryaaaa_song_tests build/accuracy/rom       # .s parser vs ROM, byte for 
 `--input song` (default since the sequencer milestone) plays
 `build/accuracy/rom/{micro,songs}/<name>.s` through `poryaaaa_render --song`,
 so poryaaaa and mgba consume byte-identical song data; `--input midi` plays
-the MIDI with the mid2agb options as flags.  The two are not expected to
-null each other below a few dB on PCM: a note that starts at a different
-phase of the 13379 Hz mix grid gives a different sub-sample waveform.
+the MIDI with the mid2agb options as flags (cries and the cry-over rows are
+skipped: no MIDI).  `--midi-quantize` adds `poryaaaa_render --quantize`,
+the MIDI event latch (milestone 5 slice 1: note on / off, CC, program,
+bend, XCMD applied at the top of the next VBlank tick, in arrival order,
+after the gate walk; a note-off latched into the same frame as its note-on
+gives the GBA's one-tick note).  **The midi-input reports are their own
+baseline family** (`baselines/<date>_midi-path-*.json`, the report's
+`"input"` field says `midi` and `"midi_quantize"` says which form): never
+compare one against a song-input baseline with `compare_reports.py`, and
+never save a midi run as the song-input baseline.  What separates the two
+paths today is not the mix grid (both paths mix the same SoundMainRAM
+frame, bit-identical when a note lands on the same frame) but the MIDI
+path's time origin (ROM cycle 0 where the song's tick 0 is frame 3's
+SoundMain: every event after the first frame 3 frames early) and its
+tempo grid (exact BPM where the ROM ticks on tempoC / 150); plan,
+"Milestone 5 slice 1".
 
 Output: a table on stdout and `build/accuracy/report.json`. poryaaaa WAVs and
 logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-mgba>/`.
@@ -69,7 +83,8 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
    table, then record the numbers in the plan's status section.
    `report.json` is whatever the **last** run wrote, so run the default
    harness immediately before copying (a `--tests` or `--input midi` run
-   in between produces a two-test baseline; this happened once):
+   in between produces a two-test or a midi-input baseline; this happened
+   once):
    ```sh
    test/accuracy/tools/accuracy.py > /tmp/full.txt
    cp build/accuracy/report.json test/accuracy/baselines/<date>_<milestone>.json

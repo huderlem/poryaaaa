@@ -5828,6 +5828,230 @@ static void test_sequencer_cycles_cry_over_song(void)
     m4a_engine_destroy(&engine);
 }
 
+/* The MIDI event latch (plan, milestone 5 slice 1): with quantizeEvents the
+ * entry points queue and the queue drains at the top of the next tick after
+ * the gate walk; off, they apply at once. */
+static int latch_hook_started = -1;
+static void latch_hook(M4AEngine *e, void *user)
+{
+    (void)user;
+    /* The frame hook runs inside the tick: a program change and a note-on
+     * from here (the sequencer's ply_voice / ply_note) apply at once even
+     * with the latch on. */
+    m4a_engine_program_change(e, 3, 0);
+    latch_hook_started = m4a_engine_note_on(e, 3, 60, 127);
+}
+
+static void test_event_latch(void)
+{
+    printf("Testing the MIDI event latch (quantizeEvents)...\n");
+
+    WaveData *wd = seq_test_wave();
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+    voices[0].release = 0x80;
+    voices[1] = voices[0];
+    voices[1].attack = 0x7F;            /* tells a program-1 channel from a program-0 one */
+    voices[2].type = VOICE_SQUARE_1;    /* a CGB voice for the PSG side of the same rules */
+    voices[2].key = 60;
+    voices[2].attack = 0;
+    voices[2].decay = 0;
+    voices[2].sustain = 15;
+    voices[2].release = 0;
+    voices[2].wavePointer = (void *)(uintptr_t)2;
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    ASSERT(!engine.quantizeEvents, "latch off by default");
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_cc(&engine, 0, 7, 127);
+
+    /* --- off: a note-on applies at once --- */
+    int h = m4a_engine_note_on(&engine, 0, 60, 127);
+    ASSERT(h >= 0 && h < TOTAL_PCM_CHANNELS, "latch off: note starts at once");
+    if (h < 0) { m4a_engine_destroy(&engine); free(wd); return; }
+    ASSERT(engine.pcmChannels[h].status & CHN_START, "latch off: channel START at once");
+    m4a_engine_note_off(&engine, 0, 60);
+    ASSERT_EQ(engine.pcmChannels[h].status & (CHN_START | CHN_STOP), CHN_START | CHN_STOP,
+              "latch off: a note-off in the same frame leaves START | STOP (SoundMainRAM kills it)");
+    engine.pcmChannels[h].status = 0;
+
+    /* --- on: a note-on mid-frame waits for the tick --- */
+    m4a_engine_set_quantize_events(&engine, true);
+    h = m4a_engine_note_on(&engine, 0, 60, 127);
+    ASSERT_EQ(h, M4A_CHANNEL_QUEUED, "latch on: note-on reports queued");
+    ASSERT_EQ(engine.eventQueueCount, 1, "latch on: one event queued");
+    int on = 0;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        on += (engine.pcmChannels[i].status & CHN_ON) != 0;
+    ASSERT_EQ(on, 0, "latch on: no channel started before the tick");
+    m4a_engine_tick(&engine);
+    ASSERT_EQ(engine.eventQueueCount, 0, "tick drained the queue");
+    ASSERT(!engine.inTick, "inTick cleared after the tick");
+    M4APCMChannel *ch = NULL;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        if (engine.pcmChannels[i].status & CHN_ON) { ch = &engine.pcmChannels[i]; break; }
+    ASSERT(ch != NULL, "latch on: the note started at the tick");
+    if (!ch) { m4a_engine_destroy(&engine); free(wd); return; }
+    ASSERT(ch->status & CHN_START, "latch on: channel START at the tick");
+    ASSERT_EQ(ch->midiKey, 60, "latch on: the queued key");
+    ASSERT_EQ(ch->gateTime, 0, "latch on: no gate (the note-off is explicit)");
+
+    /* --- a note-off a frame later stops it as before --- */
+    m4a_engine_note_off(&engine, 0, 60);
+    ASSERT(!(ch->status & CHN_STOP), "latched note-off not applied before the tick");
+    ch->status = CHN_ENV_SUSTAIN;      /* the mixer's envelope step would have run by now */
+    m4a_engine_tick(&engine);
+    ASSERT(ch->status & CHN_STOP, "latched note-off applied at the tick");
+    ch->status = 0;
+
+    /* --- order preserved: program, note, program, note --- */
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    m4a_engine_program_change(&engine, 0, 1);
+    m4a_engine_note_on(&engine, 0, 62, 127);
+    ASSERT_EQ(engine.eventQueueCount, 4, "four events queued");
+    ASSERT_EQ(engine.tracks[0].currentProgram, 0, "program change not applied before the tick");
+    m4a_engine_tick(&engine);
+    M4APCMChannel *c60 = NULL, *c62 = NULL;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
+        M4APCMChannel *c = &engine.pcmChannels[i];
+        if (!(c->status & CHN_ON)) continue;
+        if (c->midiKey == 60) c60 = c;
+        if (c->midiKey == 62) c62 = c;
+    }
+    ASSERT(c60 && c62, "both latched notes started at the tick");
+    if (c60 && c62) {
+        ASSERT_EQ(c60->attack, 0xFF, "order: key 60 took program 0 (queued before the program change)");
+        ASSERT_EQ(c62->attack, 0x7F, "order: key 62 took program 1 (queued after it)");
+        ASSERT_EQ(engine.tracks[0].currentProgram, 1, "the last program change stands");
+        c60->status = 0;
+        c62->status = 0;
+    }
+
+    /* --- note-off in the same frame as its note-on: the GBA's one-tick note --- */
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_note_on(&engine, 0, 64, 127);
+    m4a_engine_note_off(&engine, 0, 64);
+    m4a_engine_tick(&engine);
+    ch = NULL;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        if ((engine.pcmChannels[i].status & CHN_ON) && engine.pcmChannels[i].midiKey == 64)
+            ch = &engine.pcmChannels[i];
+    ASSERT(ch != NULL, "one-tick note: the channel started");
+    if (ch) {
+        ASSERT_EQ(ch->status & (CHN_START | CHN_STOP), CHN_START, "one-tick note: START without STOP at its tick");
+        ASSERT_EQ(ch->gateTime, 1, "one-tick note: gate 1, as mid2agb's one-clock minimum");
+        ch->status = CHN_ENV_SUSTAIN;  /* the mixer's envelope step: the frame sounds */
+        m4a_engine_tick(&engine);
+        ASSERT(ch->status & CHN_STOP, "one-tick note: the next tick's gate walk stops it");
+        ASSERT_EQ(ch->gateTime, 0, "one-tick note: gate expired");
+        ch->status = 0;
+    }
+
+    /* --- the same on a CGB channel --- */
+    m4a_engine_program_change(&engine, 0, 2);
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    m4a_engine_note_off(&engine, 0, 60);
+    M4ACGBChannel *sq = &engine.cgbChannels[0];
+    ASSERT_EQ(sq->status, 0, "CGB: nothing before the tick");
+    m4a_engine_tick(&engine);
+    /* The tick's CgbSound pass ran after the drain: the start block took the
+     * channel from START into the attack (not killed, as START | STOP would
+     * have been), and the gate is still armed for the next walk. */
+    ASSERT(sq->status & CHN_ON, "CGB one-tick note: the same tick's CgbSound started the note");
+    ASSERT(!(sq->status & (CHN_START | CHN_STOP)), "CGB one-tick note: attack, no STOP at its tick");
+    ASSERT_EQ(sq->gateTime, 1, "CGB one-tick note: gate 1");
+    m4a_engine_tick(&engine);
+    /* The gate walk set STOP before this tick's CgbSound pass, which took
+     * the channel into its release (release 0: straight off). */
+    ASSERT_EQ(sq->gateTime, 0, "CGB one-tick note: gate expired on the next tick");
+    ASSERT(!(sq->status & CHN_ON) || (sq->status & CHN_ENV_MASK) == CHN_ENV_RELEASE,
+           "CGB one-tick note: released by the next tick's gate walk");
+    for (int i = 0; i < 8; i++)
+        m4a_engine_tick(&engine);
+
+    /* --- CC and bend latched the same way --- */
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    m4a_engine_tick(&engine);
+    ch = NULL;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        if ((engine.pcmChannels[i].status & CHN_ON) && engine.pcmChannels[i].midiKey == 60)
+            ch = &engine.pcmChannels[i];
+    ASSERT(ch != NULL, "CC test note started");
+    uint8_t rawVol = engine.tracks[0].rawVolume;
+    m4a_engine_cc(&engine, 0, 7, 40);
+    ASSERT_EQ(engine.tracks[0].rawVolume, rawVol, "CC 7 not applied before the tick");
+    m4a_engine_pitch_bend(&engine, 0, 4096);
+    ASSERT_EQ(engine.tracks[0].bend, 0, "bend not applied before the tick");
+    m4a_engine_cc(&engine, 0, 0x14, 12);
+    ASSERT_EQ(engine.tracks[0].bendRange, 2, "BENDR not applied before the tick");
+    m4a_engine_xcmd(&engine, 0, M4A_XCMD_IECV, 9);
+    ASSERT_EQ(engine.tracks[0].pseudoEchoVolume, 0, "XCMD not applied before the tick");
+    ASSERT_EQ(engine.eventQueueCount, 4, "CC, bend, BENDR, XCMD queued");
+    uint32_t f0 = ch ? ch->frequency : 0;
+    m4a_engine_tick(&engine);
+    ASSERT_EQ(engine.tracks[0].rawVolume, 40, "CC 7 applied at the tick");
+    ASSERT_EQ(engine.tracks[0].bend, 32, "bend applied at the tick (4096 >> 7)");
+    ASSERT_EQ(engine.tracks[0].bendRange, 12, "BENDR applied at the tick");
+    ASSERT_EQ(engine.tracks[0].pseudoEchoVolume, 9, "XCMD applied at the tick");
+    if (ch)
+        ASSERT(ch->frequency != f0, "the bend reached the sounding channel at the tick");
+    if (ch) ch->status = 0;
+
+    /* --- a panic drops what the latch holds --- */
+    m4a_engine_note_on(&engine, 0, 60, 127);
+    m4a_engine_note_on(&engine, 0, 62, 127);
+    ASSERT_EQ(engine.eventQueueCount, 2, "two note-ons queued");
+    m4a_engine_all_sound_off(&engine);
+    ASSERT_EQ(engine.eventQueueCount, 0, "all sound off drops the queued events");
+    m4a_engine_tick(&engine);
+    on = 0;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        on += (engine.pcmChannels[i].status & CHN_ON) != 0;
+    ASSERT_EQ(on, 0, "nothing starts after the panic");
+
+    /* --- turning the latch off applies the queue at once, in order --- */
+    m4a_engine_cc(&engine, 0, 7, 100);
+    m4a_engine_cc(&engine, 0, 7, 90);
+    ASSERT_EQ(engine.tracks[0].rawVolume, 40, "still latched");
+    m4a_engine_set_quantize_events(&engine, false);
+    ASSERT_EQ(engine.tracks[0].rawVolume, 90, "disabling the latch flushed both CCs in order");
+    ASSERT_EQ(engine.eventQueueCount, 0, "queue empty after the flush");
+    m4a_engine_cc(&engine, 0, 7, 127);
+    ASSERT_EQ(engine.tracks[0].rawVolume, 127, "latch off: CC applies at once again");
+
+    /* --- a full queue applies the overflow at once and counts it --- */
+    m4a_engine_set_quantize_events(&engine, true);
+    for (int i = 0; i < M4A_EVENT_QUEUE_CAPACITY; i++)
+        m4a_engine_cc(&engine, 0, 10, 64);
+    ASSERT_EQ(engine.eventQueueCount, M4A_EVENT_QUEUE_CAPACITY, "queue full");
+    ASSERT_EQ(engine.eventQueueOverflow, 0, "no overflow yet");
+    m4a_engine_cc(&engine, 0, 7, 50);
+    ASSERT_EQ(engine.tracks[0].rawVolume, 50, "overflow: the event applied at once");
+    ASSERT_EQ(engine.eventQueueOverflow, 1, "overflow counted");
+    m4a_engine_tick(&engine);
+    ASSERT_EQ(engine.eventQueueCount, 0, "the full queue drained");
+
+    /* --- the frame hook (the sequencer) bypasses the latch --- */
+    engine.frameHook = latch_hook;
+    latch_hook_started = -1;
+    m4a_engine_tick(&engine);
+    engine.frameHook = NULL;
+    ASSERT(latch_hook_started >= 0, "a note-on from inside the tick applies at once with the latch on");
+    ASSERT_EQ(engine.eventQueueCount, 0, "and queues nothing");
+
+    m4a_engine_destroy(&engine);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -5896,6 +6120,7 @@ int main(void)
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();
+    test_event_latch();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
