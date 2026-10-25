@@ -3380,6 +3380,113 @@ loads with the cry's ToneData as voice 0.
    renders use.  If a frame of the two runs does not compose from them the
    gate records it and stops; nothing is fitted.
 
+### Done: milestone 4 slice 8b-i, two cry players in one render -- the engine and poryaaaa_render (2026-10-25)
+
+**The structural change** (the statement above, carried out as written; no
+runner, `songs.json`, corpus or baseline change, the 62 rows identical).
+`M4ASequencer` gained `trackBase` (its tracks are engine tracks
+`[trackBase, trackBase + maxTracks)`; every engine-track use -- the
+`engine->tracks[i]` fields, `m4a_engine_note_on` / `_xcmd` /
+`_track_apply`, `ply_note`'s scan and CGB steal comparisons, the chain
+membership test -- goes through it, 0 for a lone player), a per-player
+voicegroup for VOICE (`m4a_sequencer_set_voicegroup`;
+`m4a_engine_program_change_from`, NULL = the engine's), and SoundMain's
+chain: `m4a_sequencer_init_chained(outer, inner, trackBase)` attaches a
+higher player whose body runs after `inner`'s from `inner`'s `_081DDA6C`
+cycle count (the second player installs no hook; `inner`'s runs the
+chain; `set_player` refuses a chain-order or track-range violation).
+`m4a_sequencer_frame` became `frame_body` (to the player's `_081DDA6C`:
+the paused 63, or the head 142 + the body, or the tick-all-done 24) run
+for each member in MPlayOpen order, then the last member's `mpExit`; the
+last member publishes `cgbEntryCycles` and writes the `--seq-log` frame
+line after both players' `c` / `t` lines (whose track numbers are now the
+engine index, 2 / 3 for cry 1; `entry_diff` / `cmd_diff` / `track_diff`
+read a two-player log **unchanged** -- the probe's ply_* and `_081DD998`
+breakpoints are in the same order, cry 0's then cry 1's).  A lone player
+runs the old path literally, the one difference the 118 exit charged as
+63 + 55 in two `cyc()` calls instead of one -- additive over the FIFO
+stall's half-open cycle range, and gate a below confirms it.
+`m4a_sequencer_player_free` is `SetPokemonCryTone`'s track-0 test (flags 0
+and no chained channel of its own); `m4a_cry_choose_player` its first-free
+rule over the two cry players (neither free -> -1: the `maxClock`
+replacement stays unimplemented, refused).  `poryaaaa_render --cry2 <id>
+--cry2-start-frame <1..255>` (needs `--cry` on cry0): the second cry's
+sample and its own template copy at CRY_MODE_NORMAL's defaults, cry
+player 1 chained on engine tracks 2..3, a frame-hook wrapper issuing the
+`MPlayStart` at the top of frame F + 2's hook (`frameCount == F`, before
+either body) on the first free cry player -- cry 1 while the first plays,
+cry 0 if the first has finished -- or refusing the render with a message
+when neither is free.  **No new timing constant**; every frame of both
+runs composed from the existing ones.
+
+**Gate a** (`claim_check.sh` against `2026-10-25_second-cry-rom.json` after
+the change): 55 probed tests diffed, **0 moved writes**; harness 53/62,
+0 regressions, every one of the 62 rows 0.0 in null and worst (the -inf
+rows -inf); unit 1395/1395 (before the new tests), blip 49112/0, songs
+561/561.  A single-player render did not move by a cycle.
+
+**Gate b** (the two step-11 runs with the new flags against the probe
+logs; the `_p1` `.frames` files give the same result, the raw logs being
+identical): (a) `--cry 0 --cry2 15 --cry2-start-frame 20`, 3.0 s:
+`entry_diff` 0 on all 177 complete frames (the 180-frame probe's last
+frame has no CgbSound entry), `cmd_diff` 0 of 178, `track_diff` 0 of 178;
+(b) `--cry 123 --cry2 381 --cry2-start-frame 60`, 4.0 s: `entry_diff` 0
+on all 236, `cmd_diff` 0 of 237, `track_diff` 0 of 237.  The skeleton to
+the cycle: (a) 4077 / 1596 / 4736 / 2185 / 2278 / 2165 / 2258 / 2145 /
+2379 / 1761 / 1576 / 1810 / 1192 / 1007 on frames 3 / 4..21 / 22 / 23..32
+/ 33 / 34..49 / 50 / 51..142 / 143 / 144 / 145..161 / 162 / 163 / 164 on;
+(b) 4077 / 1596 / 4736 / 2185 / 2278 / 2165 / 2399 / 1781 / 1596 / 1689 /
+1576 / 1810 / 1192 / 1007 on 3 / 4..61 / 62 / 63..136 / 137 / 138..142 /
+143 / 144 / 145..180 / 181 / 182..201 / 202 / 203 / 204 on.  The second
+cry on cry player 1 and channel 1 through the existing scan constants
+(the 70-cycle pass-over of channel 0 inside the 4736).
+
+**Gate c** (`mgba_render --type cry --id 0 --id2 15 --start-frame2 20
+--frames 182` / `--id 123 --id2 381 --start-frame2 60 --frames 242`
+against the renders, `metrics.compare_files`; not a baseline row):
+(a) null **-60.4 dB**, worst 1 s **-59.9** (at 0.2 s), lag 0.0 ms, gain
+1.00001; (b) null **-45.3 dB**, worst **-42.6** (at 0.1 s), lag 0.0, gain
+0.99998 -- the levels of the one-cry rows (cry_pidgey / cry_bulbasaur
+about -60, cry_jynx / cry_wailord at the floor's -45..-42, the DPCM
+waveforms jumping).  Every run above the 20-LSB threshold attributed
+(the skill's run finder, left and right channels): (a) 3 runs, each one
+PCM sample (0.3..1.4 samples at 48 kHz), at 0.2045 / 0.2715 / 0.3385 s --
+the three `.events` crossings 0.2043 / 0.2713 / 0.3383 s, each 0.2 ms
+after its crossing (the slot's half-period); nothing else.  (b) 21 runs
+on the left channel and 22 on the right, each one PCM sample, every one
+within 0.3 ms of one of the 24 crossings; the crossings at 0.4052 and
+2.1472 s give |d| <= 1 on both channels (the slipped sample equals its
+neighbour there) and 0.7401 s a run on the right channel only (|d| 113,
+left 1).  No run at a note event, no 64-sample block, no whole frame: the
+PCM scheduler-lateness floor and nothing else.
+
+**Gate d** (`test/test_engine.c`, `test_sequencer_cycles_two_cries`:
+unit 1395 -> **1471/1471**): the frame skeleton of both runs on frames
+3..180 / 3..238 against the probe values, played with stand-in DPCM
+samples of the cries' lengths (8183 / 1902, 23524 / 20846 at 10512 Hz);
+the second cry on cry player 1 (`m4a_cry_choose_player` 0 before anything
+plays, 1 with cry 0's track EXIST | START, 0 again when both have
+finished) and on channel 1 with cry 1's track 0 as engine track 2; both
+channels ending through the count path (CHN_ON cleared after the mix of
+frames 32 / 49 and 136 / 180, the unlink ticks 33 / 50 and 137 / 181 in the
+skeleton; never ON | STOP, so no `_081DCFB0` stamp); both EOTs (143 / 162;
+143 / 202) finding the chain empty; the chain's last member publishing the
+entry, both players counting the same frames; a single cry with the second
+player attached and inactive giving the one-cry skeleton of
+`test_sequencer_cycles_cry` unchanged; chain-order refusal and detach.
+
+**Tool changes**: none; `entry_diff` / `cmd_diff` / `track_diff` read the
+merged log as is (one frame line, the c / t lines of both players in
+SoundMain's order).  **What slice 8b-ii needs**: a `songs.json` key for
+the second cry (its id and start frame, e.g. `"id2"` / `"start_frame2"`
+as `mgba_render` names them), the runner passing `--id2 / --start-frame2`
+to `mgba_render` and `--cry2 / --cry2-start-frame` to `poryaaaa_render`
+(and `claim_check.sh`'s cry argument line the same), two corpus entries
+for the runs above (expected: the gate-c nulls, the floor at the listed
+crossings), and the baseline with the two new rows.  Cries over music,
+and a second cry while both players are busy (the `maxClock`
+replacement), stay later.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

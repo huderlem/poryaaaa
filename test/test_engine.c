@@ -5420,6 +5420,172 @@ static void test_sequencer_cycles_cry_high_pitch_two_chain(void)
     free(wd);
 }
 
+/* Two cry players on one frame (plan, "SoundMain timing probe, step 11" and
+ * "Engine: two cry players"): the first cry on cry player 0 from frame 3,
+ * a second at the defaults started on VBlank F (its tick on frame F + 2)
+ * on cry player 1 -- SetPokemonCryTone's first free player -- whose
+ * MPlayMain body runs after cry 0's on the same frame.  The engine's
+ * stand-in samples have the cries' lengths (Bulbasaur 8183, Pidgey 1902,
+ * Jynx 23524, Wailord 20846 DPCM samples at 10512 Hz), so the channels
+ * die on mgba's frames.  The expected CgbSound entries are the probes'
+ * (build/probe/cry_second_bulbasaur_pidgey.txt.frames, frames 3..180;
+ * cry_second_jynx_wailord.txt.frames, 3..238). */
+static int two_cries_expect_a(int k)      /* Cry_Bulbasaur, Cry_Pidgey from VBlank 20 */
+{
+    return k == 3 ? 4077 : k < 22 ? 1596 : k == 22 ? 4736 : k < 33 ? 2185 : k == 33 ? 2278
+         : k < 50 ? 2165 : k == 50 ? 2258 : k < 143 ? 2145 : k == 143 ? 2379 : k == 144 ? 1761
+         : k < 162 ? 1576 : k == 162 ? 1810 : k == 163 ? 1192 : 1007;
+}
+static int two_cries_expect_b(int k)      /* Cry_Jynx, Cry_Wailord from VBlank 60 */
+{
+    return k == 3 ? 4077 : k < 62 ? 1596 : k == 62 ? 4736 : k < 137 ? 2185 : k == 137 ? 2278
+         : k < 143 ? 2165 : k == 143 ? 2399 : k == 144 ? 1781 : k < 181 ? 1596 : k == 181 ? 1689
+         : k < 202 ? 1576 : k == 202 ? 1810 : k == 203 ? 1192 : 1007;
+}
+static int one_cry_expect_pidgey(int k)   /* test_sequencer_cycles_cry's values: cry 1 attached, never started */
+{
+    return k == 3 ? 4077 : k < 14 ? 1596 : k == 14 ? 1689 : k < 143 ? 1576 : k == 143 ? 1810 : k == 144 ? 1192 : 1007;
+}
+
+typedef struct {
+    const char *name;
+    uint32_t size0, size1;      /* the two cries' sample counts */
+    int startFrame2;            /* VBlank of the second StartCry; 0 = none */
+    int lastFrame;
+    int (*expect)(int k);
+    int death0, death1;         /* the frame after whose mix the channel's CHN_ON is clear (the unlink tick is the next frame) */
+    int eot0, eot1;             /* the EOT ticks' frames */
+} TwoCriesRun;
+
+static void run_two_cries(const TwoCriesRun *r)
+{
+    static int8_t decoded0[23524 + 2 * M4A_DPCM_BLOCK_SAMPLES], decoded1[23524 + 2 * M4A_DPCM_BLOCK_SAMPLES];
+    WaveData *wd0 = make_dpcm_wave(r->size0, 0, 0, decoded0);
+    WaveData *wd1 = make_dpcm_wave(r->size1, 0, 0, decoded1);
+    wd0->freq = wd1->freq = 10512u << 10;
+    static ToneData voices0[128], voices1[128];
+    memset(voices0, 0, sizeof(voices0));
+    memset(voices1, 0, sizeof(voices1));
+    for (int v = 0; v < 2; v++) {
+        ToneData *t = v ? voices1 : voices0;
+        t[0].type = VOICE_CRY; t[0].key = 60; t[0].wav = v ? wd1 : wd0;
+        t[0].attack = 0xFF; t[0].decay = 0; t[0].sustain = 0xFF; t[0].release = 0;
+    }
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    M4ASong *song0 = m4a_cry_song_new(&p);
+    M4ASong *song1 = m4a_cry_song_new(&p);      /* gPokemonCrySongs[1]: its own copy of the same bytes */
+    ASSERT(song0 && song1, "two cries: both template copies built");
+    if (!song0 || !song1) { free(wd0); free(wd1); return; }
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices0);
+    M4ASequencer seq0, seq1;
+    m4a_sequencer_init(&seq0, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&seq0, M4A_PLAYER_CRY0), 0, "two cries: cry player 0");
+    ASSERT_EQ(m4a_sequencer_init_chained(&seq1, &seq0, seq0.trackBase + seq0.maxTracks), 0, "two cries: cry player 1 chained after cry 0 on engine tracks 2..3");
+    ASSERT_EQ(seq1.trackBase, 2, "two cries: cry 1's track 0 is engine track 2 (above cry 0's 0..1, as gPokemonCryTracks[2] lies above [0])");
+    ASSERT_EQ(m4a_sequencer_set_player(&seq1, M4A_PLAYER_CRY1), 0, "two cries: cry player 1 selected");
+    ASSERT_EQ(m4a_sequencer_set_player(&seq1, M4A_PLAYER_CRY0), -1, "two cries: a chained player below its inner is refused");
+    ASSERT_EQ(seq1.player, M4A_PLAYER_CRY1, "two cries: ... and the player is unchanged");
+    ASSERT(engine.frameHookUser == &seq0 && seq0.outer == &seq1 && seq1.inner == &seq0, "two cries: one hook (cry 0's) runs the chain");
+    m4a_sequencer_set_voicegroup(&seq1, voices1);
+    M4ASequencer *players[2] = { &seq0, &seq1 };
+    ASSERT_EQ(m4a_cry_choose_player(players), 0, "two cries: before anything plays SetPokemonCryTone takes cry player 0");
+    m4a_engine_boot(&engine, false);
+    m4a_sequencer_start(&seq0, song0);
+    ASSERT_EQ(m4a_cry_choose_player(players), 1, "two cries: with cry 0's track 0 EXIST | START, the next cry takes cry player 1");
+
+    static float outL[4096], outR[4096];
+    int mismatches = 0, chan1 = -1, started = -1;
+    int death[2] = { -1, -1 };
+    bool stopSeen[2] = { false, false };
+    bool chainEmptyAtEot[2] = { false, false };
+    for (int k = 3; k <= r->lastFrame; k++) {
+        if (r->startFrame2 && k == r->startFrame2 + 2) {
+            /* StartCry on VBlank startFrame2: MPlayStart between the two
+             * SoundMains, as poryaaaa_render's cry2 hook issues it */
+            started = m4a_cry_choose_player(players);
+            if (started >= 0)
+                m4a_sequencer_start(players[started], song1);
+        }
+        for (int t = 0; t < 2; t++) {
+            int c = t == 0 ? 0 : chan1;
+            if (c < 0) continue;
+            int eot = t == 0 ? r->eot0 : r->eot1;
+            if (k == eot)           /* before the EOT tick runs: the chain it will walk */
+                chainEmptyAtEot[t] = players[t]->chainOwner[c] == 0 && !(engine.pcmChannels[c].status & CHN_ON);
+        }
+        advance_frames(&engine, 1, outL, outR);
+        if (seq1.frameCycles != r->expect(k)) {
+            if (mismatches++ < 5)
+                printf("  %s frame %d: engine %d, mgba %d\n", r->name, k, seq1.frameCycles, r->expect(k));
+        }
+        if (r->startFrame2 && k == r->startFrame2 + 2)
+            for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+                if ((engine.pcmChannels[i].status & CHN_ON) && engine.pcmChannels[i].trackIndex == 2)
+                    chan1 = i;
+        for (int t = 0; t < 2; t++) {
+            int c = t == 0 ? 0 : chan1;
+            if (c < 0) continue;
+            uint8_t st = engine.pcmChannels[c].status;
+            if ((st & CHN_ON) && (st & CHN_STOP)) stopSeen[t] = true;
+            if (death[t] < 0 && !(st & CHN_ON)) death[t] = k;
+        }
+    }
+    char msg[256];
+    snprintf(msg, sizeof(msg), "sequencer: CgbSound entry matches the %s probe on frames 3..%d (both players)", r->name, r->lastFrame);
+    ASSERT_EQ(mismatches, 0, msg);
+    ASSERT_EQ(engine.cgbEntryCycles, seq1.frameCycles - M4A_CYC_SOUNDMAIN_ENTRY, "two cries: the chain's last member publishes the entry");
+    ASSERT_EQ(seq0.frameCount, seq1.frameCount, "two cries: both players count the same frames");
+    ASSERT_EQ(engine.pcmChannels[0].trackIndex, 0, "two cries: the first cry took channel 0");
+    ASSERT_EQ(death[0], r->death0, "two cries: the first cry's channel ends on mgba's frame through the count path");
+    ASSERT(!stopSeen[0], "two cries: the first cry's channel was never releasing (no _081DCFB0 stamp: the sample ran out)");
+    ASSERT(chainEmptyAtEot[0], "two cries: cry 0's EOT finds an empty chain");
+    if (r->startFrame2) {
+        ASSERT_EQ(started, 1, "two cries: the second cry took cry player 1 (SetPokemonCryTone's first free player)");
+        ASSERT_EQ(chan1, 1, "two cries: the second cry took channel 1 (ply_note's index-order scan passing over the first cry's channel 0)");
+        ASSERT_EQ(seq1.noteCount, 1, "two cries: one TIE on cry player 1");
+        ASSERT_EQ(seq0.noteCount, 1, "two cries: one TIE on cry player 0");
+        ASSERT_EQ(death[1], r->death1, "two cries: the second cry's channel ends on mgba's frame through the count path");
+        ASSERT(!stopSeen[1], "two cries: the second cry's channel was never releasing");
+        ASSERT(chainEmptyAtEot[1], "two cries: cry 1's EOT finds an empty chain");
+        ASSERT(m4a_sequencer_finished(&seq0) && m4a_sequencer_finished(&seq1), "two cries: both players finished");
+        ASSERT_EQ(seq1.clock, 142, "two cries: cry 1's 142 ticks");
+        ASSERT_EQ(m4a_cry_choose_player(players), 0, "two cries: both finished, cry player 0 is free again");
+    } else {
+        ASSERT_EQ(seq1.noteCount, 0, "lone cry with cry 1 attached: cry 1 never played");
+        ASSERT(m4a_sequencer_finished(&seq0) && seq1.song == NULL, "lone cry with cry 1 attached: cry 0 finished, cry 1 idle");
+    }
+
+    m4a_sequencer_detach(&seq1);
+    ASSERT(seq0.outer == NULL && engine.frameHookUser == &seq0, "two cries: detaching the outer player leaves cry 0's hook");
+    m4a_sequencer_detach(&seq0);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song0);
+    m4a_song_free(song1);
+    free(wd0);
+    free(wd1);
+}
+
+static void test_sequencer_cycles_two_cries(void)
+{
+    printf("Testing two cry players on one frame (cry_second_bulbasaur_pidgey / cry_second_jynx_wailord probes)...\n");
+    static const TwoCriesRun runs[] = {
+        /* (a): Pidgey (cry 1, channel 1) dies after frame 32's mix, unlinked on 33 = 22 + 11; Bulbasaur after 49, unlinked on 50;
+         *      cry 0's EOT on 143 with cry 1's track dead (2379), cry 1's on 162 = 22 + 140. */
+        { "cry_second_bulbasaur_pidgey", 8183, 1902, 20, 180, two_cries_expect_a, 49, 32, 143, 162 },
+        /* (b): Jynx (cry 0) dies after 136, unlinked on 137; Wailord (cry 1) after 180, unlinked on 181 = 62 + 119;
+         *      cry 0's EOT on 143 with cry 1's channel alive (2399), cry 1's on 202 = 62 + 140. */
+        { "cry_second_jynx_wailord", 23524, 20846, 60, 238, two_cries_expect_b, 136, 180, 143, 202 },
+        /* a single cry with the second player attached and inactive: the one-cry skeleton, unchanged */
+        { "cry_pidgey (cry 1 attached, inactive)", 1902, 1902, 0, 145, one_cry_expect_pidgey, 13, -1, 143, 0 },
+    };
+    for (size_t i = 0; i < sizeof(runs) / sizeof(runs[0]); i++)
+        run_two_cries(&runs[i]);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -5483,6 +5649,7 @@ int main(void)
     test_sequencer_cry_two_tracks();
     test_sequencer_cycles_cry_encounter_chorus();
     test_sequencer_cycles_cry_high_pitch_two_chain();
+    test_sequencer_cycles_two_cries();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

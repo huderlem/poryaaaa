@@ -92,9 +92,15 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   is on engine frame startFrame2 + 2); it lands on cry player 1
   (`SetPokemonCryTone`'s first free player), whose `.frames` summary the
   eighth argument `gPokemonCryMusicPlayers[1]` selects (`symbol[N]` = N *
-  0x40 past the symbol); `probe_mplay.py --player CRY1` prints its run.  No
-  corpus entry plays two cries yet (the engine runs one sequencer per
-  render; plan, step 11 and slice 8a).  The probe's `_081DCFB0` breakpoint
+  0x40 past the symbol); `probe_mplay.py --player CRY1` prints its run.
+  poryaaaa plays the same with `poryaaaa_render --cry N --cry2 M
+  --cry2-start-frame F` (slice 8b-i: the second cry's template copy on cry
+  player 1, a second sequencer chained after cry 0's on engine tracks
+  2..3, its MPlayMain body after cry 0's on the same frame; the first free
+  cry player by `SetPokemonCryTone`'s rule, both busy refused); one
+  `--seq-log` holds both players' lines and the three diff tools read it
+  as is.  No corpus entry plays two cries yet (the `songs.json` key, the
+  runner and the baseline rows are slice 8b-ii).  The probe's `_081DCFB0` breakpoint
   (SoundMainRAM's channel stop, at its IWRAM copy) stamps the frame a
   releasing channel dies on (one stamp per channel: a two-track cry whose
   EOT releases both chains gives two on the same frame); a sample that runs

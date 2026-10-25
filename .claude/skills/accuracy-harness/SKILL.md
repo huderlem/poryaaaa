@@ -304,8 +304,7 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   one: `mgba_probe ... 180 1 N build/probe/syms.nm gPokemonCryMusicPlayers`
   (type 1 = cry) and `probe_mplay.py --player CRY0 ...`; render with
   `--cry N` for the entry / cmd / track diffs (cries have no PSG writes).
-  A second cry while the first plays (ground truth only so far, slice 8a:
-  the engine runs one sequencer per render): `mgba_render --id2 N
+  A second cry while the first plays: `mgba_render --id2 N
   --start-frame2 F` / the probe's fifteenth and sixteenth arguments after
   the six cry parameters (`... 15360 0 120 140 0 0 N F`) start gCryTable[N]
   at the defaults on VBlank F (start tick on engine frame F + 2); it takes
@@ -314,7 +313,16 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   argument (`symbol[N]` = N * 0x40 past the symbol) makes the `.frames`
   summary read that player, `probe_mplay.py --player CRY1` prints its run.
   Frame with both playing = 1007 + (79 + body) per playing player, cry 1's
-  body after cry 0's (plan, step 11).
+  body after cry 0's (plan, step 11).  poryaaaa: `poryaaaa_render --cry N
+  --cry2 M --cry2-start-frame F` (slice 8b-i: a second sequencer chained
+  after cry 0's, on engine tracks 2..3, its own template copy and
+  voicegroup, the first free cry player, both busy refused); one
+  `--seq-log` carries both players and `entry_diff` / `cmd_diff` /
+  `track_diff` read it unchanged (the `c` / `t` lines' track number is the
+  engine index, 2 / 3 for cry 1).  The two probed runs are `--cry 0
+  --cry2 15 --cry2-start-frame 20` (3 s, `cry_second_bulbasaur_pidgey`)
+  and `--cry 123 --cry2 381 --cry2-start-frame 60` (4 s,
+  `cry_second_jynx_wailord`); no corpus entry yet (slice 8b-ii).
   Optional `"pitch"`, `"pan"`, `"volume"`, `"length"`, `"release"`,
   `"chorus"` keys (SetPokemonCryPitch / Panpot / Volume / Length / Release
   / Chorus's arguments; take the values from `PlayCryInternal`'s modes in
