@@ -117,7 +117,12 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   (se_exp, Cry_Bulbasaur from VBlank 30) and `cry_over_bgm.txt`
   (mus_littleroot, from VBlank 60) are plan step 12 (slice 9a, ground
   truth only; the cry over music steals a releasing BGM channel on its
-  start frame).  The probe's `_081DCFB0` breakpoint
+  start frame).  poryaaaa plays the same with `poryaaaa_render --song <.s>
+  [--player se1|se2|se3] --cry2 N --cry2-start-frame F` (slice 9b-i: cry
+  player 0 chained after the song's player -- BGM -> cry 0 on engine tracks
+  10..11, SE1 -> cry 0 on 3..4 -- its body after the song's on the same
+  frame, the cross-player steal unlinking the stolen channel from the
+  owner's chain at once; not yet in `songs.json`).  The probe's `_081DCFB0` breakpoint
   (SoundMainRAM's channel stop, at its IWRAM copy) stamps the frame a
   releasing channel dies on (one stamp per channel: a two-track cry whose
   EOT releases both chains gives two on the same frame); a sample that runs

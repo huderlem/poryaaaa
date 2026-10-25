@@ -337,8 +337,14 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   running the second-cry block after its type switch: `build/probe/
   cry_over_se.txt` (se_exp + Cry_Bulbasaur from VBlank 30, no steal) and
   `cry_over_bgm.txt` (mus_littleroot + Cry_Bulbasaur from VBlank 60: the
-  cry steals a releasing BGM channel on frame 62), plan step 12; the engine
-  side is slice 9b, not yet implemented.
+  cry steals a releasing BGM channel on frame 62), plan step 12.  poryaaaa
+  plays them with `poryaaaa_render --song build/accuracy/rom/songs/se_exp.s
+  --player se1 --cry2 0 --cry2-start-frame 30` / `--song .../mus_littleroot.s
+  --cry2 0 --cry2-start-frame 60` (slice 9b-i: cry player 0 chained after
+  the song's player, BGM -> cry 0 on engine tracks 10..11 / SE1 -> cry 0 on
+  3..4, the steal unlinking the owner's chain at once; `--seq-log` /
+  `--psg-log` and the diff tools as for two cries; the `songs.json` rows
+  and the runner's lines are slice 9b-ii).
   Optional `"pitch"`, `"pan"`, `"volume"`, `"length"`, `"release"`,
   `"chorus"` keys (SetPokemonCryPitch / Panpot / Volume / Length / Release
   / Chorus's arguments; take the values from `PlayCryInternal`'s modes in

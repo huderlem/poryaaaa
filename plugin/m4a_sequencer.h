@@ -158,6 +158,13 @@ void m4a_sequencer_init(M4ASequencer *seq, M4AEngine *engine);
  * tracks, which changes nothing. */
 int m4a_sequencer_init_chained(M4ASequencer *seq, M4ASequencer *inner, int trackBase);
 
+/* The same with the player named: a chain may skip players (BGM -> cry 0
+ * with the three SE players paused between them, SE1 -> cry 0), their idle
+ * costs charged by the chain's frame code.  `player` must be a higher
+ * M4A_PLAYER_* than inner's and its tracks must fit.  Returns 0, or -1 as
+ * above (and for a player out of order or range), which changes nothing. */
+int m4a_sequencer_init_chained_player(M4ASequencer *seq, M4ASequencer *inner, int trackBase, int player);
+
 /* The 128-entry voicegroup this player's VOICE commands select from (NULL:
  * the engine's, the default). */
 void m4a_sequencer_set_voicegroup(M4ASequencer *seq, const ToneData *voiceGroup);

@@ -124,6 +124,20 @@ static int unlink_cost(M4ASequencer *s, int h, int c00, int c01, int c10, int c1
     return prev ? (next ? c11 : c10) : (next ? c01 : c00);
 }
 
+/* The other chained player whose track still chains channel h (the GBA's
+ * channel->track pointing into another MusicPlayerTrack array), or NULL:
+ * a free channel, or one no chain holds any more. */
+static M4ASequencer *chain_owner_of(M4ASequencer *s, int h)
+{
+    M4ASequencer *m = s;
+    while (m->inner)
+        m = m->inner;
+    for (; m; m = m->outer)
+        if (m != s && m->chainOwner[h] != 0)
+            return m;
+    return NULL;
+}
+
 /* Charge n cycles of MPlayMain work.  frameCycles counts from VBlank line
  * 160; the SoundMain stamp (line 160 + M4A_CYC_SOUNDMAIN_ENTRY) places it on
  * the CPU clock, where the sound FIFO's refill DMA stalls the CPU for 18
@@ -734,21 +748,29 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
     if (expect < 0)
         return;
 
-    /* ClearChain(channel) and the prepend to this track's chain.  Only this
-     * player's chains are known here: a channel another chained player's
-     * track still holds would be charged UNLINK_NONE and linger in that
-     * player's chainOwner until its next walk, where the GBA's
-     * RealClearChain drops it at once through channel->track.  Not
-     * reachable with the two cry players (at most four channels of five,
-     * a free one always found; slice 8b-i review), noted for a BGM + cry
-     * chain. */
+    /* ClearChain(channel) and the prepend to this track's chain.  The GBA
+     * unlinks the channel from whichever track still chains it, through
+     * channel->track, with that chain's prev / next (RealClearChain): a
+     * channel of this player's own track as before, and a channel another
+     * chained player's track holds -- the cross-player steal of plan step
+     * 12 (a cry over music, frame 62: the cry's ply_note takes a releasing
+     * BGM channel, NOTE_UNLINK_11 66 + CHAIN_EMPTY 4 = 70) -- is unlinked
+     * from that owner's chain at once, so the owner's next walk sees one
+     * channel fewer and never meets it as dead.  The same-player path is
+     * literally the one before. */
     cyc(s, M4A_CYC_NOTE_TAKE);
     int unlink;
-    if (s->chainOwner[h] == 0)
-        unlink = M4A_CYC_NOTE_UNLINK_NONE;
-    else
+    if (s->chainOwner[h] == 0) {
+        M4ASequencer *owner = chain_owner_of(s, h);
+        if (owner)
+            unlink = unlink_cost(owner, h, M4A_CYC_NOTE_UNLINK_00, M4A_CYC_NOTE_UNLINK_01,
+                                 M4A_CYC_NOTE_UNLINK_10, M4A_CYC_NOTE_UNLINK_11);
+        else
+            unlink = M4A_CYC_NOTE_UNLINK_NONE;
+    } else {
         unlink = unlink_cost(s, h, M4A_CYC_NOTE_UNLINK_00, M4A_CYC_NOTE_UNLINK_01,
                              M4A_CYC_NOTE_UNLINK_10, M4A_CYC_NOTE_UNLINK_11);
+    }
     bool chainEmpty = true;
     for (int k = 0; k < CHAN_COUNT && chainEmpty; k++)
         if (s->chainOwner[k] == i + 1)
@@ -1155,7 +1177,10 @@ void m4a_sequencer_frame(M4ASequencer *s)
     for (M4ASequencer *o = s->outer; o; o = o->outer) {
         o->frameCycles = last->frameCycles;
         /* players between the two in the chain, none of them attached:
-         * paused, M4A_CYC_MP_IDLE each (none between the cry players) */
+         * paused, M4A_CYC_MP_IDLE each (none between the cry players; the
+         * three SE players between BGM and cry 0, SE2 / SE3 between SE1
+         * and cry 0 -- plan step 12's 1007 + (79 + body) per playing
+         * player) */
         cyc(o, (o->player - last->player - 1) * M4A_CYC_MP_IDLE);
         frame_body(o);
         publish_cycles(last);
@@ -1189,9 +1214,17 @@ void m4a_sequencer_init(M4ASequencer *s, M4AEngine *engine)
 
 int m4a_sequencer_init_chained(M4ASequencer *s, M4ASequencer *inner, int trackBase)
 {
-    if (!inner || inner->outer || trackBase < inner->trackBase + inner->maxTracks
-        || trackBase >= MAX_TRACKS || inner->player + 1 >= M4A_PLAYER_COUNT)
+    /* the next player up the chain (cry 1 after cry 0) */
+    if (!inner || inner->player + 1 >= M4A_PLAYER_COUNT)
         return -1;      /* nothing is opened after cry player 1 */
+    return m4a_sequencer_init_chained_player(s, inner, trackBase, inner->player + 1);
+}
+
+int m4a_sequencer_init_chained_player(M4ASequencer *s, M4ASequencer *inner, int trackBase, int player)
+{
+    if (!inner || inner->outer || trackBase < inner->trackBase + inner->maxTracks
+        || trackBase >= MAX_TRACKS)
+        return -1;
     memset(s, 0, sizeof(*s));
     s->engine = inner->engine;
     s->status = MUSICPLAYER_STATUS_PAUSE;
@@ -1200,8 +1233,10 @@ int m4a_sequencer_init_chained(M4ASequencer *s, M4ASequencer *inner, int trackBa
     s->inner = inner;
     s->frameCount = inner->frameCount;
     inner->outer = s;
-    /* the next player up the chain; set_player checks the order and range */
-    if (m4a_sequencer_set_player(s, inner->player + 1) != 0) {
+    /* set_player checks the chain order and the track range; the players
+     * skipped between inner and this one stay paused, their M4A_CYC_MP_IDLE
+     * each charged by m4a_sequencer_frame */
+    if (m4a_sequencer_set_player(s, player) != 0) {
         inner->outer = NULL;
         return -1;
     }

@@ -3909,6 +3909,135 @@ reports for 241 frames (the blip's own rounding; the plan quotes the
 reported count); step 11's "one sequencer per render" sentence stays
 historical.
 
+### Done: milestone 4 slice 9b-i, a cry over a sound effect and over music -- the engine and poryaaaa_render (2026-10-25)
+
+**The structural change** (step 12's statement, carried out as written; no
+`songs.json`, runner, `claim_check.sh`, ROM, reference or baseline change;
+`plugin/m4a_sequencer.c/.h`, `cmd/poryaaaa_render.c`, `test/test_engine.c`
+only).  Before anything, `claim_check.sh` against
+`2026-10-25_two-cry-rows.json` reproduced the baseline (57 diffed, 0 moved,
+55/64, 0 regressions, every row 0.0; unit 1471/1471, blip 49112/0, songs
+561/561).
+(1) `m4a_sequencer_init_chained_player(outer, inner, trackBase, player)`
+names the chained player; `m4a_sequencer_init_chained` is now the wrapper
+selecting `inner->player + 1` (cry 1 after cry 0, unchanged).  BGM (10
+tracks) -> cry 0 on engine tracks 10..11 and SE1 (3) -> cry 0 on 3..4 are
+accepted (SE2 -> cry 0 on 9..10, SE3 -> cry 0 on 1..2 too), and a BGM ->
+SE1 -> cry 0 chain of 15 tracks, which the next-player form refused.  The
+gap players' idle 63 each were already charged by the chain's frame code
+(`(o->player - last->player - 1) * M4A_CYC_MP_IDLE`: SE1 / SE2 / SE3's 189
+for BGM -> cry 0, SE2 / SE3's 126 for SE1 -> cry 0) -- verified, not
+re-added: frame 32 of run (a) = 637 + 142 + 1516 + 126 + 142 + 2991 + 118
+= 5672.  (2) **The cross-player steal**: when `ply_note`'s note-on takes a
+channel this player's own chains do not hold, `chain_owner_of` walks the
+chain (to its first member, then along `outer`) for the member whose
+`chainOwner[h]` still holds it -- the GBA's `channel->track` -- and the
+taking note charges `NOTE_TAKE` + `unlink_cost` run against *that* owner
+(its prev / next: `NOTE_UNLINK_00/01/10/11`) + `CHAIN_EMPTY` when the
+taker's chain is empty, clearing the owner's `chainOwner[h]` at once; the
+owner's next walk sees one channel fewer (the -32) and never meets the
+channel as dead.  No owner found: `NOTE_UNLINK_NONE` 44 as before.  The
+same-player path is literally the one before (a channel of this player's
+own track goes through the unchanged branch).  (3) `poryaaaa_render --song
+<se or song .s> [--player bgm|se1|se2|se3] --cry2 <id> --cry2-start-frame
+<F>` plays gCryTable[id] at CRY_MODE_NORMAL's defaults over the song: cry
+player 0 chained after the song's player with the cry's ToneData as its own
+voicegroup (`load_cry2`, the loading shared with the `--cry --cry2` form),
+the `MPlayStart` at the top of frame F + 2's hook by `m4a_cry_choose_player`
+over `{cry 0, NULL}` (cry 0 from silence).  `--cry ... --cry2` (cry 1 after
+cry 0) is unchanged.  Refused with messages: `--cry2` without `--cry` or
+`--song` (the MIDI path), and `--player cry0 / cry1` for the song in this
+form (`main`'s check and `render_sequenced`'s, the latter also covering a
+chain the sequencer refuses).  **No new timing constant**: every frame of
+both runs composed from the existing `M4A_CYC_*` values at the first
+render; nothing was fitted.
+
+**Gate a** (`claim_check.sh` against `2026-10-25_two-cry-rows.json` after
+the engine change, before the new tests): 57 tests diffed, **0 moved
+writes**; harness 55/64 (the nine documented FAILs), 0 regressions, every
+one of the 64 rows 0.0 in null and worst (the -inf rows -inf: compare's
+"rows that moved" empty); unit 1471/1471, blip 49112/0, songs 561/561.  A
+lone player and the cry 0 -> cry 1 chain did not move by a cycle.
+
+**Gate b** (the two step-12 runs with `--seq-log` / `--psg-log` against
+`build/probe/cry_over_se.txt` / `cry_over_bgm.txt`; 3.0 s each): (a)
+`--song build/accuracy/rom/songs/se_exp.s --player se1 --cry2 0
+--cry2-start-frame 30`: `entry_diff` 176 frames compared, 0 differ, max
+|d| 0 (the 180-frame probe's frames 3..178); `cmd_diff` 0 of 178;
+`track_diff` 0 of 178; `probe_diff` threshold 0: mgba 284 writes, engine
+284, max |d| 0 cycles.  (b) `mus_littleroot.s --cry2 0 --cry2-start-frame
+60`: `entry_diff` 176 / 0 / 0; `cmd_diff` 0 of 178; `track_diff` 0 of 178;
+156 writes against 156, max |d| 0.  Frame 62's 7136 = 3820 + 79 + 3237 with
+the steal's 70 (`NOTE_UNLINK_11` 66 + `CHAIN_EMPTY` 4) and the BGM's -32
+tick frames after it reproduced; with `chain_owner_of` disabled (a
+negative check of gate d's test, reverted) the engine reads 7114 on frame
+62 (-22) and 3232 on 63 (+123: the spurious dead drop, `WALK_DEAD` 59 +
+`WALK_UNLINK_*` + the walk, instead of the GBA's -32) -- step 12's
+prediction to the cycle.
+
+**Gate c** (`metrics.compare_files` of each render against
+`build/scratch/cry_over_se.wav` / `cry_over_bgm.wav`, the `mgba_render
+--type song --id 33 --id2 0 --start-frame2 30 --frames 182` / `--id 405
+... --start-frame2 60` references; not baseline rows): (a) null **-55.0
+dB**, worst 1 s **-52.7** (at 0.0 s), lag 0.0 ms, gain 0.999999; (b) null
+**-49.6 dB**, worst **-46.4** (at 1.6 s), lag 0.0, gain 0.99997.  Every run
+above 20 LSB attributed (the skill's run finder, both channels, against
+the raw logs' `L timer0` lines = the `.events` slot crossings): (a) 4 runs
+per channel, each one PCM sample (0.3..1.4 samples at 48 kHz), at 0.7403 /
+0.7742 / 0.8073 / 1.0751 s -- four of the 6 crossings (0.7401 / 0.7740 /
+0.8071 / 1.0750), each 0.19..0.21 ms after its crossing (the slot's
+half-period); the crossings 0.5392 / 0.6062 give |d| <= 20 on both
+channels (the slipped sample equals its neighbour: the SE's first 0.54 s
+are PSG only, the cry not yet started).  (b) 17 runs per channel, each one
+PCM sample, every one 0.19..0.21 ms after one of the 20 crossings; the
+crossings 0.2382 / 0.3052 give |d| <= 20 on both channels and 1.8116 s a
+run on the right channel only (left 2.0797 s only).  No run at a note
+event (the steal on frame 62 = 1.04 s has none), no 64-sample block, no
+whole frame: the PCM scheduler-lateness floor and nothing else.  The
+levels sit between the one-cry rows' (-60 / -45): a PCM song's floor with
+the cry's DPCM jumps added.
+
+**Gate d** (`test/test_engine.c`, `test_sequencer_cycles_cry_over_song`:
+unit 1471 -> **1521/1521**): the frame skeleton of both runs on frames
+3..178 against the probes' CgbSound entries (two 176-value tables), played
+from the ROM's compiled `build/accuracy/rom/songs/se_exp.s` /
+`mus_littleroot.s` with their vanilla voicegroups (`rs_sfx_1` /
+`littleroot` from `~/pokeemerald`; the runs are skipped with a message
+when either is absent) and a stand-in DPCM sample of Cry_Bulbasaur's 8183
+samples at 10512 Hz; cry 0 chained after SE1 at trackBase 3 / after BGM at
+10 with one hook (the song's); `m4a_cry_choose_player` over `{cry 0, NULL}`
+0; the state `ply_note` scans on the start tick (run (a): no DirectSound
+channel ON, the free take of channel 0; run (b): five ON, channel 1 ON |
+STOP on BGM track 1 with `chainOwner[1] == 2`), then after it the cry's
+channel with `trackIndex` = cry 0's engine track, cry 0's `chainOwner` 1,
+the BGM's `chainOwner[1]` **0 at once** and the same track's other
+releasing channel 0 still chained; the cry's channel ending through the
+count path after frame 78 / 108 (the unlink ticks 79 / 109; never ON |
+STOP); run (a)'s EOT 172 finding the chain empty; the last member
+publishing the entry, both players counting the same frames; one TIE on
+cry 0; detaching cry 0 leaves the song's hook.  And the chain
+constructors: the next-player form after cry 0 still selects cry 1; the
+explicit form refuses a player not above its inner's, a trackBase inside
+the inner's tracks, SE2's 9 tracks at 10 (past 16) and an inner that
+already has an outer, and accepts BGM -> SE1 (10..12) -> cry 0 (13..14).
+
+**Tool changes**: none (`entry_diff` / `cmd_diff` / `track_diff` /
+`probe_diff` read the chained log as for two cries).  **What slice 9b-ii
+needs**: `songs.json` keys on `se` / `song` entries -- the same `"id2"` /
+`"start_frame2"` pair (both or neither, the runner's range checks 0..65535
+/ 1..255) in the song / SE branch of the runner's loader, which today
+builds `cry2` / `cry2_start_frame` only for `kind == "cry"`; the runner's
+two lines -- `mgba_render ... --id2 N --start-frame2 F` (already emitted
+for any entry carrying `cry2`) and `poryaaaa_render --song <.s> [--player
+seN] --cry2 N --cry2-start-frame F` in the song / SE branch (today only in
+the `t.get("cry")` branch), `--input midi` skipping such an entry as it
+skips cries; `claim_check.sh`'s SE / song argument lines gaining the two
+flags from the keys as its cry line has them; two rows, `cry_over_se`
+(se_exp, id2 0, start_frame2 30, 3 s; expected the gate-c -55.0 / -52.7)
+and `cry_over_bgm` (mus_littleroot, id2 0, start_frame2 60, 3 s, or 4 s to
+cover the EOT 202; -49.6 / -46.4 at 3 s); the baseline with the two new
+rows, the 64 existing identical.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

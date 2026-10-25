@@ -5587,6 +5587,247 @@ static void test_sequencer_cycles_two_cries(void)
         run_two_cries(&runs[i]);
 }
 
+/* A cry over a sound effect and over music (plan, probe step 12 / slice
+ * 9b-i): cry player 0 chained after the song's player -- SE1 (3 tracks) ->
+ * cry 0 on engine tracks 3..4, BGM (10) -> cry 0 on 10..11 -- with the
+ * paused players between them (SE2 / SE3; SE1 / SE2 / SE3) charged by the
+ * chain, so every frame is 1007 + (79 + body) per playing player.  The
+ * songs are the ROM's compiled se_exp.s / mus_littleroot.s with their
+ * vanilla voicegroups (skipped with a message when build/accuracy or
+ * ~/pokeemerald is absent); the cry is a stand-in DPCM sample of
+ * Cry_Bulbasaur's 8183 samples at 10512 Hz (the count path ends it on
+ * the probe's frame).  Expected: the CgbSound entry of
+ * build/probe/cry_over_se.txt.frames / cry_over_bgm.txt.frames on frames
+ * 3..178 (the 180-frame probes' last complete frame).  Run (a): the cry's
+ * start tick on frame 32 takes channel 0 free (no DirectSound channel ON:
+ * the SE's note is a square voice).  Run (b): on frame 62 all five
+ * DirectSound channels are ON and the cry's ply_note steals channel 1, a
+ * releasing (ON | STOP) note of BGM track 1, by the stopping-candidate
+ * rule; the GBA's RealClearChain unlinks it from BGM track 1's chain at
+ * once through channel->track (NOTE_UNLINK_11 66 + CHAIN_EMPTY 4 = 70
+ * inside the 7136), so the BGM's later walks see one channel fewer (-32
+ * on its tick frames) and never meet it as dead. */
+typedef struct {
+    const char *name;
+    const char *songFile;       /* under build/accuracy/rom/songs/ */
+    const char *voicegroup;     /* the song's, as m4a_song names it (no voicegroup_ prefix), loaded from ~/pokeemerald */
+    int player;                 /* the song's M4A_PLAYER_* */
+    int trackBase;              /* cry 0's engine track 0 */
+    int startFrame2;            /* VBlank of the StartCry: the start tick on frame + 2 */
+    int cryChan;                /* the channel the cry takes */
+    int stolenFromTrack;        /* the BGM track (from 0) whose releasing channel it was; -1 = a free take */
+    int unlinkFrame;            /* the cry's unlink tick (its channel's CHN_ON clear after the frame before) */
+    int eot;                    /* the cry's EOT tick frame, or 0 when past the run */
+    const int *expect;          /* frames 3..178 */
+} CryOverRun;
+
+static const int sCryOverSeExpect[176] = {
+        3987, 2117, 2602, 2111, 2331, 2950, 2111, 2331, 2111, 2950,   /* 3..12 */
+        2602, 1412, 2950, 2111, 2602, 2679, 2111, 2602, 2459, 2331,   /* 13..22 */
+        2602, 2459, 2331, 2111, 2950, 2602, 1412, 2950, 2111, 5672,   /* 23..32 */
+        3268, 2700, 3191, 3048, 2920, 3191, 3048, 2920, 2700, 3539,   /* 33..42 */
+        3191, 2001, 3539, 2700, 3191, 3268, 2700, 3191, 3048, 2920,   /* 43..52 */
+        3191, 3048, 2920, 2700, 3539, 3191, 2001, 3539, 2700, 3191,   /* 53..62 */
+        3268, 2700, 3191, 3048, 2920, 3191, 3048, 2920, 2700, 3539,   /* 63..72 */
+        3191, 2001, 3539, 2700, 3191, 3268, 2793, 3171, 3028, 2900,   /* 73..82 */
+        3171, 3028, 2900, 2680, 3519, 3171, 1981, 3519, 2680, 3171,   /* 83..92 */
+        3248, 2680, 3171, 3028, 2900, 3171, 3028, 2900, 2340, 1795,   /* 93..102 */
+        1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576,   /* 103..112 */
+        1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576,   /* 113..122 */
+        1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576,   /* 123..132 */
+        1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576,   /* 133..142 */
+        1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576,   /* 143..152 */
+        1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576,   /* 153..162 */
+        1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1576, 1810,   /* 163..172 */
+        1192, 1007, 1007, 1007, 1007, 1007,   /* 173..178 */
+};
+static const int sCryOverBgmExpect[176] = {
+        22695, 1450, 2462, 2462, 1450, 2462, 2462, 2462, 1450, 2470,   /* 3..12 */
+        2456, 1450, 2456, 2456, 2456, 1450, 2456, 6233, 1450, 2526,   /* 13..22 */
+        2526, 2526, 1450, 2526, 2621, 2494, 1450, 2494, 2589, 1450,   /* 23..32 */
+        2462, 2462, 2462, 1450, 4423, 2494, 1450, 2494, 2494, 2494,   /* 33..42 */
+        1450, 2494, 2494, 1450, 2494, 2589, 2462, 1450, 2462, 2462,   /* 43..52 */
+        9321, 1450, 2552, 2552, 1450, 4769, 2552, 2552, 1450, 7136,   /* 53..62 */
+        3109, 2039, 3204, 3861, 3127, 2039, 3604, 5027, 2039, 3638,   /* 63..72 */
+        3638, 4065, 2039, 3731, 3604, 5193, 2039, 3638, 3638, 2039,   /* 73..82 */
+        4160, 3604, 3604, 2039, 9384, 4126, 2039, 4982, 4126, 4130,   /* 83..92 */
+        2039, 4986, 6712, 2039, 4126, 4555, 4553, 2039, 4130, 4146,   /* 93..102 */
+        8931, 2039, 3103, 3103, 2039, 3103, 3196, 3083, 2019, 5397,   /* 103..112 */
+        3109, 2019, 3109, 3202, 3089, 2019, 3089, 7695, 2019, 3121,   /* 113..122 */
+        3121, 3121, 2019, 3121, 3216, 5385, 2019, 3121, 3216, 2019,   /* 123..132 */
+        3089, 3089, 3105, 2019, 7773, 3121, 2019, 3121, 3121, 3121,   /* 133..142 */
+        2019, 3129, 4385, 2019, 3216, 3089, 3089, 2019, 3184, 3065,   /* 143..152 */
+        7470, 2019, 3115, 3115, 2019, 3115, 3115, 3131, 2019, 6957,   /* 153..162 */
+        3210, 2019, 3083, 3083, 3083, 2019, 3099, 7663, 2019, 3115,   /* 163..172 */
+        3115, 3115, 2019, 3115, 3131, 5655,   /* 173..178 */
+};
+
+static void run_cry_over_song(const CryOverRun *r)
+{
+    const char *home = getenv("HOME");
+    char songPath[320], root[320], err[256];
+    snprintf(songPath, sizeof(songPath), "build/accuracy/rom/songs/%s", r->songFile);
+    snprintf(root, sizeof(root), "%s/pokeemerald", home ? home : "");
+    M4ASong *song = m4a_song_load(songPath, err, sizeof(err));
+    if (!song) {
+        printf("  (%s: no %s, run not checked)\n", r->name, songPath);
+        return;
+    }
+    ASSERT_EQ(strcmp(song->voicegroup, r->voicegroup), 0, "cry over song: the song names its vanilla voicegroup");
+    LoadedVoiceGroup *vg = voicegroup_load(root, r->voicegroup, NULL);
+    if (!vg) {
+        printf("  (%s: no voicegroup_%s in %s, run not checked)\n", r->name, r->voicegroup, root);
+        m4a_song_free(song);
+        return;
+    }
+    static int8_t decoded[8183 + 2 * M4A_DPCM_BLOCK_SAMPLES];
+    WaveData *wd = make_dpcm_wave(8183, 0, 0, decoded);
+    wd->freq = 10512u << 10;
+    static ToneData cryVoices[128];
+    memset(cryVoices, 0, sizeof(cryVoices));
+    cryVoices[0].type = VOICE_CRY; cryVoices[0].key = 60; cryVoices[0].wav = wd;
+    cryVoices[0].attack = 0xFF; cryVoices[0].decay = 0; cryVoices[0].sustain = 0xFF; cryVoices[0].release = 0;
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    M4ASong *cry = m4a_cry_song_new(&p);
+    ASSERT(cry != NULL, "cry over song: the template copy built");
+    if (!cry) { free(wd); voicegroup_free(vg); m4a_song_free(song); return; }
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, vg->voices);
+    M4ASequencer seq, cry0;
+    m4a_sequencer_init(&seq, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&seq, r->player), 0, "cry over song: the song's player");
+    ASSERT_EQ(m4a_sequencer_init_chained_player(&cry0, &seq, seq.trackBase + seq.maxTracks, M4A_PLAYER_CRY0), 0,
+              "cry over song: cry player 0 chained after the song's player");
+    ASSERT_EQ(cry0.trackBase, r->trackBase, "cry over song: cry 0's track 0 is the engine track above the song player's tracks");
+    ASSERT_EQ(cry0.player, M4A_PLAYER_CRY0, "cry over song: the chained player is cry 0 (the SE players between stay paused)");
+    ASSERT(engine.frameHookUser == &seq && seq.outer == &cry0 && cry0.inner == &seq, "cry over song: one hook (the song's) runs the chain");
+    m4a_sequencer_set_voicegroup(&cry0, cryVoices);
+    M4ASequencer *players[2] = { &cry0, NULL };
+    ASSERT_EQ(m4a_cry_choose_player(players), 0, "cry over song: SetPokemonCryTone from silence takes cry player 0");
+    m4a_engine_boot(&engine, false);
+    m4a_sequencer_start(&seq, song);
+
+    static float outL[4096], outR[4096];
+    int mismatches = 0, started = -1, death = -1;
+    bool stopSeen = false, chainEmptyAtEot = false, preStealOk = false, postStealOk = false;
+    int startTick = r->startFrame2 + 2;
+    for (int k = 3; k <= 178; k++) {
+        if (k == startTick) {
+            /* the state the cry's ply_note scans: before the frame's MPlayMain */
+            if (r->stolenFromTrack >= 0) {
+                int on = 0;
+                for (int c = 0; c < 5; c++)
+                    on += (engine.pcmChannels[c].status & CHN_ON) != 0;
+                uint8_t st = engine.pcmChannels[r->cryChan].status;
+                preStealOk = on == 5 && (st & CHN_ON) && (st & CHN_STOP)
+                          && engine.pcmChannels[r->cryChan].trackIndex == seq.trackBase + r->stolenFromTrack
+                          && seq.chainOwner[r->cryChan] == r->stolenFromTrack + 1;
+            } else {
+                preStealOk = true;
+                for (int c = 0; c < 5; c++)
+                    if (engine.pcmChannels[c].status & CHN_ON) preStealOk = false;
+            }
+            started = m4a_cry_choose_player(players);
+            if (started >= 0)
+                m4a_sequencer_start(players[started], cry);
+        }
+        if (k == r->eot)
+            chainEmptyAtEot = cry0.chainOwner[r->cryChan] == 0 && !(engine.pcmChannels[r->cryChan].status & CHN_ON);
+        advance_frames(&engine, 1, outL, outR);
+        if (cry0.frameCycles != r->expect[k - 3]) {
+            if (mismatches++ < 5)
+                printf("  %s frame %d: engine %d, mgba %d\n", r->name, k, cry0.frameCycles, r->expect[k - 3]);
+        }
+        if (k == startTick) {
+            /* the cry owns its channel; the owner's chain dropped it at once */
+            postStealOk = engine.pcmChannels[r->cryChan].trackIndex == cry0.trackBase
+                       && cry0.chainOwner[r->cryChan] == 1
+                       && seq.chainOwner[r->cryChan] == 0
+                       && (engine.pcmChannels[r->cryChan].status & CHN_ON)
+                       && !(engine.pcmChannels[r->cryChan].status & CHN_STOP);
+            if (r->stolenFromTrack >= 0)   /* the other releasing channel of the same track stays chained */
+                postStealOk = postStealOk && seq.chainOwner[0] == r->stolenFromTrack + 1
+                           && (engine.pcmChannels[0].status & CHN_STOP);
+        }
+        if (k > startTick) {
+            uint8_t st = engine.pcmChannels[r->cryChan].status;
+            if (engine.pcmChannels[r->cryChan].trackIndex == cry0.trackBase && (st & CHN_ON) && (st & CHN_STOP))
+                stopSeen = true;
+            if (death < 0 && !(st & CHN_ON)) death = k;
+        }
+    }
+    char msg[256];
+    snprintf(msg, sizeof(msg), "sequencer: CgbSound entry matches the %s probe on frames 3..178 (both players)", r->name);
+    ASSERT_EQ(mismatches, 0, msg);
+    ASSERT_EQ(engine.cgbEntryCycles, cry0.frameCycles - M4A_CYC_SOUNDMAIN_ENTRY, "cry over song: the chain's last member (cry 0) publishes the entry");
+    ASSERT_EQ(seq.frameCount, cry0.frameCount, "cry over song: both players count the same frames");
+    ASSERT_EQ(started, 0, "cry over song: the cry took cry player 0");
+    snprintf(msg, sizeof(msg), "%s: the state ply_note scanned on frame %d (%s)", r->name, startTick,
+             r->stolenFromTrack >= 0 ? "five channels ON, the target ON | STOP on the BGM track" : "no DirectSound channel ON");
+    ASSERT(preStealOk, msg);
+    snprintf(msg, sizeof(msg), "%s: the cry took channel %d%s", r->name, r->cryChan,
+             r->stolenFromTrack >= 0 ? " and the owner's chain dropped it at once (chainOwner cleared, the other releasing channel kept)" : " (a free take)");
+    ASSERT(postStealOk, msg);
+    ASSERT_EQ(death, r->unlinkFrame - 1, "cry over song: the cry's channel ends through the count path after the frame before its unlink tick");
+    ASSERT(!stopSeen, "cry over song: the cry's channel was never releasing (no _081DCFB0 stamp)");
+    if (r->eot)
+        ASSERT(chainEmptyAtEot, "cry over song: the cry's EOT finds an empty chain");
+    ASSERT_EQ(cry0.noteCount, 1, "cry over song: one TIE on cry player 0");
+
+    m4a_sequencer_detach(&cry0);
+    ASSERT(seq.outer == NULL && engine.frameHookUser == &seq, "cry over song: detaching cry 0 leaves the song's hook");
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(cry);
+    m4a_song_free(song);
+    voicegroup_free(vg);
+    free(wd);
+}
+
+static void test_sequencer_cycles_cry_over_song(void)
+{
+    printf("Testing a cry over a sound effect and over music (cry_over_se / cry_over_bgm probes)...\n");
+    static const CryOverRun runs[] = {
+        /* (a): Cry_Bulbasaur from VBlank 30 over se_exp on SE1: start tick 32 on channel 0 (free), the unlink tick 79 = 32 + 47, EOT 172 = 32 + 140 */
+        { "cry_over_se", "se_exp.s", "rs_sfx_1", M4A_PLAYER_SE1, 3, 30, 0, -1, 79, 172, sCryOverSeExpect },
+        /* (b): Cry_Bulbasaur from VBlank 60 over mus_littleroot on BGM: start tick 62 steals channel 1 from BGM track 1 (from 0), the unlink tick 109 = 62 + 47; the EOT 202 is past the run */
+        { "cry_over_bgm", "mus_littleroot.s", "littleroot", M4A_PLAYER_BGM, 10, 60, 1, 1, 109, 0, sCryOverBgmExpect },
+    };
+    for (size_t i = 0; i < sizeof(runs) / sizeof(runs[0]); i++)
+        run_cry_over_song(&runs[i]);
+
+    /* The chain constructors: the next-player form unchanged (cry 1 after
+     * cry 0), the explicit form refusing a player out of order or range and
+     * accepting a chain that skips players -- BGM -> SE1 -> cry 0, 15 of the
+     * engine's 16 tracks. */
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    M4ASequencer a, b, c;
+    m4a_sequencer_init(&a, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&a, M4A_PLAYER_CRY0), 0, "chain: cry 0 alone");
+    ASSERT_EQ(m4a_sequencer_init_chained(&b, &a, 2), 0, "chain: the next-player form after cry 0");
+    ASSERT_EQ(b.player, M4A_PLAYER_CRY1, "chain: ... selects cry 1, as before");
+    m4a_sequencer_detach(&b);
+    ASSERT_EQ(m4a_sequencer_init_chained(&b, &a, 2), 0, "chain: re-attached");
+    m4a_sequencer_detach(&b);
+    ASSERT_EQ(m4a_sequencer_set_player(&a, M4A_PLAYER_BGM), 0, "chain: the BGM player alone");
+    ASSERT_EQ(m4a_sequencer_init_chained_player(&b, &a, 10, M4A_PLAYER_BGM), -1, "chain: a player not above its inner's is refused");
+    ASSERT(a.outer == NULL, "chain: ... and nothing is attached");
+    ASSERT_EQ(m4a_sequencer_init_chained_player(&b, &a, 9, M4A_PLAYER_CRY0), -1, "chain: a trackBase inside the inner's tracks is refused");
+    ASSERT_EQ(m4a_sequencer_init_chained_player(&b, &a, 10, M4A_PLAYER_SE2), -1, "chain: SE2's 9 tracks at 10 do not fit the engine's 16");
+    ASSERT_EQ(m4a_sequencer_init_chained_player(&b, &a, 10, M4A_PLAYER_SE1), 0, "chain: BGM -> SE1 on tracks 10..12");
+    ASSERT_EQ(m4a_sequencer_init_chained_player(&c, &b, 13, M4A_PLAYER_CRY0), 0, "chain: BGM -> SE1 -> cry 0 on tracks 13..14 (15 tracks fit)");
+    ASSERT(a.outer == &b && b.outer == &c && c.inner == &b, "chain: three members in MPlayOpen order");
+    ASSERT_EQ(m4a_sequencer_init_chained_player(&c, &b, 13, M4A_PLAYER_CRY0), -1, "chain: an inner that already has an outer is refused");
+    m4a_sequencer_detach(&c);
+    m4a_sequencer_detach(&b);
+    m4a_sequencer_detach(&a);
+    m4a_engine_destroy(&engine);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -5651,6 +5892,7 @@ int main(void)
     test_sequencer_cycles_cry_encounter_chorus();
     test_sequencer_cycles_cry_high_pitch_two_chain();
     test_sequencer_cycles_two_cries();
+    test_sequencer_cycles_cry_over_song();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

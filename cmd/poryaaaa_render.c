@@ -761,7 +761,11 @@ static void print_usage(const char *prog)
         "                              its first tick is on engine frame F + 2).  It takes the first\n"
         "                              free cry player (SetPokemonCryTone): cry player 1 while the\n"
         "                              first cry plays, whose MPlayMain body runs after cry 0's on\n"
-        "                              the same frame; both busy is refused.  Needs --cry on cry0.\n"
+        "                              the same frame; both busy is refused.  Needs --cry on cry0,\n"
+        "                              or --song: a cry over a sound effect or a song (the song on\n"
+        "                              bgm, se1, se2 or se3), cry player 0 from silence, its body\n"
+        "                              after the song's on the same frame (mgba_render --type song\n"
+        "                              --id N --id2 M --start-frame2 F)\n"
         "\n"
         "Output (at least one required):\n"
         "  --output <file.wav>         Write rendered audio to WAV file\n"
@@ -931,7 +935,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
     }
     memset(&sCry2, 0, sizeof(sCry2));
     sCry2.startedOn = -1;
-    if (song2) {
+    if (song2 && o->cry >= 0) {
         /* The two cry players, in SoundMain's chain: cry 1's body after cry
          * 0's on the same frame, on engine tracks 2..3 above cry 0's 0..1. */
         if (o->player != M4A_PLAYER_CRY0
@@ -948,13 +952,37 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
         }
         sCry2.players[0] = &seq;
         sCry2.players[1] = &seq2;
+        printf("  Second cry: StartCry on VBlank %d (its first tick on engine frame %d), cry player 1 if the first still plays\n",
+               startFrame2, startFrame2 + 2);
+    } else if (song2) {
+        /* A cry over a sound effect or a song (plan, step 12): cry player 0
+         * chained after the song's player -- BGM (10 tracks) -> cry 0 on
+         * engine tracks 10..11, SE1 (3) -> cry 0 on 3..4 -- its body after
+         * the song's on the same frame, the paused players between them
+         * charged by the chain.  SetPokemonCryTone from silence takes cry 0. */
+        if (o->player > M4A_PLAYER_SE3
+            || m4a_sequencer_init_chained_player(&seq2, &seq, seq.trackBase + seq.maxTracks, M4A_PLAYER_CRY0) != 0) {
+            fprintf(stderr, "Error: --cry2 over --song needs the song on bgm, se1, se2 or se3 (--player; got %s)\n",
+                    kPlayerNames[o->player]);
+            m4a_sequencer_detach(&seq);
+            m4a_engine_destroy(&engine);
+            voicegroup_free(vg);
+            m4a_song_free(song);
+            m4a_song_free(song2);
+            voicegroup_free(vg2);
+            return -1;
+        }
+        sCry2.players[0] = &seq2;      /* cry player 0; cry player 1 is not opened in this form */
+        sCry2.players[1] = NULL;
+        printf("  Cry over the song: StartCry on VBlank %d (its first tick on engine frame %d), cry player 0 chained after %s on engine tracks %u..%u\n",
+               startFrame2, startFrame2 + 2, kPlayerNames[o->player], seq2.trackBase, seq2.trackBase + seq2.maxTracks - 1);
+    }
+    if (song2) {
         sCry2.song = song2;
         sCry2.voices = vg2->voices;
         sCry2.startFrame = (uint32_t)startFrame2;
         sCry2.hook = engine.frameHook;
         engine.frameHook = cry2_hook;
-        printf("  Second cry: StartCry on VBlank %d (its first tick on engine frame %d), cry player 1 if the first still plays\n",
-               startFrame2, startFrame2 + 2);
     }
     if (o->player != M4A_PLAYER_BGM)
         printf("  Music player: %s (%u tracks)\n", kPlayerNames[o->player], seq.maxTracks);
@@ -1052,7 +1080,12 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
                 (double)limit / rate);
 
     printf("  %u notes, %u song ticks\n", seq.noteCount, seq.clock);
-    if (song2) {
+    if (song2 && o->cry < 0) {
+        if (sCry2.startedOn == 0)
+            printf("  Cry on cry player 0 over the song: %u notes, %u song ticks\n", seq2.noteCount, seq2.clock);
+        else
+            printf("  The cry never started (the render ended before VBlank %d)\n", startFrame2);
+    } else if (song2) {
         if (sCry2.startedOn == 1)
             printf("  Second cry on cry player 1: %u notes, %u song ticks\n", seq2.noteCount, seq2.clock);
         else if (sCry2.startedOn == 0)
@@ -1091,6 +1124,8 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
     return 0;
 }
 
+static int load_cry2(const SongRenderOpts *o, M4ASong **outSong, LoadedVoiceGroup **outVg);
+
 static int render_song(const SongRenderOpts *o, float **outL, float **outR,
                        uint64_t *outTotal, uint64_t *outFadeStart)
 {
@@ -1118,7 +1153,54 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
         return -1;
     }
     printf("Voicegroup loaded successfully.\n");
-    return render_sequenced(o, song, vg, NULL, NULL, 0, outL, outR, outTotal, outFadeStart);
+    if (o->cry2 < 0)
+        return render_sequenced(o, song, vg, NULL, NULL, 0, outL, outR, outTotal, outFadeStart);
+    /* --cry2 over the song: a cry on cry player 0 chained after the song's player */
+    M4ASong *song2;
+    LoadedVoiceGroup *vg2;
+    if (load_cry2(o, &song2, &vg2) != 0) {
+        voicegroup_free(vg);
+        m4a_song_free(song);
+        return -1;
+    }
+    return render_sequenced(o, song, vg, song2, vg2, o->cry2StartFrame, outL, outR, outTotal, outFadeStart);
+}
+
+/* --cry2: the second cry's sample and its own template copy (the ROM's
+ * gPokemonCrySongs[1], or [0] over a song) at CRY_MODE_NORMAL's defaults. */
+static int load_cry2(const SongRenderOpts *o, M4ASong **outSong, LoadedVoiceGroup **outVg)
+{
+    char symbol2[128];
+    uint8_t type2 = VOICE_CRY;
+    if (voicegroup_cry_table_entry(o->projectRoot, o->cry2, symbol2, sizeof(symbol2), &type2) != 0) {
+        fprintf(stderr, "Error: no gCryTable entry %d in %s/sound/cry_tables.inc (--cry2)\n", o->cry2, o->projectRoot);
+        return -1;
+    }
+    printf("Cry %d (%s, --cry2): %s%s\n", o->cry2, o->cry >= 0 ? "second" : "over the song", symbol2,
+           (type2 & VOICE_TYPE_REV) ? " (reversed: gCryTable_Reverse's entry)" : "");
+    fflush(stdout);
+    LoadedVoiceGroup *vg2 = voicegroup_load_cry_typed(o->projectRoot, symbol2, type2, NULL);
+    if (!vg2) {
+        fprintf(stderr, "Failed to load cry sample '%s'\n", symbol2);
+        return -1;
+    }
+    const WaveData *wd2 = vg2->voices[0].wav;
+    printf("  %s: %u samples at %u Hz, %s%s%s\n", symbol2, wd2->size, wd2->freq >> 10,
+           (vg2->voices[0].type & VOICE_TYPE_CMP) ? "DPCM" : "uncompressed (no built .bin: plays as DirectSound)",
+           (vg2->voices[0].type & VOICE_TYPE_REV) ? ", played in reverse" : "",
+           (wd2->status & 0x4000) ? ", loops" : "");
+    M4ACryParams cp2;
+    m4a_cry_params_default(&cp2);
+    M4ASong *song2 = m4a_cry_song_new(&cp2);
+    if (!song2) {
+        voicegroup_free(vg2);
+        return -1;
+    }
+    printf("  %s (%s): the defaults, %u track, StartCry on VBlank %d\n", song2->name,
+           o->cry >= 0 ? "second" : "over the song", song2->trackCount, o->cry2StartFrame);
+    *outSong = song2;
+    *outVg = vg2;
+    return 0;
 }
 
 /* --cry: gCryTable[id] through the cry song template (m4a_cry.h), as the
@@ -1155,41 +1237,13 @@ static int render_cry(const SongRenderOpts *o, float **outL, float **outR,
            song->trackCount, song->trackCount == 1 ? "" : "s");
     if (o->cry2 < 0)
         return render_sequenced(o, song, vg, NULL, NULL, 0, outL, outR, outTotal, outFadeStart);
-
-    /* --cry2: the second cry's sample and its own template copy (the ROM's
-     * gPokemonCrySongs[1]) at CRY_MODE_NORMAL's defaults. */
-    char symbol2[128];
-    uint8_t type2 = VOICE_CRY;
-    if (voicegroup_cry_table_entry(o->projectRoot, o->cry2, symbol2, sizeof(symbol2), &type2) != 0) {
-        fprintf(stderr, "Error: no gCryTable entry %d in %s/sound/cry_tables.inc (--cry2)\n", o->cry2, o->projectRoot);
+    M4ASong *song2;
+    LoadedVoiceGroup *vg2;
+    if (load_cry2(o, &song2, &vg2) != 0) {
         voicegroup_free(vg);
         m4a_song_free(song);
         return -1;
     }
-    printf("Cry %d (second, --cry2): %s%s\n", o->cry2, symbol2, (type2 & VOICE_TYPE_REV) ? " (reversed: gCryTable_Reverse's entry)" : "");
-    fflush(stdout);
-    LoadedVoiceGroup *vg2 = voicegroup_load_cry_typed(o->projectRoot, symbol2, type2, NULL);
-    if (!vg2) {
-        fprintf(stderr, "Failed to load cry sample '%s'\n", symbol2);
-        voicegroup_free(vg);
-        m4a_song_free(song);
-        return -1;
-    }
-    const WaveData *wd2 = vg2->voices[0].wav;
-    printf("  %s: %u samples at %u Hz, %s%s%s\n", symbol2, wd2->size, wd2->freq >> 10,
-           (vg2->voices[0].type & VOICE_TYPE_CMP) ? "DPCM" : "uncompressed (no built .bin: plays as DirectSound)",
-           (vg2->voices[0].type & VOICE_TYPE_REV) ? ", played in reverse" : "",
-           (wd2->status & 0x4000) ? ", loops" : "");
-    M4ACryParams cp2;
-    m4a_cry_params_default(&cp2);
-    M4ASong *song2 = m4a_cry_song_new(&cp2);
-    if (!song2) {
-        voicegroup_free(vg2);
-        voicegroup_free(vg);
-        m4a_song_free(song);
-        return -1;
-    }
-    printf("  %s (second): the defaults, %u track, StartCry on VBlank %d\n", song2->name, song2->trackCount, o->cry2StartFrame);
     return render_sequenced(o, song, vg, song2, vg2, o->cry2StartFrame, outL, outR, outTotal, outFadeStart);
 }
 
@@ -1454,8 +1508,13 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Error: --cry2 <id> and --cry2-start-frame <F> go together\n");
         return 1;
     }
-    if (cry2Id >= 0 && cryId < 0) {
-        fprintf(stderr, "Error: --cry2 needs --cry (the first cry)\n");
+    if (cry2Id >= 0 && cryId < 0 && !songPath) {
+        fprintf(stderr, "Error: --cry2 needs --cry (the first cry) or --song (the sound effect or song it plays over)\n");
+        return 1;
+    }
+    if (cry2Id >= 0 && songPath && player > M4A_PLAYER_SE3) {
+        fprintf(stderr, "Error: --cry2 over --song needs the song on bgm, se1, se2 or se3 (--player; got %s)\n",
+                kPlayerNames[player]);
         return 1;
     }
     if (midiPath && !vgName) {
