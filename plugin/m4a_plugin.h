@@ -25,7 +25,8 @@ typedef struct {
     bool pwmEnabled;
     /* MIDI event latch override (M4ALatchMode: transport / on / off;
      * persisted).  Written by the main thread (GUI, state load), read and
-     * applied by plugin_process at the top of each block. */
+     * applied by plugin_process at the top of each block and at each
+     * in-block transport event. */
     uint8_t eventLatchMode;
     /* Polyphony-overflow debug: solo the sounds lost to the polyphony limit.
      * Session-only -- deliberately NOT saved to config or CLAP state, so a

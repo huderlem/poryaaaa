@@ -6446,6 +6446,11 @@ static void test_latch_mode(void)
     ASSERT_EQ(m4a_latch_mode_from_name(""), M4A_LATCH_TRANSPORT, "name: empty = transport");
     ASSERT_EQ(m4a_latch_mode_from_name("bogus"), M4A_LATCH_TRANSPORT, "name: unknown = transport");
     ASSERT_EQ(m4a_latch_mode_from_name(NULL), M4A_LATCH_TRANSPORT, "name: NULL = transport");
+    ASSERT_EQ(m4a_latch_mode_from_name(" on "), M4A_LATCH_ON, "name: surrounding blanks ignored (on)");
+    ASSERT_EQ(m4a_latch_mode_from_name("off\t"), M4A_LATCH_OFF, "name: trailing tab ignored (off)");
+    ASSERT_EQ(m4a_latch_mode_from_name("On"), M4A_LATCH_TRANSPORT, "name: case-sensitive (On = transport)");
+    ASSERT_EQ(m4a_latch_mode_from_name("onx"), M4A_LATCH_TRANSPORT, "name: a longer word is not on");
+    ASSERT_EQ(m4a_latch_mode_from_name("10"), M4A_LATCH_TRANSPORT, "name: 10 is not 1");
     ASSERT_EQ(m4a_latch_mode_from_byte(0), M4A_LATCH_TRANSPORT, "byte 0 = transport (an old state's default)");
     ASSERT_EQ(m4a_latch_mode_from_byte(1), M4A_LATCH_ON, "byte 1 = on");
     ASSERT_EQ(m4a_latch_mode_from_byte(2), M4A_LATCH_OFF, "byte 2 = off");
@@ -6503,7 +6508,6 @@ static void test_latch_mode(void)
         snprintf(msg, sizeof(msg), "%s stop edge: key 50 sounding", name);
         ASSERT(n50 != NULL, msg);
         if (!n50) { m4a_engine_destroy(&engine); continue; }
-        n50->status = CHN_ENV_SUSTAIN;
         m4a_engine_note_on(&engine, 1, 40, 127);        /* track 1: a queued note to see applied */
         m4a_engine_note_on(&engine, 0, 48, 127);        /* glides from 50 when applied */
         snprintf(msg, sizeof(msg), "%s stop edge: two note-ons queued", name);
@@ -6570,6 +6574,70 @@ static void test_latch_mode(void)
         ASSERT(engine.tracks[0].portamentoGliding, "on -> off while playing: no reset (the note glides from 50)");
         m4a_engine_apply_latch_mode(&engine, M4A_LATCH_OFF, true, false);
         ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 0, "off: the stop edge still resets the history");
+        m4a_engine_destroy(&engine);
+    }
+
+    /* --- off at the stop edge: the latch stays off, a glide in progress
+     * ends at its target --- */
+    {
+        M4AEngine engine;
+        m4a_engine_init(&engine, 48000.0f);
+        engine.portamentoEnabled = true;
+        m4a_engine_set_voicegroup(&engine, voices);
+        m4a_engine_program_change(&engine, 0, 0);
+        m4a_engine_cc(&engine, 0, 0x5, 5);
+        m4a_engine_apply_latch_mode(&engine, M4A_LATCH_OFF, true, true);
+        m4a_engine_note_on(&engine, 0, 50, 127);
+        m4a_engine_note_on(&engine, 0, 48, 127);     /* glides from 50, at once */
+        ASSERT(engine.tracks[0].portamentoGliding, "off: the second note glides");
+        m4a_engine_apply_latch_mode(&engine, M4A_LATCH_OFF, true, false);
+        ASSERT(!engine.quantizeEvents, "off, stop edge: the latch stays off");
+        M4APCMChannel *n48 = find_pcm_note(&engine, 0, 48);
+        ASSERT(n48 != NULL, "off, stop edge: key 48 sounding");
+        if (n48)
+            ASSERT_EQ(n48->frequency, m4a_midi_key_to_freq(n48->wav, 48, 0),
+                      "off, stop edge: the glide ends at its target");
+        m4a_engine_destroy(&engine);
+    }
+
+    /* --- the start edge through the policy: transport turns the latch on
+     * and resets nothing --- */
+    {
+        M4AEngine engine;
+        m4a_engine_init(&engine, 48000.0f);
+        engine.portamentoEnabled = true;
+        m4a_engine_set_voicegroup(&engine, voices);
+        m4a_engine_program_change(&engine, 0, 0);
+        m4a_engine_cc(&engine, 0, 0x5, 5);
+        m4a_engine_note_on(&engine, 0, 50, 127);     /* stopped: at once */
+        m4a_engine_apply_latch_mode(&engine, M4A_LATCH_TRANSPORT, false, true);
+        ASSERT(engine.quantizeEvents, "start edge: transport turns the latch on");
+        ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 50, "start edge: the glide history kept");
+        ASSERT_EQ(m4a_engine_note_on(&engine, 0, 52, 127), M4A_CHANNEL_QUEUED, "start edge: the next note queues");
+        m4a_engine_destroy(&engine);
+    }
+
+    /* --- on at the stop edge with a note-on and its note-off queued in the
+     * last frame: the drain runs with the latch on, so the note gets the
+     * one-tick gate and the next tick stops it (no hang) --- */
+    {
+        M4AEngine engine;
+        m4a_engine_init(&engine, 48000.0f);
+        m4a_engine_set_voicegroup(&engine, voices);
+        m4a_engine_program_change(&engine, 0, 0);
+        m4a_engine_apply_latch_mode(&engine, M4A_LATCH_ON, true, true);
+        m4a_engine_note_on(&engine, 0, 72, 127);
+        m4a_engine_note_off(&engine, 0, 72);
+        m4a_engine_apply_latch_mode(&engine, M4A_LATCH_ON, true, false);
+        ASSERT_EQ(engine.eventQueueCount, 0, "on, stop edge: note-on and note-off applied");
+        M4APCMChannel *n72 = find_pcm_note(&engine, 0, 72);
+        ASSERT(n72 != NULL, "on, stop edge: the same-frame note started");
+        if (n72) {
+            ASSERT_EQ(n72->gateTime, 1, "on, stop edge: the one-tick gate");
+            n72->status = CHN_ENV_SUSTAIN;           /* the mixer's envelope step */
+            m4a_engine_tick(&engine);
+            ASSERT(n72->status & CHN_STOP, "on, stop edge: stopped by the next tick");
+        }
         m4a_engine_destroy(&engine);
     }
     free(wd);

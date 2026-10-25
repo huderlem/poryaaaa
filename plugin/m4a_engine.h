@@ -842,8 +842,9 @@ typedef enum {
  * forgotten -- so no note queued before the stop leaves a glide behind. */
 void m4a_engine_apply_latch_mode(M4AEngine *engine, M4ALatchMode mode,
                                  bool wasPlaying, bool playing);
-/* "transport" / "on" / "off" (also "1" / "0" for on / off); anything else
- * is transport.  For the config file. */
+/* "transport" / "on" / "off" (also "1" / "0" for on / off; surrounding
+ * blanks ignored, case-sensitive); anything else is transport.  For the
+ * config file. */
 M4ALatchMode m4a_latch_mode_from_name(const char *name);
 /* The CLAP state byte: 0 / 1 / 2; anything else is transport. */
 M4ALatchMode m4a_latch_mode_from_byte(uint8_t value);

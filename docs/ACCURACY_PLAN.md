@@ -5990,9 +5990,9 @@ as); "off" is the escape for anyone who wants otherwise.
 
 - *Where each setting lives.*  `M4APluginData` (`m4a_plugin.h`) holds the
   persisted settings; `M4AGuiSettings` (`m4a_gui.h`) is the copy the GUI
-  edits.  Five places build an `M4AGuiSettings` from the plugin data
-  (`plugin_activate`, `state_load`, the timer's poll, `gui_create`) or copy
-  it back (the timer's `m4a_gui_poll_changes` block).  The Options menu
+  edits.  Three places build an `M4AGuiSettings` from the plugin data
+  (`plugin_activate`, `state_load`, `gui_create`) and one copies it back
+  (the timer's `m4a_gui_poll_changes` block).  The Options menu
   (`m4a_gui.cpp` `render_menu_bar`) holds three checkmark toggles with
   hover help (`toggle_menu_item`); a three-way choice has no helper yet.
 - *Config.*  `load_config_file` reads `key=value` lines at `plugin_init`;
@@ -6006,7 +6006,7 @@ as); "off" is the escape for anyone who wants otherwise.
   are back-compatible by construction.  An old save stops after the float
   (or earlier); a new byte after the float reads short there.
 - *Threads.*  `state_load` and the GUI timer run on the main thread
-  (`plugin.h`: `[main-thread]` for the state and timer extensions) and today
+  (`ext/state.h` and `ext/timer-support.h`: `[main-thread]`) and today
   write the engine directly (`m4a_engine_set_portamento_enabled` etc.)
   while `plugin_process` may run; `plugin_process` is the audio thread.
 - *The latch in the plugin today* (2b-i): `apply_transport` sets the latch
@@ -6031,9 +6031,10 @@ as); "off" is the escape for anyone who wants otherwise.
   every mode, flushes whatever is still queued (ON keeps the latch on, so
   the flip does not flush) and then resets the portamento.  The 2b-i
   plugin code is this call with TRANSPORT.
-- *Applied on the audio thread only.*  The GUI timer and `state_load`
-  write the byte `data->eventLatchMode` and nothing else; `plugin_process`
-  reads it at the top of the next block and calls the policy.  A change
+- *Applied on the audio thread only.*  For the latch, the GUI timer and
+  `state_load` write the byte `data->eventLatchMode` and nothing else;
+  `plugin_process` reads it at the top of the next block (and at each
+  in-block transport event) and calls the policy.  A change
   of mode thus takes effect at a block boundary, and the flush it may
   cause (ON -> OFF, or ON -> TRANSPORT while stopped) runs on the audio
   thread, never racing the queue.  The other toggles keep their existing
@@ -6062,8 +6063,8 @@ mode; `plugin_process` calls `apply_transport` with the block's transport
 or, without one, the policy with `transportWasPlaying` twice (so a mode
 changed from the GUI applies at the next block in every host); the GUI
 timer and `state_load` copy the byte only; `state_save` appends it after
-the mix-rate float and `state_load` reads it optionally; the four
-`M4AGuiSettings` builders carry it.  `m4a_gui.cpp`: `radio_menu_item`
+the mix-rate float and `state_load` reads it optionally; the three
+`M4AGuiSettings` builders and the timer's copy-back carry it.  `m4a_gui.cpp`: `radio_menu_item`
 and the "Quantize to GBA Frames" submenu.  `poryaaaa.cfg.example` and the
 README (the DAW paragraph, the config table, the GUI list) document it.
 As with the other options, a project's saved state wins over
@@ -6106,6 +6107,58 @@ menu (no input synthesis or screenshot tool).
 regressions, every row 0.0; unit 1733/1733, blip 49112/0, songs 561/561.
 Both aligned midi runs 0 field differences on 44 rows.  `poryaaaa` and
 `poryaaaa-standalone` build.
+
+**Code review of slice 2b-ii (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: the policy, the plugin wiring, the state layout and
+the GUI against the CLAP SDK headers and the latch code; reviewer 2: the
+unit test assertion by assertion, the plan / README / cfg text, and every
+place the other persisted options reach).  Neither found a fault in the
+policy, the threading of the new byte, the state layout or its
+back-compatibility, or the GUI's menu pairing; every place `pwmEnabled` /
+`pcmFreqMode` reach, `eventLatchMode` reaches.  Acted on (all outside the
+harness's paths; gated together, below):
+
+- *Config whitespace* (both): the loader strips only the line ending, so
+  `quantize_events=on ` silently meant transport.
+  `m4a_latch_mode_from_name` now ignores surrounding blanks (still
+  case-sensitive; `onx` / `10` are not on); the cfg example names the
+  `1` / `0` aliases.
+- *Test gaps* (reviewer 2), added to `test_latch_mode`: off mode at the
+  stop edge (the latch stays off, a glide ends at its target); the start
+  edge through the policy (transport turns the latch on, no reset, the
+  next note queues); on mode with a note-on and its note-off queued in
+  the last frame (the drain runs with the latch on: the one-tick gate,
+  STOP at the next tick); the parser's blank / case / prefix cases; an
+  inert `CHN_ENV_SUSTAIN` line removed.  Unit **1749/1749** (1733 + 16).
+- *Gate after all of it*: claim_check 59 diffed, 0 moved, 57/66, 0
+  regressions, every row 0.0; unit 1749/1749, blip 49112/0, songs
+  561/561; both aligned midi runs 0 field differences on 44 rows;
+  `poryaaaa` and `poryaaaa-standalone` build; the scratch host 27/27 and
+  its config runs (`quantize_events=on ` with a trailing blank now gives
+  on).
+- *Plan wording* (reviewer 2), fixed in place above: the `[main-thread]`
+  citation is `ext/state.h` / `ext/timer-support.h`, not `plugin.h`;
+  three builders and one copy-back, not five / four; "the byte and
+  nothing else" is for the latch only.  The `m4a_plugin.h` comment now
+  says the mode is also applied at in-block transport events.
+
+Recorded, not acted on (pre-existing, outside this slice): `state_load`
+reads each field in one `read` call where `clap/stream.h` lets a host
+return fewer bytes per call -- a chunking host could leave the float half
+read and the new byte read from inside it (every earlier field has the
+same exposure; a looping read helper for the whole loader is its own
+change); the GUI timer's apply-all block, run for any settings change
+including the latch mode, still writes the engine from the main thread
+(volume refresh, portamento / PWM / poly-debug setters) while
+`plugin_process` may run -- the latch's own path does not, and none of
+those touch the queue; the shared settings bytes are plain `uint8_t`
+(formally a C11 data race, the pattern of every setting here); the
+"Follow Transport" tooltip's "with no transport ... Never" is the
+last-known state, exact for the standalone, which never sends one; the
+plugin-level promises (no-transport branch, next-block application,
+state round trip, config parsing, in-block transport events) are guarded
+only by the uncommitted scratch host, since no plugin-level harness
+exists in the tree.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

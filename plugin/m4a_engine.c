@@ -773,9 +773,18 @@ void m4a_engine_apply_latch_mode(M4AEngine *engine, M4ALatchMode mode,
 
 M4ALatchMode m4a_latch_mode_from_name(const char *name)
 {
-    if (name && (strcmp(name, "on") == 0 || strcmp(name, "1") == 0))
+    if (!name)
+        return M4A_LATCH_TRANSPORT;
+    /* The config loader strips only the line ending: ignore surrounding
+     * blanks, so "on " still means on. */
+    while (*name == ' ' || *name == '\t')
+        name++;
+    size_t n = strlen(name);
+    while (n > 0 && (name[n - 1] == ' ' || name[n - 1] == '\t'))
+        n--;
+    if ((n == 2 && strncmp(name, "on", 2) == 0) || (n == 1 && name[0] == '1'))
         return M4A_LATCH_ON;
-    if (name && (strcmp(name, "off") == 0 || strcmp(name, "0") == 0))
+    if ((n == 3 && strncmp(name, "off", 3) == 0) || (n == 1 && name[0] == '0'))
         return M4A_LATCH_OFF;
     return M4A_LATCH_TRANSPORT;
 }

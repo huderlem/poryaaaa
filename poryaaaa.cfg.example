@@ -64,8 +64,8 @@ song_master_volume=127
 # about 16.7 ms). transport (default): hold notes, CCs, program changes and
 # pitch bends to the next frame while the DAW transport plays, apply them at
 # once while it is stopped (and in the standalone, which has no transport).
-# on: always hold them. off: never. Also in the GUI's "Options" menu; saved
-# per project.
+# on (or 1): always hold them. off (or 0): never. Also in the GUI's "Options"
+# menu; saved per project.
 #quantize_events=transport
 
 # Additional .inc files for sample symbol definitions (semicolon-separated, relative to project_root).
