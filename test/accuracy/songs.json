@@ -69,5 +69,33 @@
     "type": "se",
     "seconds": 2.0,
     "note": "SE3, DirectSound only with BEND/BENDR, priority 2"
+  },
+  {
+    "name": "cry_pidgey",
+    "type": "cry",
+    "id": 15,
+    "seconds": 2.0,
+    "note": "the shortest cry sample (1902 samples, 0.18 s): the cry player's chain position, the template's start tick, the channel dying long before the 140-tick EOT"
+  },
+  {
+    "name": "cry_bulbasaur",
+    "type": "cry",
+    "id": 0,
+    "seconds": 2.0,
+    "note": "gCryTable[0], a typical length (8183 samples, 0.78 s)"
+  },
+  {
+    "name": "cry_wailord",
+    "type": "cry",
+    "id": 381,
+    "seconds": 3.0,
+    "note": "a long cry (20846 samples, 1.98 s); 3 s covers the sample end and the EOT / FINE tick at 140"
+  },
+  {
+    "name": "cry_jynx",
+    "type": "cry",
+    "id": 123,
+    "seconds": 3.0,
+    "note": "the longest cry sample (23524 samples, 2.24 s), still over before the 140-tick EOT; no cry sample loops"
   }
 ]

@@ -198,7 +198,8 @@ test/accuracy/tools/probe_diff.py build/probe/<name>.txt build/probe/<name>.engi
 ```
 (songs: `build/accuracy/rom/songs/<name>.s`, `--total-duration-seconds 1.2`
 for a 70-frame probe, 20 for a 1200-frame one; mus_weather_groudon is the
-song file for "groudon"). `d` is engine minus mgba in cycles, per write; a
+song file for "groudon"; an SE adds `--player se1|se2|se3`; a cry replaces
+`--song <file>` with `--cry <id>`). `d` is engine minus mgba in cycles, per write; a
 threshold of 0 lists every nonzero write. Lines marked `<<< differs` on
 registers 90/94/98/9C are only the 32-bit vs byte logging of wave RAM.
 Reading a uniform offset: the whole frame shifted = a sequencer cost
@@ -270,8 +271,22 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   eighth argument picks the player the `.frames` summary reads) and
   `probe_mplay.py --player SE1 ...`; render with `--player se1` for the
   write diff.
-- Cry: the ROM and `mgba_render` accept `--type cry --id N`; the runner
-  needs a test entry type for it (milestone 4, next slice).
+- Cry: `{"name": "cry_<species>", "type": "cry", "id": N, "seconds": S}`,
+  N the gCryTable index (the `cry` lines of `sound/cry_tables.inc` from
+  0).  The ROM's `StartCry` plays `gCryTable[N]` with `PlayCryInternal`'s
+  CRY_MODE_NORMAL defaults (`mgba_render --type cry --id N`); the runner
+  passes `--cry N` to poryaaaa_render, which plays the cry song template
+  (`plugin/m4a_cry.c`: gPokemonCrySongTemplate with the SetPokemonCry*
+  setters applied, the data charged as IWRAM) with the cry's DPCM sample
+  as voice 0 on cry player 0 (`--player cry0`, the one SetPokemonCryTone
+  takes from silence).  No MIDI: `--input midi` skips cries.  To probe
+  one: `mgba_probe ... 180 1 N build/probe/syms.nm gPokemonCryMusicPlayers`
+  (type 1 = cry) and `probe_mplay.py --player CRY0 ...`; render with
+  `--cry N` for the entry / cmd / track diffs (cries have no PSG writes).
+  Cry samples are 10512 Hz DPCM, none loops, the longest (Jynx) ends
+  before the 140-tick EOT; the residual of a cry is the PCM
+  scheduler-lateness floor (one-sample runs at the `.events` slot
+  crossings), large per sample because DPCM cry waveforms jump.
 
 ## Debugging a single test
 

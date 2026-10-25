@@ -13,8 +13,8 @@
 # The write diff needs the probe logs (build/probe/<name>.txt from
 # mgba_probe; not committed) and renders each test for the probe's length:
 # micro-tests 1.2 s (70 frames) or 3 s (180), songs 20 s (1200) or 10 s
-# (600), SEs 3 s with --player.  tune_psg's 1-cycle DAC rounding is
-# expected and ignored.
+# (600), SEs 3 s with --player, cries 3 s with --cry (the id from
+# songs.json).
 set -u
 cd "$(dirname "$0")/../../.."
 BASE=${1:-$(ls -t test/accuracy/baselines/*.json | head -1)}
@@ -38,6 +38,10 @@ players=""
 if [ -f "$HOME/pokeemerald/sound/song_table.inc" ]; then
     players=$(sed -nE 's/^\s*song\s+(se_\w+)\s*,\s*MUSIC_PLAYER_(\w+)\s*,.*/\1 \2/p' "$HOME/pokeemerald/sound/song_table.inc" | tr 'A-Z' 'a-z')
 fi
+cries=$(python3 -c '
+import json
+for s in json.load(open("test/accuracy/songs.json")):
+    if s.get("type") == "cry": print(s["name"], s["id"])')
 moved=0; checked=0
 for f in build/probe/*.txt; do
     n=$(basename "$f" .txt)
@@ -45,6 +49,10 @@ for f in build/probe/*.txt; do
     frames=$(grep -c '^frame' "$f.frames")
     args=""
     case $n in
+        cry_*)      src=""
+                    id=$(echo "$cries" | awk -v n="$n" '$1 == n { print $2 }')
+                    [ -n "$id" ] || continue
+                    args="--cry $id";;
         littleroot) src=songs/mus_littleroot.s;;
         groudon)    src=songs/mus_weather_groudon.s;;
         credits|mt_chimney|rg_vs_trainer|vs_trainer|vs_wild) src=songs/mus_$n.s;;
@@ -54,9 +62,12 @@ for f in build/probe/*.txt; do
                     [ -n "$p" ] && args="--player $p";;
         *)          src=micro/$n.s;;
     esac
-    [ -f "build/accuracy/rom/$src" ] || continue
+    if [ -n "$src" ]; then
+        [ -f "build/accuracy/rom/$src" ] || continue
+        src="--song build/accuracy/rom/$src"
+    fi
     if [ "$frames" -gt 1000 ]; then d=20; elif [ "$frames" -gt 500 ]; then d=10; elif [ "$frames" -gt 100 ]; then d=3.0; else d=1.2; fi
-    if ! build/poryaaaa_render build/accuracy/project --song "build/accuracy/rom/$src" $args --output "$OUT/$n.wav" \
+    if ! build/poryaaaa_render build/accuracy/project $src $args --output "$OUT/$n.wav" \
             --sample-rate 48000 --total-duration-seconds $d --fadeout 0 --tail 0 \
             --psg-log "$OUT/$n.engine.log" > "$OUT/$n.render.log" 2>&1; then
         stage "diff $n" "RENDER FAILED"; status=1; continue
@@ -64,7 +75,7 @@ for f in build/probe/*.txt; do
     line=$(test/accuracy/tools/probe_diff.py "$f" "$OUT/$n.engine.log" 3 0 | tail -1)
     max=$(echo "$line" | sed -nE 's/.*: ([0-9]+) cycles.*/\1/p')
     checked=$((checked + 1))
-    if [ -n "$max" ] && [ "$max" != 0 ] && ! { [ "$n" = tune_psg ] && [ "$max" = 1 ]; }; then
+    if [ -n "$max" ] && [ "$max" != 0 ]; then
         stage "diff $n" "$line"; moved=$((moved + 1))
     fi
 done

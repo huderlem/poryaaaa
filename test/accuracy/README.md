@@ -18,7 +18,7 @@ tooling; the plugin builds without it.
 | `tools/probe_diff.py` | Diffs the PSG register writes of a probe log against `poryaaaa_render --song ... --psg-log <file>`, write by write, in cycles. The check that the timing model reproduces mgba's write cycles. |
 | `../test_song_parser.c` (`poryaaaa_song_tests`) | Byte-exact check of the `.s` parser (`plugin/m4a_song.c`) against the ROM: every song under `build/accuracy/rom/{micro,songs}` is parsed, relocated to its address from `accuracy_test.map` and compared with `accuracy_test.gba`. Runs as part of the `accuracy` target. |
 | `tools/gen_micro_midis.py` | Generates `rom/micro/*.mid` and `micro.cfg`. Re-run after editing; then rebuild the ROM. |
-| `songs.json` | Vanilla corpus (name, type, seconds, note). Songs: PSG + DirectSound (littleroot), pure PSG (weather_groudon), DirectSound-heavy battle (vs_wild), noise (mt_chimney), FRLG drumset (rg_vs_trainer), MEMACC (vs_trainer), long (credits, 60 s). Sound effects (`"type": "se"`, played by `m4aSongNumStart` on the player `sound/song_table.inc` names, which the runner passes to `poryaaaa_render --player`): se_exp and se_faint (SE1, 3 tracks), se_contest_place and se_truck_unload (SE2, 9 tracks), se_low_health and se_rain_stop (SE3, 1 track). No vanilla music uses compressed samples; the `pcm_cmp` micro-test covers DPCM until cries arrive. |
+| `songs.json` | Vanilla corpus (name, type, seconds, note). Songs: PSG + DirectSound (littleroot), pure PSG (weather_groudon), DirectSound-heavy battle (vs_wild), noise (mt_chimney), FRLG drumset (rg_vs_trainer), MEMACC (vs_trainer), long (credits, 60 s). Sound effects (`"type": "se"`, played by `m4aSongNumStart` on the player `sound/song_table.inc` names, which the runner passes to `poryaaaa_render --player`): se_exp and se_faint (SE1, 3 tracks), se_contest_place and se_truck_unload (SE2, 9 tracks), se_low_health and se_rain_stop (SE3, 1 track). Cries (`"type": "cry"`, `"id"` = the gCryTable index; the ROM's `StartCry` with `PlayCryInternal`'s CRY_MODE_NORMAL defaults, `poryaaaa_render --cry N`: the cry song template on cry player 0, `plugin/m4a_cry.c`): cry_pidgey (the shortest sample), cry_bulbasaur, cry_wailord, cry_jynx (the longest; no cry sample loops). Cries are the only DPCM (compressed) material besides the `pcm_cmp` micro-test. |
 | `refs/micro/` | Committed micro-test references (FLAC) and `manifest.json` (ROM hash, mgba version). Lets the micro-tests run without an mgba build. |
 | `baselines/` | Saved reports. |
 
@@ -63,6 +63,13 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   the music player (SE1 / SE2 / SE3, 3 / 9 / 1 tracks) comes from
   `sound/song_table.inc`, the compiled `.s` is already under
   `build/accuracy/rom/songs/`.  `--tests se` runs them alone.
-- Cries (milestone 4, next slice): the ROM already accepts `--type cry --id N`
-  (cry table index, `PlayCryInternal` defaults); the runner has no entry
-  type for them yet.
+- Cry: append `{"name": "cry_<species>", "type": "cry", "id": N, "seconds": S}`
+  with N the gCryTable index (the `cry` lines of `sound/cry_tables.inc`, from
+  0).  The ROM plays `gCryTable[N]` through `StartCry` (`mgba_render --type
+  cry --id N`, `PlayCryInternal`'s CRY_MODE_NORMAL defaults: volume 120, pan
+  0, pitch 15360, length 140, priority 10), poryaaaa through `poryaaaa_render
+  --cry N` (the cry song template with the cry's DPCM sample as voice 0, on
+  cry player 0).  Cries have no MIDI: `--input midi` skips them with a
+  message.  `--tests cry` runs them alone.  To probe one: `mgba_probe ... 180
+  1 N build/probe/syms.nm gPokemonCryMusicPlayers` and `probe_mplay.py
+  --player CRY0`; render with `--cry N` for the diffs.

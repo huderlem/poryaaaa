@@ -19,6 +19,11 @@ Steps (all idempotent, cached under --build-dir):
      m4aSongNumStart of its song id in the ROM and plays on the music player
      the song table names (sound/song_table.inc, the `ms` field: SE1 / SE2 /
      SE3 with 3 / 9 / 1 tracks), passed to poryaaaa_render as --player.
+     A cry ("type": "cry", "id": the gCryTable index) is the ROM's StartCry
+     (mgba_render --type cry --id N, PlayCryInternal's CRY_MODE_NORMAL
+     defaults) and poryaaaa_render --cry N: the cry song template on cry
+     player 0 with the cry's DPCM sample as its one voice.  Cries have no
+     MIDI, so --input midi skips them.
   4. metrics.compare on each pair; a table on stdout and a JSON report.
 
 Typical use (after `make` in test/accuracy/rom and building mgba_render and
@@ -118,7 +123,17 @@ def build_tests(args):
             songs = json.load(f)
         for s in songs:
             name = s["name"]
-            kind = s.get("type", "song")       # "song": vanilla music; "se": a sound effect
+            kind = s.get("type", "song")       # "song": vanilla music; "se": a sound effect; "cry": a Pokemon cry
+            if kind == "cry":
+                # StartCry in the ROM (--type cry --id N), the cry song
+                # template on cry player 0 in poryaaaa_render (--cry N).
+                if "id" not in s:
+                    print(f"warning: {name}: a cry needs its gCryTable index as \"id\", skipping", file=sys.stderr)
+                    continue
+                tests.append(dict(name=name, group="cry", type="cry", id=int(s["id"]), midi=None, song=None,
+                                  voicegroup=None, volume=None, reverb=None, extended=False,
+                                  seconds=float(s.get("seconds", 2.0)), player=None, cry=int(s["id"])))
+                continue
             const = name.upper()
             if const not in ids:
                 print(f"warning: {const} not in songs.h, skipping", file=sys.stderr)
@@ -242,7 +257,13 @@ def render_poryaaaa(args, t, overlay, out_dir):
     wav = os.path.join(out_dir, t["name"] + ".wav")
     common = ["--output", wav, "--sample-rate", str(args.rate),
               "--total-duration-seconds", str(t["seconds"]), "--fadeout", "0", "--tail", "0"]
-    if args.input == "song":
+    if t.get("cry") is not None:
+        if args.input != "song":
+            print(f"{t['name']}: a cry has no MIDI; skipped with --input midi", file=sys.stderr)
+            return None
+        # The cry song template with gCryTable[id]'s sample, on cry player 0.
+        cmd = [args.poryaaaa_render, overlay, "--cry", str(t["cry"])] + common
+    elif args.input == "song":
         if not t["song"] or not os.path.exists(t["song"]):
             raise SystemExit(f"compiled song {t['song']} not found; build the ROM or use --input midi")
         # Volume, reverb and voicegroup come from the .s header.
@@ -279,7 +300,7 @@ def main():
     ap.add_argument("--gate", type=float, default=-40.0, help="pass threshold in dB for the raw null depth (full and worst window)")
     ap.add_argument("--min-lag", type=float, default=-0.02, help="alignment search window start, seconds (test delayed by this much)")
     ap.add_argument("--max-lag", type=float, default=0.2, help="alignment search window end, seconds")
-    ap.add_argument("--tests", default=None, help="comma-separated test names or groups (micro, song, se)")
+    ap.add_argument("--tests", default=None, help="comma-separated test names or groups (micro, song, se, cry)")
     ap.add_argument("--input", choices=("song", "midi"), default="song",
                     help="what poryaaaa_render plays: the compiled .s from the ROM build (default) or the MIDI")
     ap.add_argument("--update-refs", action="store_true", help="store micro-test references in test/accuracy/refs/micro")
@@ -334,6 +355,8 @@ def main():
         if args.update_refs and t["group"] == "micro" and args.mgba_render:
             commit_ref(ref, t["name"])
         out = render_poryaaaa(args, t, overlay, out_dir)
+        if out is None:
+            continue
         m = metrics.compare_files(ref, out, min_lag_s=args.min_lag, max_lag_s=args.max_lag)
         ok = (not math.isnan(m["null_db"])) and m["null_db"] <= args.gate and m["worst_db"] <= args.gate
         m.update(name=t["name"], group=t["group"], passed=bool(ok), ref=ref, test=out)
