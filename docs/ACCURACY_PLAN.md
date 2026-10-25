@@ -2312,6 +2312,99 @@ runner, corpus, unit tests, README and skill; the baseline and this
 section; the review's fix, its gate test, the paragraph above and the
 refreshed baseline.
 
+### Done: milestone 4 slice 5, reverse cries (2026-10-25)
+
+The reversed cry table entries join the corpus: `gCryTable_Reverse`'s
+`cry_reverse` voices (ToneData type 0x30 = CMP | REV, the same DPCM sample
+played backwards through SoundMainRAM_Unk1's `_081DD3C0` walk), one track
+each.  Chorus (two tracks), a second cry while one plays and cries over
+music stay for later slices.  **No ROM change** and **no mixer change**:
+the slice fixes the loader (the by-index lookup stopped at the
+`gCryTable_Reverse::` label, so no id past 387 resolved; probe step 8
+above) and gates the already-ported reversed DPCM walk against the ROM for
+the first time.  Baseline `baselines/2026-10-25_cry-reverse.json` / `.txt`:
+**50/57 pass at -40 dB**; the 54 previous rows are unchanged to the decimal
+(`compare_reports.py 2026-10-24_cry-modes.json 2026-10-25_cry-reverse.json`:
+0 regressions, 0 improvements, every -inf still -inf, every row 0.0; the
+five documented floor FAILs as before).  `poryaaaa_unit_tests` 1328/1328
+(58 new), `poryaaaa_blip_tests` 49112/0, `poryaaaa_song_tests` 561/561.
+`claim_check.sh`: 50 probed tests (the three new ones added), 0 moved
+writes.
+
+| test | gCryTable | mode | sample | null | worst 1 s | ref dBFS | |
+|---|---|---|---|---|---|---|---|
+| cry_bulbasaur_reverse | 388 (= gCryTable_Reverse[0]) | CRY_MODE_NORMAL: 15360 / 140 / 0 | 8183 samples backwards from block 127, 0.78 s: run out through the count path, the unlink tick on frame 50, the EOT at 143 on an empty chain | -46.5 | -33.6 | -28.1 | FAIL |
+| cry_jynx_growl1 | 511 (= gCryTable_Reverse[123]) | CRY_MODE_GROWL_1: 15200 / 15 / 125 | 23524 samples backwards from block 367 (about 10.36 kHz): the EOT at frame 18 releases the live reversed channel, 6 release passes 124 .. 2, the channel stopped on 24 | -62.4 | -62.4 | -36.8 | PASS |
+| cry_pidgey_echo_start | 403 (= gCryTable_Reverse[15]) | CRY_MODE_ECHO_START: 15600 / 25 / 100, volume 90 (chorus 192 not patchable, 0) | 1902 samples backwards, 0.17 s: gone by frame 14, the EOT at 28 finds an empty chain | -34.9 | -26.4 | -36.2 | FAIL |
+
+**The three gCryTable indices and their ROM bytes** (probe step 8's table):
+388 `30 3c 00 00 bc 39 0d 08 ff 00 ff 00`, 403 `30 3c 00 00 f0 30 0e 08 ff
+00 ff 00`, 511 `30 3c 00 00 e8 77 15 08 ff 00 ff 00` -- type 0x30, key 60,
+pan 0, the forward entries' wav pointers (0x080d39bc / 0x080e30f0 /
+0x081577e8), envelope 255 / 0 / 255 / 0; `voicegroup_cry_table_entry`
+returns the same type for them and `poryaaaa_render --cry` prints them as
+reversed (`test_cry_table_index` pins the vanilla 388 / 403 / 511 / 123 and
+the 776-entry end).
+
+**The channel's death, probe against engine**: cry_jynx_growl1's `_081DCFB0`
+stamp is raw f25 = **frame 24**; the engine's channel loses CHN_ON on frame
+24 (`test_sequencer_cycles_cry_growl1_reverse`: the envelope 124, 60, 29,
+14, 6, 2 on frames 18..23 from `255 * 125 >> 8` per pass, the stop on the
+pass whose product is 0, the channel of type 0x30 with CHN_SPECIAL set and
+its sample index walking down from 23524).  The two count-path cries have
+no stamp: their unlink ticks (1689) are on frames 50 and 14 in the probe,
+and the engine's last non-zero output agrees with the reference's to the
+sample on all three (0.9254 / 0.4548 / 0.3150 s against 0.9255 / 0.4548 /
+0.3153 s; the differences at the end of (a) and (c) are the run below,
+not a length).
+
+**Per-test sequencer residual**: `entry_diff.py` 0 on all 177 complete
+frames of each of the three, `cmd_diff.py` 0, `track_diff.py` 0, no new
+constant: the frames are slice 4's (4077, 1596, 1689 / 1576, 1928 or 1810
+at the EOT, 1192, 1007).  The reversed walk is SoundMainRAM's cost, not
+MPlayMain's.
+
+**Residual attribution** (skill, "Attributing a residual below -40 dB";
+every run of differing output samples above 20 int16 LSB, both sides):
+cry_jynx_growl1 (4 slot crossings at 0.0704, 0.1374, 0.2043, 0.3383 s): one
+run, 0.1376 s, 0.6 PCM samples, 104 LSB (0.5 int8), 0.2 ms after the second
+crossing; the other three crossings produce nothing above the threshold
+(the first is before the sample is loud, the last two in the release tail
+at env 14 and 2) -- the floor, item 1c.  **cry_bulbasaur_reverse and
+cry_pidgey_echo_start have 0 slot crossings and exactly one run each**:
+0.8488 s / 0.2424 s, 1.4 PCM samples long (one PCM sample plus the
+resampler's ringing), 959 / 1535 LSB (5 / 8 int8 units), at the **end of
+the reversed play** -- the forward sample's first sample -- and nothing at
+the start (no 64-sample run anywhere: the reversed decode and the block
+walk differ by nothing).  This is the look-behind of sample 0 recorded in
+probe step 8 before the first render: the GBA decodes "block -1" from open
+bus (mgba `GBALoadBad`, the IWRAM Unk2 prefetch word; the 33 bytes `e4 01
+00 96 e1 d0 ...` decode to **38** at block offset 63) where the port's
+`unk2` decodes a zero block (0); the one output between the last two
+crossings interpolates `d[0] + ((r9 * (lookbehind - d[0])) >> 23)` toward
+38 on the GBA and toward 0 here.  **Measured, not only derived**: a
+throwaway build whose out-of-range block in `unk2` holds those 33 bytes
+renders cry_bulbasaur_reverse and cry_pidgey_echo_start at **-inf** (bit
+exact) with cry_bulbasaur and cry_pidgey unchanged; the build was reverted
+and the mixer is not changed in this slice (the task's rule: a reversed
+cry above the floor is attributed and reported before any mixer change;
+emulating the open-bus look-behind is a 33-byte constant keyed to the
+sample pointer's byte lane -- all three cry samples are lane 3, other lanes
+give other bytes -- and the GBA's prefetch model, i.e. its own change with
+its own review).  It is why (a) and (c) FAIL: their worst 1 s window holds
+that single sample on a quiet file; (b)'s release stops the channel long
+before sample 0 and never reaches it.  Against the forward twins: cry_bulbasaur (-54.9) and
+cry_pidgey (-43.0) carry only slot-crossing runs and no end run, because
+the forward walk's look-ahead at index `size` reads the extra block the
+converter emits (milestone 3), which exists in the ROM; the reversed
+walk's symmetric read at index -1 has no such block.
+
+The work, in order (commits on `accuracy-harness` after aeb01d6): the
+loader fix, its unit test and probe step 8; the corpus, the unit tests
+(the variants rows, `test_pcm_dpcm_reverse_walk`,
+`test_sequencer_cycles_cry_growl1_reverse`), README and skill; the
+baseline and this section; then the review paragraph below.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
