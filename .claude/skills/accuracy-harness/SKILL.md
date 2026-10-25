@@ -354,7 +354,7 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   and adds the two flags to that line.
   A third cry while both cry players are busy: `mgba_render --id3 N
   --start-frame3 F` / the probe's seventeenth and eighteenth arguments
-  (`... 15360 0 120 140 0 0 <id2> <F2> <id3> <F3>`, AccParams block bytes
+  (`... 15360 0 120 140 0 0 <id2> <F2> <id3> <F3>`, AccParams block offsets
   24..26) start gCryTable[N] at the defaults on VBlank F3.  With neither
   cry player free, `SetPokemonCryTone` replaces the one with the strictly
   larger `clock` (ticks since its own MPlayStart; a tie takes player 0),

@@ -26,7 +26,7 @@
  * --id2 / --start-frame2 start a second cry (gCryTable index N, PlayCryInternal's
  * CRY_MODE_NORMAL defaults) on VBlank N while the first test plays; start
  * frame 0 (the default) means no second cry.  --id3 / --start-frame3 start a
- * third the same way (AccParams block bytes 24..26); with both cry players
+ * third the same way (AccParams block offsets 24..26); with both cry players
  * busy the ROM's SetPokemonCryTone replaces the player with the larger clock.
  */
 #include <mgba/core/blip_buf.h>

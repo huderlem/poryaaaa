@@ -111,7 +111,7 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   `claim_check.sh` renders a 240-frame probe for 4 s and adds the two
   flags from the keys).
   A third cry: `mgba_render --id3 N --start-frame3 F` and the probe's
-  seventeenth / eighteenth arguments (AccParams bytes 24..26) start
+  seventeenth / eighteenth arguments (AccParams block offsets 24..26) start
   gCryTable[N] at the defaults on VBlank F while two cries play; neither
   cry player free, `SetPokemonCryTone` replaces the one with the strictly
   larger `clock` (ticks since its own start; a tie takes player 0) and
