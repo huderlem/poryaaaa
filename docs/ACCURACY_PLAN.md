@@ -2832,9 +2832,10 @@ The probe confirms the key on both tracks at the EOT (`_081DD938` r3 =
 frame 53 of both entries, the engine's `frameCycles` 2596 on the same frame
 (`test_sequencer_cycles_cry_high_pitch_two_chain`, `entry_diff.py` 0 on
 every complete frame of both), composed from the existing per-track terms
-(2360 for two empty chains + 118 per live chain: `ply_endtie`'s match 82
-instead of 54 and `ply_fine`'s `_loop` / `_ok` / `RealClearChain` / `_done`
-86 instead of 16).  Nothing derived, nothing fitted.  **`_SKIP` 18 stays
+(2360 for two empty chains + 118 per live chain, step 7's three terms:
+the tick's walk over a live channel 20, `ply_endtie`'s match 82 instead
+of 54, and `ply_fine`'s `_loop` / `_ok` / `RealClearChain` / `_done` 86
+instead of 16).  Nothing derived, nothing fitted.  **`_SKIP` 18 stays
 est.**: this run does not produce a `ply_endtie` pass-over (one channel per
 chain, `RealClearChain`'s prev 0 / next 0 on both; each walk ends at its
 match).  It needs two channels on one track's chain, i.e. a second cry
@@ -2878,6 +2879,53 @@ nothing in the engine addresses it (deferred item 1c), leave it.
 The work, in order (commits on `accuracy-harness` after 5a2c611): the
 corpus, probe step 10, unit tests and docs; the baseline and this section;
 then the review paragraph below.
+
+**Code review of the two-channel-release slice (2026-10-25).**  Two
+independent reviews (reviewer 1: `ply_endtie`'s walk in m4a_1.s against
+the port -- the key-byte branches, the newest-first walk over `track->chan`
+with the `0x83` / SF_STOP / key tests, SF_STOP the only store, the first
+match ending the walk, 61 - 7 + 28 = 82 for the RAM template; `ply_fine`'s
+`_loop` / `_ok` / `RealClearChain` / `_done` with a live channel -- the
+`0xC7` SF_ON test, the pointer stores and `channel->track = 0`, the unlinked
+channel's own `next` followed, `track->flags = 0`, every chained channel ON
+at FINE because the tick's walk already cleared the dead ones and
+SoundMainRAM runs after MPlayMain, 10 + 14 + 12 + 50 + 28 per one-channel
+chain; the release arithmetic at `_081DCFB6` for two channels on one frame
+-- the same `muls` / `lsrs` / unsigned compare against pseudoEchoVolume 0,
+the first product applied on the EOT frame itself in both, the channel
+loop's per-channel state on the stack so one stop does not touch the other,
+the attack / decay path leaving both at 255 from frame 5; the per-track EOT
+ordering -- track 0's ENDTIE and FINE complete before track 1's walk, the
+EXIST flag off from the next tick, SoundMainRAM walking channels by index so
+track 0's lower-index channel stores its 0 first within the same pass.
+Reviewer 2: the mode against sound.c:403-409 and the setter order at
+458-465, every template byte re-derived from m4a.c's setters and the struct
+offsets, the ids counted in cry_tables.inc and the sample counts from the
+.bin headers (0x5BE4 / 0x516E, freq word 0x00A44000), the tune unit (ply_tune
+`byte - C_V`, TrkVolPitSet's * 4 = 1/64 semitone) and the frequencies /
+durations / 0.84 s to the EOT with the cry player's tempo 150 one tick per
+frame, every step-10 number against the two raw logs and `.frames` /
+`.events` files -- no value outside {6792, 1932, 2596, 1192, 1007} in
+either, the two walks' cycles and registers, exactly two stamps and eight
+crossings per log -- the envelope ladder, the runner keys in accuracy.py
+and claim_check.sh, the README / skill text).  **No divergence** on any
+path this slice exercises.  **Adopted** (unit-test pins and a comment, no
+code or input changed; `claim_check.sh` re-run after them): the test now
+asserts track 0 on channel 0 and track 1 on channel 1 (ply_note's
+first-free scan in index order, the probe's 0x03000FC0 / 0x03001000 and
+the within-pass stamp order), and ON | STOP without IEC on both channels
+over frames 53..70 (the release path, not pseudo-echo); the test's comment
+reconciles the 82 as 61 - 7 (RAM byte) + 28; the Done section's breakdown
+of the 118 per live chain names step 7's three terms (the tick's walk over
+a live channel 20, the match 28, ply_fine's 70) instead of two.  **Not
+acted on, recorded**: `_SKIP` 18 is one est. value where the source has
+three pass-over paths of different lengths (the `0x83` test failing, SF_STOP
+set, the key mismatch: m4a_1.s 1833-1850), a latent timing difference for a
+chain of two or more whose newest channel does not match -- not reachable
+on the cry player until a second cry while one plays, and the constant is
+labelled est.; a channel in pseudo-echo is passed over by both (the `0x83`
+mask excludes SF_IEC), a confirmation.  No engine code changed after the
+baseline, so `2026-10-25_cry-two-chain-release.json` stands as saved.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

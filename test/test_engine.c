@@ -5330,8 +5330,9 @@ static void test_sequencer_cycles_cry_encounter_chorus(void)
  * 20, volume 90) on Cry_Jynx, the first EOT that finds a live channel on
  * each of the cry player's two chains.  CgbSound entry (cycles from VBlank
  * line 160): 6792 on frame 3, 1932 with both channels alive, 2596 on frame
- * 53 (the EOT: two ply_endtie -> _081DD938 walks of 82, each chain's one
- * channel holding the key, then two ply_fine -> _loop 10 -> _ok 14 ->
+ * 53 (the EOT: two ply_endtie -> _081DD938 walks of 82 (61 - 7 for the RAM
+ * byte + the match 28), each chain's one channel holding the key, then
+ * two ply_fine -> _loop 10 -> _ok 14 ->
  * RealClearChain 12 -> _done 50 unlinks of a live channel; the empty-chain
  * value was 2360), 1192 on 54, 1007 from 55.  Both channels carry xRELE's
  * 200 and run the same tail from the EOT frame, 255 * 200 >> 8 per pass
@@ -5394,7 +5395,8 @@ static void test_sequencer_cycles_cry_high_pitch_two_chain(void)
             const M4APCMChannel *ch = &engine.pcmChannels[chan[t]];
             if (k == 53)
                 releaseAtEot[t] = ch->release == 200;
-            if (k >= 53 && k <= 70 && (!(ch->status & CHN_ON) || ch->envelopeVolume != seq200[k - 53]) && envBad < 0) {
+            if (k >= 53 && k <= 70 && (!(ch->status & CHN_ON) || !(ch->status & CHN_STOP) || (ch->status & CHN_IEC)
+                                       || ch->envelopeVolume != seq200[k - 53]) && envBad < 0) {
                 envBad = k;
                 printf("  frame %d: track %d env %d status %02X, GBA %d\n", k, t, ch->envelopeVolume, ch->status, seq200[k - 53]);
             }
@@ -5403,10 +5405,11 @@ static void test_sequencer_cycles_cry_high_pitch_two_chain(void)
         }
     }
     ASSERT(chan[0] >= 0 && chan[1] >= 0, "cry high pitch cycles: both tracks keyed a channel on the start tick (frame 3)");
+    ASSERT(chan[0] == 0 && chan[1] == 1, "cry high pitch cycles: track 0 took channel 0 and track 1 channel 1 (ply_note's first-free scan in index order: the probe's 0x03000FC0 then 0x03001000, SoundMainRAM stopping the lower index first)");
     ASSERT(liveAtEot[0] && liveAtEot[1], "cry high pitch cycles: both channels are still sounding when the EOT tick runs (frame 53)");
     ASSERT(releaseAtEot[0] && releaseAtEot[1], "cry high pitch cycles: both channels carry xRELE's 200");
     ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the cry_jynx_high_pitch probe on frames 3..80 (cry 0, two live chains at the EOT: 2596)");
-    ASSERT_EQ(envBad, -1, "cry high pitch cycles: both release envelopes on frames 53..70 are 255 * 200 >> 8 per pass (199 .. 1)");
+    ASSERT_EQ(envBad, -1, "cry high pitch cycles: both release envelopes on frames 53..70 are 255 * 200 >> 8 per pass (199 .. 1), ON | STOP without IEC (the release path, not pseudo-echo)");
     ASSERT_EQ(death[0], 71, "cry high pitch cycles: track 0's channel dies on frame 71, the probe's first _081DCFB0 stamp (f72, 0x03000FC0)");
     ASSERT_EQ(death[1], 71, "cry high pitch cycles: track 1's channel dies on frame 71, the probe's second _081DCFB0 stamp (f72, 0x03001000)");
     ASSERT(m4a_sequencer_finished(&seq), "sequencer: the cry finished (both tracks gone at the EOT on 53, the channels outliving them)");
