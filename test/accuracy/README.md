@@ -59,7 +59,8 @@ the compiled song's would at the exact MIDI tempo.  The renderer's own
 default is off (the first note at output time 0, which is what a user
 rendering a MIDI wants); `--no-gba-start-delay` runs the harness that way.
 `--gba-tempo-grid` adds `poryaaaa_render --gba-tempo-grid` (slice 3a; off
-in both tools unless asked, `--no-gba-tempo-grid` says so): each MIDI tick
+in both tools unless asked; `accuracy.py --no-gba-tempo-grid` says so
+explicitly): each MIDI tick
 moves from its exact-tempo time to the frame MPlayMain plays it on --
 tempoC += tempoI once per frame (MPlayStart's 150 before the first TEMPO,
 mid2agb's tempoI = 2 x floor(BPM x tbs / 2) from the first MTrk's tempo

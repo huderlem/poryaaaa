@@ -6281,7 +6281,8 @@ exactly):
    row and se_faint / se_truck_unload / se_low_health (its loop included)
    / se_rain_stop: **no event changes frame**.  The songs: 254 (groudon)
    .. 1682 (rg_vs_trainer) events in 20 s, 1 .. 6 frames later (credits:
-   1306 in 60 s, up to 17), i.e. the 0.4562 % drift.  No row has a note
+   1306 in 60 s, up to 17, its 22 moved TEMPO events not counted), i.e.
+   the 0.4562 % drift.  No row has a note
    whose note-on and note-off share a frame on the grid (the case where
    the latch's one-tick rule and the ROM, which kills START | STOP, would
    part) nor today.
@@ -6323,17 +6324,23 @@ tick, queries in order), `_set_tempo` (the next add), `_sample` (floor((883882 +
 renderer, which still uses it for O) and `_dispatch_sample(grid, exact,
 songTick, tempoUs, rate)`, which the renderer calls for every event in
 both modes: a NULL grid (flag off) returns the exact sample unchanged.
-The renderer: `TempoEvent.track`; `RenderEvent.songTick` (the SMF tick;
-in the loop expansion + pass x the body's ticks, the gate-carried release
-at loop start + rr + (pass + passDelta) x body, the wrap release at loop
-end + pass x body) and `.gridTempoUs` (a first-MTrk tempo's us per beat,
-0 for the synthetic 120 BPM default and other tracks' tempos); the
-expansion's bound `expandLimit` (= `totalSamples` without the flag;
-with it `grid_expand_limit`, the bound widened by max(kx x kg, kx, 1),
-kx / kg the largest exact / grid and grid / exact seconds-per-tick ratios
-over the tempos, plus four frames); after the expansion the walk; with
-the flag, the loop-count fade at the grid sample of loop start + count x
-body and the natural tail after the last event's grid sample.  The
+The renderer: `TempoEvent.track`; `RenderEvent.songTick` and `.loopPass`
+(since the review: the SMF tick within its pass and the pass, the
+gate-carried release at loop start + rr on pass + passDelta, the wrap
+release at loop end on its pass; the walk takes clock(tick) + pass x
+(clock(loop end) - clock(loop start)), `gba_tempo_grid_pass_clock`; at
+the commit songTick was tick + pass x the body's ticks) and
+`.gridTempoUs` (a first-MTrk tempo's us per beat, 0 for the synthetic 120
+BPM default, other tracks' tempos and, since the review, a TEMPO on the
+loop end's tick); the expansion's bound `expandLimit` (= `totalSamples`
+without the flag; with it `grid_expand_limit`, the bound widened by
+max(kx x kg, kx, 1), kx / kg the largest exact / grid and grid / exact
+seconds-per-tick ratios over the tempos, plus four frames -- since the
+review the grid's ratios scaled by the loop pass's clocks / ticks and two
+of the longest clocks added); after the expansion the walk; with the
+flag, the loop-count fade at the grid sample of loop start + count x
+body and the natural tail after the last channel event's grid sample (at
+the commit, the last event's, a tempo included).  The
 render loop and `--gba-start-delay` are untouched.  `accuracy.py
 --gba-tempo-grid` / `--no-gba-tempo-grid` (default off, as the renderer:
 neither tool's default changes before the user decides) and the report's
@@ -6431,14 +6438,14 @@ same table:
    se_contest_place 25 (30) -- PCM rows counted by the output sample's
    frame, one after the SoundMain that mixes it.
 3. *Rows with no moved event byte-identical*: **held exactly**, 29 WAVs
-   (the 25 micro rows and se_faint, se_truck_unload, se_low_health with
+   (the 25 of the 31 micro rows without a moved event and se_faint, se_truck_unload, se_low_health with
    its loop, se_rain_stop).  lfo_delay -2.3 unchanged: its residual is the
    LFO grid alone.
 4. *vol and bend -inf*: **bend held** (-inf, bit-identical to its `--song`
    render over the whole file; aligned +1.0).  **vol did not** (-47.2 /
    -41.4, passing; aligned -31.2): its first difference from the `--song`
-   render is frame 168, tick 132's, 3464 samples, max 216 (about one PCM
-   LSB).  Tick 132 carries a VOL 127 and the note's end, then FINE
+   render is in output frame 169, the one after tick 132's SoundMain
+   (frame 168), 3464 samples, max 216 (about one PCM LSB).  Tick 132 carries a VOL 127 and the note's end, then FINE
    (`vol.s`: N24 at 108, `VOL 127`, `FINE`).  `ply_fine` (m4a_1.s
    751-777) sets STOP on each channel, unlinks it (`RealClearChain`) and
    clears the track's flags, so the end-of-tick VOLCHG pass never reaches
@@ -6459,9 +6466,10 @@ same table:
    whose waveforms do not correlate (null -2.7; the skill's "drift is noise
    there").  Each song's first difference from its `--song` render is on
    or after the aligned one's (littleroot frame 20 = tick 12, vs_trainer
-   13 = tick 12: note-ons on PSG tracks; credits 133 -> 643 = tick 384,
-   where track 7 has a VOL before a note in the tick; the other four on
-   frame 3, the PSG entry), with the differing sample count down on six
+   13 = tick 12: note-ons on PSG tracks; credits 133 -> 643, three frames
+   after tick 384's ROM frame 640, the only event frame in 636 .. 644, where
+   track 7 has a VOL before a note in the tick -- not taken apart further;
+   the other four on frame 3, the PSG entry), with the differing sample count down on six
    (vs_trainer 949220 -> 484653, credits 2771850 -> 2067076).  Not passing,
    as predicted.
 8. *The latch*: held, byte-identical.
@@ -6469,8 +6477,9 @@ same table:
 **The songs' drift**, aligned -> tempo grid (ms/s): littleroot 5.0 ->
 0.0, groudon 4.7 -> -0.5 (uncorrelated), vs_wild 4.2 -> 0.0, mt_chimney
 4.6 -> 0.0, rg_vs_trainer 4.2 -> 0.0, vs_trainer 5.0 -> 0.0, credits 4.6
--> 0.0 (61 tempo changes, the two-tick frames of five songs at 172 .. 198
-BPM and the SEs at 220 / 240 all on the ROM's frames).
+-> 0.0 (23 of its 61 tempo changes inside the 60 s window, all at 94 BPM
+or below; the two-tick frames of rg_vs_trainer, vs_wild and vs_trainer at
+172 / 196 / 198 BPM and of the SEs at 220 / 240 all on the ROM's frames).
 
 **Attribution of what is left on the flag-on midi path** (each against
 its own `--song` render):
@@ -6493,8 +6502,9 @@ accumulator does the ROM's arithmetic but with two offsets: the tempo set
 by a dispatch before frame F's SoundMain is added on frame F, where the
 ROM's TEMPO in a tick of frame F first adds on F + 1; and its phase runs
 from the boot (MPlayStart's tempoI 150 / tempoC 0 consumed by the boot's
-frame-2 tick) instead of from the song start, which puts its steps on
-frames 4, 9, 14, ... where the ROM's are on 3, 8, 13, ... at 120.  With the
+frame-2 tick) instead of from the song start, which puts its n = 0 mod 4
+steps on frames 4, 9, 14, ... where the ROM's are on 3, 8, 13, ... at 120
+(the other steps coincide).  With the
 grid the renderer dispatches every TEMPO exactly on its tick's frame, so
 3b's rule becomes exact rather than approximate: a MIDI-path song-start
 reset at the origin (tempoC 0, tempoI 150, as MPlayStart) and a tempo
@@ -6512,6 +6522,123 @@ grid), so 3b's reset and deferred tempo are renderer-path behaviour
 (`!seq` with the renderer's flags), and the plugin keeps the
 dispatch-frame tempo.  The LFO / CgbSound order (slice 1 item 6) is a
 separate item that lfo_psg also needs.
+
+**Code review of slice 3a (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: the walker, tempoI, clocks, tempo selection and the
+dispatch sample against MPlayMain's tempo loop, ply_tempo, MPlayStart,
+ply_fine and mid2agb's main.cpp / midi.cpp / agb.cpp, with a gas test of
+`TEMPO , N*tbs/2` and a Python model of the blip stepping at 8000 ..
+192000 Hz; reviewer 2: every number of this section recomputed from its
+own SMF parser and model of both dispatch rules, the table against the
+two baselines field by field, the 29 WAVs `cmp`ed, the unit test
+assertion by assertion, the runner, the docs).
+
+No divergence on any corpus path, and no number of the table wrong.
+Confirmed: the per-frame add, MPlayStart's seed, a TEMPO taking effect on
+the next frame's add (lazy placement is safe, every TEMPO being an event
+in order), tempoI to the bit (float division, gas's truncating `*tbs/2`
+into a `.byte`, ply_tempo's doubling), the clock conversion, the
+first-MTrk tempo selection, the dispatch frame at every rate from 8000 Hz
+(S_j - B >= 42 cycles over 30000 frames, three phases; without the
+start delay grid frames 0 .. 3 collapse onto frame 3), the event order
+after the walk, the flag-off path, the moved-event lists, origins, table
+(44 rows, 0 mismatches), byte-identities and the 69 assertions.
+
+*Acted on*, each applied alone and gated alone (claim_check 59 diffed, 0
+moved, 57/66, 0 regressions, every row 0.0, 0 field differences on 66
+rows; blip 49112/0, songs 561/561; the four midi runs -- aligned,
+aligned-latch, tempo-grid, tempo-grid-latch -- 0 field differences on 44
+rows against their baselines and the 44 grid WAVs byte-identical: every
+one harness-neutral, as none of the five cases occurs in the corpus):
+
+- *A TEMPO byte of 0 hung the walker* (reviewer 1).  A BPM of 512, 513,
+  1024, ... (256, 512, ... with `-X`) wraps the byte to 0; ply_tempo stores
+  tempoI 0 and the ROM never ticks again, while `while (tempoC < 150)`
+  spun forever.  The walker now freezes (`GBA_TEMPO_GRID_NEVER`, a sample
+  past any render; a later TEMPO, inside a tick never played, cannot
+  restart it), `grid_expand_limit` skips tempoI 0 instead of treating it as
+  1 (a 150x expansion), the natural tail and the print skip the
+  never-played events, a fade past the stop keeps the exact-tempo fade.
+  Unit test: 512 BPM -> tempoI 0, tick 0 plays, tick 1 and its TEMPO never,
+  the walker stays frozen.  A scratch MIDI (TEMPO 512 at 0, a note, TEMPO
+  120 at 12, a note at 24) renders in 0.5 s (the old loop's spin is read
+from the code, not run).
+- *A TEMPO on the loop end's tick* (reviewer 1).  mid2agb sorts the GOTO
+  (LoopEnd 0x12) before a same-clock TEMPO (0x19; midi.cpp EventCompare),
+  so the ROM never plays it; the expansion kept it as a grid tempo change.
+  Its `gridTempoUs` is now 0 in each pass (it still reaches the engine as
+  before, the flag-off path unchanged).  A scratch loop [0, 24] with TEMPO
+  120 at 0 and 240 at 24: the loop-count fade now at 1.0046 s, 120
+  throughout (with the TEMPO applied it would be about 0.75 s, computed).
+- *Loop passes in clocks* (reviewer 1).  A pass plays at clock(t) + p x
+  (clock(E) - clock(S)); the walker took clock(t + p x L), one clock short
+  every few passes when the body is not whole clocks (division 96, loop
+  [2, 388]: pass 2 of tick 2 is clock 194, the old rule 193).  Now
+  `songTick` is the tick within its pass and `loopPass` the pass,
+  `gba_tempo_grid_pass_clock` (unit test: 194, and a tick outside the loop
+  its own clock).  At division 24 nothing moves: littleroot's loop-count
+  render byte-identical.
+- *The expansion bound's slack* (reviewer 1).  It covered the frame
+  rounding but not a tick's truncation to its clock, several frames long
+  at a slow tempo, nor (with the clock passes) a pass up to a clock shorter
+  than its ticks, compounding per pass.  The grid's seconds per tick are
+  now scaled by the pass's clocks / ticks, and two of the longest clocks
+  added.  A scratch 20 BPM, division 96 loop at 8000 Hz, 30 / 37.3 / 61.7 s:
+  the last placed tick past the render end each time.
+- *The natural tail after a tempo* (both).  It started after the last
+  event of any kind; now after the last channel event, as the exact
+  path's `totalMidiSamples` (a scratch MIDI with a TEMPO at tick 96 after
+  the last note-off at 24: 1.50 s both ways; the old rule gives about
+  3 s, computed).
+- *The unit test* (reviewer 2): "130.0001 BPM rounds to 130" was 130.00004
+  and passes under truncation too; now 461539 us (129.9998: round 130,
+  truncation 128).  The byte wrap is the 512 BPM case above.  Unit
+  **1824/1824** (1749 + 75).
+- *Messages* (reviewer 2): the usage text's 0.46 % holds at an even BPM
+  (mid2agb drops an odd one by one); the print names the last MIDI
+  event's tick's ROM frame, taken before the fade query, and says events
+  past the render end are dropped.
+- *Docs* (reviewer 2): only three songs have two-tick frames
+  (rg_vs_trainer, vs_wild, vs_trainer; credits' 182 BPM is at tick 6144,
+  past its window); 23 of credits' 61 tempos fall in its 60 s; credits'
+  first difference at 643 is three frames after tick 384's frame 640, not
+  "= tick 384"; vol's first difference is output frame 169, the frame after
+  tick 132's SoundMain; "the 25 of the 31 micro rows"; credits' 1306 moved
+  events exclude its 22 TEMPOs; the skill's drift is six songs' (groudon
+  -0.5); the README's opt-out is accuracy.py's; the 3b paragraph's frames
+  are the n = 0 mod 4 steps only.  Step 2's description now gives the
+  code as it stands, with the commit's form in parentheses.
+
+*Recorded, not acted on:*
+
+- *Note-offs at their own tick's clock* (reviewer 1): the ROM releases at
+  the note-on's clock plus the converted length (at least 1, the LUT
+  without `-E`; CreateTies' EOT at time(on) + duration), which differs
+  from clock(off) when the division is not 24 x tbs or without `-E`.  In
+  the step-1 "not modelled" list; every corpus MIDI is 24 ticks per beat
+  with `-E`.
+- *Two first-MTrk tempos on one tick* (reviewer 1): `cmp_tempo_events`
+  has no tie-break and qsort is not stable, where mid2agb keeps file order
+  and the last wins.  Pre-existing in the exact path too; none in the
+  corpus.
+- *A tick shorter than an output sample* (reviewer 1): parse_midi orders a
+  tempo before a note, the loop merge a carried release before a body
+  event, at an equal exact sample; with different ticks the walker then
+  returns the later tick's frame for the earlier one.  Needs a division
+  far above any corpus file at a low rate.
+- *The engine's tempo* (reviewer 1): `m4a_engine_set_tempo_bpm` still
+  gets round(BPM), the 120 default and every track's tempos (slice 3b).
+- *Coverage* (reviewer 2): the loop expansion's ticks, the bound, the
+  fade / tail and parse_midi's tempo selection are static renderer code,
+  checked here by scratch renders, not by the unit test; the engine
+  sub-test covers 22050 .. 96000 Hz (the reviewers' models cover 8000).
+- *Dispatch-rule ambiguity* (reviewer 2): under the phase-free dispatch
+  band 21 rg_vs_trainer and 2 mt_chimney events could fall either side of
+  a SoundMain on the aligned path; the step-1 counts use slice 2a's
+  measured phase.  Not a grid question (the grid's dispatch has no
+  ambiguity on any row).
+- The step-1 and step-3 texts are kept as written; this paragraph says
+  where the review changed them.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

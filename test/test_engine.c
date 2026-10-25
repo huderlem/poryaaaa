@@ -5930,7 +5930,7 @@ static void test_gba_tempo_grid(void)
     ASSERT_EQ(gba_tempo_grid_tempo_i(500000, 48), 240, "120 BPM with -X -> tempoI 240");
     ASSERT_EQ(gba_tempo_grid_tempo_i(800000, 24), 74, "75 BPM -> tempoI 74 (the byte is 75/2)");
     ASSERT_EQ(gba_tempo_grid_tempo_i(250000, 24), 240, "240 BPM -> tempoI 240");
-    ASSERT_EQ(gba_tempo_grid_tempo_i(461538, 24), 130, "130.0001 BPM rounds to 130");
+    ASSERT_EQ(gba_tempo_grid_tempo_i(461539, 24), 130, "129.9998 BPM rounds to 130 (truncation would give 128)");
 
     /* mid2agb's clocks: 24 * tbs * tick / division, truncated */
     GbaTempoGrid g;
@@ -5939,6 +5939,12 @@ static void test_gba_tempo_grid(void)
     ASSERT_EQ((int)gba_tempo_grid_clock(&g, 5), 1, "division 96: tick 5 -> clock 1");
     gba_tempo_grid_init(&g, 24, 48);
     ASSERT_EQ((int)gba_tempo_grid_clock(&g, 3), 6, "-X, division 24: tick 3 -> clock 6");
+    /* A loop pass adds whole clocks: loop [2, 388] at division 96 is clock
+     * 0 .. 97, so pass 2 of tick 2 is clock 194 (tick 2 + 2 x 386 = 774
+     * would truncate to 193). */
+    gba_tempo_grid_init(&g, 96, 24);
+    ASSERT_EQ((int)gba_tempo_grid_pass_clock(&g, 2, 2, 2, 388), 194, "loop pass 2 of tick 2 at division 96 -> clock 194");
+    ASSERT_EQ((int)gba_tempo_grid_pass_clock(&g, 5, 0, 2, 388), 1, "outside the loop: the tick's own clock");
 
     /* No TEMPO: MPlayStart's 150, a tick every frame */
     gba_tempo_grid_init(&g, 24, 24);
@@ -5978,6 +5984,17 @@ static void test_gba_tempo_grid(void)
     ASSERT_EQ((int)gba_tempo_grid_frame(&g, 4), 4, "240 -> 60: tick 4 on frame 4");
     ASSERT_EQ((int)gba_tempo_grid_frame(&g, 5), 7, "240 -> 60: tick 5 on frame 7");
     ASSERT_EQ((int)gba_tempo_grid_frame(&g, 5), 7, "a placed tick queried again keeps its frame");
+
+    /* A TEMPO byte of 0 (512 BPM: 512 / 2 = 256 wraps to 0 in the .byte)
+     * stops the ROM's accumulator: no later tick is placed, and a later
+     * TEMPO, inside one of those ticks, never runs. */
+    ASSERT_EQ(gba_tempo_grid_tempo_i(117188, 24), 0, "512 BPM -> TEMPO byte 0 -> tempoI 0");
+    gba_tempo_grid_init(&g, 24, 24);
+    ASSERT_EQ((int)gba_tempo_grid_dispatch_sample(&g, 0, 0, 117188, 48000.0), 0, "tempo 0: tick 0 plays");
+    ASSERT(gba_tempo_grid_dispatch_sample(&g, 0, 1, 500000, 48000.0) >= UINT64_MAX / 8,
+           "tempo 0: tick 1 (and its TEMPO) never plays");
+    ASSERT(gba_tempo_grid_frame(&g, 2) == GBA_TEMPO_GRID_NEVER && g.frozen,
+           "tempo 0: the later TEMPO did not restart the accumulator");
 
     /* The dispatch samples: grid frame 0 at the origin (slice 2a's O), the
      * events of one frame on one sample, relative to grid frame 0. */

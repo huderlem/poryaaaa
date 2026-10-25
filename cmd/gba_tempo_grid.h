@@ -31,15 +31,27 @@ typedef struct {
     int64_t  frame;          /* the frame the walker is on (-1 before frame 0) */
     int64_t  lastFrame;      /* the frame of the last placed tick */
     uint64_t nextClock;      /* the next song tick to place */
+    bool     frozen;         /* tempoI 0 met with tempoC < 150: no tick ever again */
 } GbaTempoGrid;
+
+/* The frame of a tick the ROM never plays (a TEMPO byte of 0 stops the
+ * accumulator; ply_tempo can store it); its sample is past any render. */
+#define GBA_TEMPO_GRID_NEVER INT64_MAX
 
 void gba_tempo_grid_init(GbaTempoGrid *g, uint32_t division, uint32_t clocksPerBeat);
 
 /* mid2agb's clock of an SMF tick: 24 * tbs * tick / division, truncated. */
 uint64_t gba_tempo_grid_clock(const GbaTempoGrid *g, uint64_t midiTick);
 
-/* The grid frame of song tick `clock` (0 = frame 3).  Queries must not go
- * backwards; a clock already placed returns the last placed tick's frame. */
+/* The clock of SMF tick `tick` on loop pass `pass` (0 outside a loop): the
+ * GOTO at the loop end's clock jumps back to the loop start's, so a pass
+ * adds clock(loopEndTick) - clock(loopStartTick), whole clocks. */
+uint64_t gba_tempo_grid_pass_clock(const GbaTempoGrid *g, uint64_t tick, uint64_t pass,
+                                   uint64_t loopStartTick, uint64_t loopEndTick);
+
+/* The grid frame of song tick `clock` (0 = frame 3), or GBA_TEMPO_GRID_NEVER.
+ * Queries must not go backwards; a clock already placed returns the last
+ * placed tick's frame. */
 int64_t gba_tempo_grid_frame(GbaTempoGrid *g, uint64_t clock);
 
 /* A TEMPO (microseconds per beat) at the tick last placed: takes effect on
@@ -57,10 +69,10 @@ uint64_t gba_tempo_grid_sample(int64_t frame, double sampleRate);
 
 /* poryaaaa_render's dispatch sample for one event, in event order: with
  * g == NULL (no --gba-tempo-grid) the exact-tempo sample unchanged; with a
- * grid, the sample of the event's song tick's grid frame relative to grid
+ * grid, the sample of the grid frame of song tick `clock` relative to grid
  * frame 0's (so tick 0 stays at MIDI time 0), and a tempoUs != 0 (a TEMPO
  * mid2agb keeps) changes the add from the next frame on. */
 uint64_t gba_tempo_grid_dispatch_sample(GbaTempoGrid *g, uint64_t exactSample,
-                                        uint64_t songTick, uint32_t tempoUs, double sampleRate);
+                                        uint64_t clock, uint32_t tempoUs, double sampleRate);
 
 #endif

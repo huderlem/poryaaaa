@@ -64,8 +64,9 @@ against the ROM's 3 + ceil(1.25 n), one frame early on bend, the lfo
 rows, psg_mix and vol's ramp ticks 110, 114, ..., 130, and the engine's
 LFO one frame late on one tick in four, n = 0 mod 4; `--gba-tempo-grid`
 puts every tick on the ROM's frame: bend -inf, vol -47.2 (the VOL on its
-FINE tick, which ply_fine's unlink keeps from the releasing note), the
-songs' drift 0.0, the LFO grid left to slice 3b).  Aligned, the eleven PCM rows without such an
+FINE tick, which ply_fine's unlink keeps from the releasing note), six
+songs' drift 0.0 (groudon, uncorrelated, -0.5), the LFO grid left to
+slice 3b).  Aligned, the eleven PCM rows without such an
 event are bit-identical to their `--song` renders (-inf, pcm_cmp /
 pcm_chord at their -55 floor); the PSG rows keep the fixed CgbSound entry
 (same writes, -2667 on frame 3, -464 .. -472 on tick frames, -1388 ..

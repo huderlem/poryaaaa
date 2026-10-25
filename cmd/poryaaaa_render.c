@@ -189,10 +189,12 @@ typedef struct {
     uint8_t  type;
     uint8_t  data0;
     uint8_t  data1;
-    /* --gba-tempo-grid: the event's song tick (SMF ticks, a loop pass's
-     * body ticks added) and, for a tempo change mid2agb keeps (first MTrk),
-     * its microseconds per beat (0: not a TEMPO on the ROM's grid). */
+    /* --gba-tempo-grid: the event's song tick (SMF ticks within its loop
+     * pass), the pass (0 outside the loop body) and, for a tempo change
+     * mid2agb keeps (first MTrk), its microseconds per beat (0: not a TEMPO
+     * on the ROM's grid). */
     uint64_t songTick;
+    uint32_t loopPass;
     uint32_t gridTempoUs;
 } RenderEvent;
 
@@ -437,6 +439,7 @@ static RenderEvent make_tempo_event(uint64_t samplePos, double bpm)
     ev.data0     = (uint8_t)(b & 0x7F);
     ev.data1     = (uint8_t)((b >> 7) & 0x7F);
     ev.songTick  = 0;
+    ev.loopPass  = 0;
     ev.gridTempoUs = 0;
     return ev;
 }
@@ -603,6 +606,7 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
         noteEvts[i].data0     = re->data0;
         noteEvts[i].data1     = re->data1;
         noteEvts[i].songTick  = re->tick;
+        noteEvts[i].loopPass  = 0;
         noteEvts[i].gridTempoUs = 0;
     }
 
@@ -806,8 +810,9 @@ static void print_usage(const char *prog)
         "                              would (the song tempo as mid2agb writes it, a tick each\n"
         "                              time the tempo accumulator reaches 150, MPlayStart's 150\n"
         "                              before the first TEMPO) instead of at the MIDI's exact\n"
-        "                              tempo, which runs about 0.46 %% faster.  With\n"
-        "                              --gba-start-delay each tick lands on the ROM's frame.\n"
+        "                              tempo (at an even BPM about 0.46 %% faster; mid2agb drops\n"
+        "                              an odd BPM by one).  With --gba-start-delay each tick\n"
+        "                              lands on the ROM's frame.\n"
         "                              Default: the exact tempo map\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
@@ -1329,11 +1334,15 @@ static uint64_t gba_start_delay_samples(double sampleRate)
  * reach so that every event the grid places before `totalSamples` exists.
  * An event's grid time is at most (largest grid / smallest exact time per
  * tick) of its exact time, an event at grid time g at most (largest exact /
- * smallest grid) x g in exact time; the frame rounding and the dispatch
- * guard add under two frames, four are allowed.
+ * smallest grid) x g in exact time.  A loop pass is whole clocks
+ * (passRatio = its clocks / its ticks in clocks, which scales the grid's
+ * time per tick inside the loop); the frame rounding and the dispatch
+ * guard add under two frames and a tick's truncation to its clock up to one
+ * clock: four frames and two of the longest clocks are allowed.
  */
 static uint64_t grid_expand_limit(uint64_t totalSamples, const TempoEvent *tempos, int tempoCount,
-                                  uint32_t tpqn, uint32_t clocksPerBeat, double sampleRate)
+                                  uint32_t tpqn, uint32_t clocksPerBeat, double passRatio,
+                                  double sampleRate)
 {
     /* Seconds per SMF tick: exact = us / 1e6 / tpqn; on the grid
      * 150 / tempoI frames per clock, clocksPerBeat / tpqn clocks per tick. */
@@ -1352,16 +1361,21 @@ static uint64_t grid_expand_limit(uint64_t totalSamples, const TempoEvent *tempo
         }
         if (i < 0 ? gDefault : tempos[i].track == 0) {
             uint32_t ti = i < 0 ? 150 : gba_tempo_grid_tempo_i(tempos[i].tempo, clocksPerBeat);
-            double s = 150.0 / (ti ? ti : 1) * frameSec * clocksPerBeat / tpqn;
+            if (ti == 0)
+                continue;   /* the ROM stops ticking: nothing after it is placed */
+            double s = 150.0 / ti * frameSec * clocksPerBeat / tpqn;
             if (s < gMin) gMin = s;
             if (s > gMax) gMax = s;
         }
     }
+    if (passRatio < 1.0) gMin *= passRatio;
+    if (passRatio > 1.0) gMax *= passRatio;
     double kx = exMax / gMin, kg = gMax / exMin;
+    double clockSec = gMax * tpqn / clocksPerBeat;
     double k = kx * kg;
     if (kx > k) k = kx;
     if (k < 1.0) k = 1.0;
-    return (uint64_t)(k * ((double)totalSamples + 4.0 * frameSec * sampleRate)) + 1;
+    return (uint64_t)(k * ((double)totalSamples + (4.0 * frameSec + 2.0 * clockSec) * sampleRate)) + 1;
 }
 
 /* Dispatch one RenderEvent to the engine */
@@ -1785,9 +1799,16 @@ int main(int argc, char *argv[])
          * time the tempo map allows (a slower grid must not run out of
          * expanded events); what lands past the end is dropped below. */
         uint64_t expandLimit = totalSamples;
-        if (gbaTempoGrid)
+        if (gbaTempoGrid) {
+            GbaTempoGrid gc;
+            gba_tempo_grid_init(&gc, tpqn, (uint32_t)clocksPerBeat);
+            double passClocks = (double)gba_tempo_grid_pass_clock(&gc, loopStartTick, 1, loopStartTick, loopEndTick)
+                              - (double)gba_tempo_grid_clock(&gc, loopStartTick);
+            double tickClocks = (double)loopLenTicks * clocksPerBeat / tpqn;
             expandLimit = grid_expand_limit(totalSamples, tempoMap.events, tempoMap.count,
-                                            tpqn, (uint32_t)clocksPerBeat, sampleRate);
+                                            tpqn, (uint32_t)clocksPerBeat,
+                                            tickClocks > 0.0 ? passClocks / tickClocks : 1.0, sampleRate);
+        }
 
         /* Pre-loop */
         for (int i = 0; i < events->count; i++) {
@@ -1820,7 +1841,12 @@ int main(int argc, char *argv[])
                     }
                     RenderEvent ev = events->events[i];
                     ev.samplePos = sp;
-                    ev.songTick += pass * loopLenTicks;
+                    ev.loopPass = (uint32_t)pass;
+                    /* mid2agb sorts the loop end's GOTO (LoopEnd 0x12) before a
+                     * TEMPO on the same clock (0x19; midi.cpp EventCompare), so
+                     * that TEMPO is never played: no grid tempo change. */
+                    if (ev.type == RENDER_EVT_TEMPO && op == loopEndSample)
+                        ev.gridTempoUs = 0;
                     extEvts[extCount++] = ev;
                     track_keyed_note(keyed, keyedEv, &ev, useTrackIndex);
                 }
@@ -1900,7 +1926,8 @@ int main(int argc, char *argv[])
                             offEv.type = 0x8;
                             offEv.data1 = 0;
                             offEv.samplePos = releasePos;
-                            offEv.songTick = loopStartTick + rr + (pass + passDelta) * loopLenTicks;
+                            offEv.songTick = loopStartTick + rr;
+                            offEv.loopPass = (uint32_t)(pass + passDelta);
                             carryOffs[carryCount++] = offEv;
                             continue;
                         }
@@ -1917,7 +1944,8 @@ int main(int argc, char *argv[])
                         offEv.type = 0x8;
                         offEv.data1 = 0;
                         offEv.samplePos = wrapPos;
-                        offEv.songTick = loopEndTick + pass * loopLenTicks;
+                        offEv.songTick = loopEndTick;
+                        offEv.loopPass = (uint32_t)pass;
                         extEvts[extCount++] = offEv;
                     }
                 }
@@ -1987,19 +2015,27 @@ int main(int argc, char *argv[])
         RenderEvent *evs = (RenderEvent *)renderEvts;  /* extEvts or events->events */
         const bool fadeOnGrid = gbaTempoGrid && hasLoop && totalDurSeconds < 0.0;
         const uint64_t fadeClock = fadeOnGrid
-            ? gba_tempo_grid_clock(&grid, loopStartTick + (uint64_t)loopCount * (loopEndTick - loopStartTick))
+            ? gba_tempo_grid_pass_clock(&grid, loopStartTick, (uint64_t)loopCount, loopStartTick, loopEndTick)
             : 0;
         int64_t fadeFrame = -1;
         for (int i = 0; i < renderEvtCount; i++) {
-            if (fadeOnGrid && fadeFrame < 0 && fadeClock <= gba_tempo_grid_clock(&grid, evs[i].songTick))
+            uint64_t clock = gba_tempo_grid_pass_clock(&grid, evs[i].songTick, evs[i].loopPass,
+                                                       loopStartTick, loopEndTick);
+            if (fadeOnGrid && fadeFrame < 0 && fadeClock <= clock)
                 fadeFrame = gba_tempo_grid_frame(&grid, fadeClock);
-            evs[i].samplePos = gba_tempo_grid_dispatch_sample(gridp, evs[i].samplePos, evs[i].songTick,
+            evs[i].samplePos = gba_tempo_grid_dispatch_sample(gridp, evs[i].samplePos, clock,
                                                               evs[i].type == RENDER_EVT_TEMPO ? evs[i].gridTempoUs : 0,
                                                               sampleRate);
         }
-        if (fadeOnGrid) {
-            if (fadeFrame < 0)
-                fadeFrame = gba_tempo_grid_frame(&grid, fadeClock);
+        const int64_t lastEventFrame = grid.lastFrame;  /* before a fade query past the events */
+        if (fadeOnGrid && fadeFrame < 0)
+            fadeFrame = gba_tempo_grid_frame(&grid, fadeClock);
+        if (fadeOnGrid && fadeFrame == GBA_TEMPO_GRID_NEVER) {
+            /* A TEMPO byte of 0 stopped the song before the fade: keep the
+             * exact-tempo fade, the events after the stop are never played. */
+            printf("  Note: a TEMPO of 0 stops the game's song before the fade; fade kept at %.3f s\n",
+                   (double)fadeStartSample / sampleRate);
+        } else if (fadeOnGrid) {
             uint64_t fadeoutSamps = (uint64_t)(fadeoutSeconds * sampleRate + 0.5);
             fadeStartSample = gba_tempo_grid_sample(fadeFrame, sampleRate) - gba_tempo_grid_sample(0, sampleRate);
             totalSamples    = fadeStartSample + fadeoutSamps;
@@ -2007,12 +2043,20 @@ int main(int argc, char *argv[])
                    (double)fadeStartSample / sampleRate);
         } else if (gbaTempoGrid && !hasLoop && totalDurSeconds < 0.0) {
             uint64_t tailSamps = (uint64_t)(tailSeconds * sampleRate + 0.5);
-            uint64_t last = renderEvtCount > 0 ? evs[renderEvtCount - 1].samplePos : 0;
+            const uint64_t never = gba_tempo_grid_sample(GBA_TEMPO_GRID_NEVER, sampleRate);
+            uint64_t last = 0;
+            for (int i = 0; i < renderEvtCount; i++)
+                if (evs[i].type != RENDER_EVT_TEMPO   /* the last channel event, as totalMidiSamples */
+                    && evs[i].samplePos < never - gba_tempo_grid_sample(0, sampleRate))
+                    last = evs[i].samplePos;   /* the ticks a TEMPO of 0 never reaches are no part of it */
             totalSamples = last + tailSamps;
         }
-        if (gbaTempoGrid)
-            printf("  MIDI ticks on the game's tempo grid (--gba-tempo-grid): last event on frame %lld\n",
-                   (long long)(grid.lastFrame + 3));
+        if (gbaTempoGrid && grid.frozen)
+            printf("  MIDI ticks on the game's tempo grid (--gba-tempo-grid): a TEMPO of 0 stops the song,"
+                   " its last tick on ROM frame %lld\n", (long long)(lastEventFrame + 3));
+        else if (gbaTempoGrid)
+            printf("  MIDI ticks on the game's tempo grid (--gba-tempo-grid): the last MIDI event's tick on"
+                   " ROM frame %lld (events past the render end are dropped)\n", (long long)(lastEventFrame + 3));
     }
 
     /* --gba-start-delay: every event is dispatched O samples later.  The
