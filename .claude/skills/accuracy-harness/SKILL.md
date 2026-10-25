@@ -50,15 +50,16 @@ paths today is not the mix grid (both paths mix the same SoundMainRAM
 frame, bit-identical when a note lands on the same frame) but the MIDI
 path's time origin (with the default `--midi-start zero`, ROM cycle 0
 where the song's tick 0 is frame 3's SoundMain: an event after the first
-frame 3 frames early on ticks that are multiples of 4, 4 frames on others
-from tick 21; `rom` removes it) and its tempo grid (exact BPM where the
+frame 3 frames early on ticks that are multiples of 4, 4 frames on
+n = 1 mod 4 from 21, 2 mod 4 from 66, 3 mod 4 from 110; `rom` removes it) and its tempo grid (exact BPM where the
 ROM ticks on tempoC / 150: with `rom`, tick n on frame 3 + ceil(1.2443 n)
 against the ROM's 3 + ceil(1.25 n), one frame early on bend, the lfo
-rows, psg_mix and vol's ramp ticks 110, 114, ..., 130, and the engine's LFO one frame
-late on every fifth tick).  Aligned, the eleven PCM rows without such an
+rows, psg_mix and vol's ramp ticks 110, 114, ..., 130, and the engine's
+LFO one frame late on one tick in four, n = 0 mod 4).  Aligned, the eleven PCM rows without such an
 event are bit-identical to their `--song` renders (-inf, pcm_cmp /
 pcm_chord at their -55 floor); the PSG rows keep the fixed CgbSound entry
-(same writes, -2667 / -472 / -1388 cycles), and two SEs show the per-tick
+(same writes, -2667 on frame 3, -464 .. -472 on tick frames, -1388 ..
+-1444 on note frames), and two SEs show the per-tick
 command batching (a VOL before a note in one tick reaches only the new
 note on the GBA, every channel on the MIDI path).  To take a midi row
 apart, diff it against its own `--song` render, not the reference; plan,

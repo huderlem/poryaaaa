@@ -785,7 +785,8 @@ static void print_usage(const char *prog)
         "  --midi-start <zero|rom>     --midi only: where MIDI time 0 sits.  zero (default): output\n"
         "                              sample 0, the ROM's reset.  rom: the ROM's first song tick,\n"
         "                              frame 3's SoundMain (52.68 ms), so tick n plays on the frame\n"
-        "                              the compiled song's tick n would\n"
+        "                              the compiled song's tick n would at the exact MIDI tempo\n"
+        "                              (the ROM's tempo grid differs: plan, milestone 5 slice 2a)\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
         "  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates\n"
@@ -1910,8 +1911,11 @@ int main(int argc, char *argv[])
     if (midiStartRom) {
         if (totalDurSeconds < 0.0) {
             totalSamples += midiOrigin;
-            if (fadeStartSample != UINT64_MAX)
+            if (fadeStartSample != UINT64_MAX) {
                 fadeStartSample += midiOrigin;
+                printf("  Fadeout: moved to %.3f s with the origin\n",
+                       (double)fadeStartSample / sampleRate);
+            }
         }
         printf("  MIDI time 0 at output sample %llu (--midi-start rom)\n",
                (unsigned long long)midiOrigin);

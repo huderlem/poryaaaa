@@ -5253,7 +5253,8 @@ guard, so the frames are the exact-time ones, **3 + ceil(1.2443 n)**
 *Per micro MIDI, which events land on the ROM's frame* (each event's
 frame computed from the measured dispatch cycles, the 31 MIDIs; the same
 computation at O = 0 reproduces slice 1's statement exactly -- 3 frames
-early on multiples of 4, 4 frames on the others from tick 21).  All of
+early on multiples of 4, 4 frames on n = 1 mod 4 from 21, 2 mod 4 from 66
+and 3 mod 4 from 110, 3 frames on the others; review-corrected wording).  All of
 them, except these, **one frame early** (ceil(1.2443 n) < ceil(1.25 n)):
 bend 45, 57, 69, 81, 90, 93, 102, 126 (8 of its 35 event ticks); lfo_vib,
 lfo_trem, lfo_pan 102, 126; psg_mix 90, 102, 114; vol 110, 114, 118, 122,
@@ -5298,8 +5299,8 @@ tempo grid (step 2 of slice 1; slice 3).
   pcm_psg): bounded by slice 1's item 7, the fixed CgbSound entry (1402
   from line 160 every frame against the ROM's 1866 on tick frames and
   4069 .. 10304 on frame 3): the squares (DAC-slot accuracy, free-running
-  duty) improve the most but do not reach -inf (464 cycles is two DAC
-  slots on every tick frame); wave / wave_alt / noise / noise7 stay
+  duty) improve the most but do not reach -inf (464 cycles is about 1.8
+  DAC slots of 256 on every tick frame); wave / wave_alt / noise / noise7 stay
   shallow (phase on the CPU clock); psg_mix also carries three
   exception events; pcm_psg nulls its PCM half and keeps the PSG half's
   residual.
@@ -5430,7 +5431,9 @@ The aligned run against the start baseline:
   lfo_trem / lfo_pan -13.4, lfo_delay -2.3, lfo_psg +0.2).  But the
   prediction stated the grid's direction wrong.  Against the aligned notes
   the engine's LFO steps on frames 4, 9, 14, ... where the ROM's step on
-  3, 8, 13, ...: **one frame late on every fifth tick**.  (The engine's
+  3, 8, 13, ...: **one frame late on one tick in four** (ticks n = 0 mod
+  4, once every five frames; the engine's tick n on frame 4 + n + floor(n
+  / 4), the ROM's on 3 + n + floor((n + 3) / 4)).  (The engine's
   frame-2 boot tick is the one the ROM takes on frame 3, so as a set the
   engine's tick frames are the ROM's minus one; read against the music,
   the 5k + 3 step comes a frame late.)  The first divergence from the song
@@ -5440,9 +5443,12 @@ The aligned run against the start baseline:
 - *The PSG rows bounded by items 6 and 7*: held.  The write logs of sq1 /
   sq2 / sq1_env (a scratch build of the renderer with `--psg-log` on the
   MIDI path) carry **the same registers and values in the same order as
-  the `--song` render's**, offset by exactly item 7's entry difference:
-  -2667 cycles on frame 3 (1402 against 4069), -472 on the tick frames,
-  -1388 / -1438 on the note frames.  sq1 / sq1_alt / sq2_alt / tune_psg
+  the `--song` render's**, offset by item 7's entry difference frame by
+  frame (measured on every shifted write of sq1 / sq1_env): -2667 cycles
+  on frame 3 (1402 against 4069), -472 on the gate-expiry frames 33 and
+  78, -464 on a plain tick frame (133, sq1_env; item 7's 1866 - 1402),
+  -1388 / -1394 (sq1) and -1438 / -1444 (sq1_env) on the note frames 48
+  and 93, -649 on frame 153 (tick 120) and +395 on frame 176.  sq1 / sq1_alt / sq2_alt / tune_psg
   diverge from the song render at frame 33's -472 (-33.5 .. -37.2);
   sq1_sweep at frame 63 (-43.1, worst -37.1).  **sq2 is -inf**: the same
   shifts on its channel-2 writes leave the output unchanged.  I had
@@ -5519,7 +5525,8 @@ the runner's default for `--input midi`:
 
 - It is the origin the ROM, and the `--song` / `--cry` paths of the same
   renderer, already use.
-- Eleven PCM rows go from -2.5 .. -7.1 dB to bit-exact, and the residual
+- Nine PCM rows go from -2.5 .. -7.1 dB to -inf (bit-exact) and pcm_cmp /
+  pcm_chord from -0.9 / 0.0 to their -55 floor, and the residual
   left over is attributable term by term to slice 3's items.
 - The cost: 52.5 ms (2522 samples at 48 kHz) of leading boot silence in
   every MIDI render, which `--song` renders already have; `zero` stays
@@ -5555,6 +5562,89 @@ files as the history, and the aligned pair becomes "the" midi baseline.
   across runs, but that is a separate design (a frame-phase reset on the
   transport start), not this offset.  The renderer's `rom` origin stays a
   renderer / harness concept.
+
+**Code review of slice 2a (2026-10-25).**  Two independent read-only
+reviews:
+
+- *Reviewer 1*: the offset against the ROM's boot and song start --
+  AgbMain / StartTest and the interrupt enables in main.c / crt0.s,
+  m4aSoundInit, MPlayStart's tempoC / tempoI, MPlayMain's tempo loop and
+  ply_tempo in m4a_1.s -- the engine's frame constants, boot table,
+  `run_until`, `m4a_engine_process` and the blip stepping in m4a_gba.c;
+  the renderer's loop expansion, gate-carry, render length and fade in
+  all three modes; the unit test.  A Python model of the stepping.
+- *Reviewer 2*: every step-1 number recomputed from the constants and the
+  31 micro and six SE MIDIs (its own dispatch model), the ROM tick rule
+  against MPlayStart / MPlayMain / mid2agb's TEMPO, the runner switch,
+  the two baselines against the plan's table field by field, the docs,
+  and a stale-phrase grep.
+
+No divergence in the offset's code or in any measured number: the first
+tick cycle 883882 from the ROM source and the engine's constants; the
+dispatch bound (phase-free c(N) - 1025 .. c(N) + 2047.5, with the boot's
+phase -150 .. +1898, matching the measured -150 .. +1893); the origin
+before frame 3's SoundMain at every rate; the latch equivalence; the
+loop-expansion and fade arithmetic; the exception lists; the SE counts;
+the table (44 rows, 0 mismatches); the 33 assertions.
+
+*Acted on* (one code change; `claim_check.sh` after it: 59 diffed, 0
+moved, 57/66, 0 regressions, every row 0.0, unit 1613/1613, blip
+49112/0, songs 561/561; `--midi-start rom` with and without
+`--midi-quantize` 0 field differences on 44 rows against the two aligned
+baselines):
+
+- *The printed fade start* (reviewer 1).  In loop-count mode with `rom`,
+  the renderer printed the fade start in MIDI time, O samples before the
+  one applied.  It now also prints "Fadeout: moved to ... with the
+  origin".  Print only; the WAV is byte-identical.
+- *The usage text* (reviewer 2) said `rom` plays tick n on the compiled
+  song's frame.  It now adds "at the exact MIDI tempo" and the tempo-grid
+  caveat.
+- *The LFO grid's wording* (reviewer 1): "one frame late on every fifth
+  tick" is one tick in four (n = 0 mod 4, once every five frames):
+  corrected in the results and the skill.  Reviewer 2 confirmed the
+  frames.
+- *"4 frames on the others from tick 21"* (reviewer 2): bend's ticks 27,
+  30, 39, ... are 3 frames early.  The step-1 sentence and the skill now
+  give slice 1's exact rule (1 mod 4 from 21, 2 mod 4 from 66, 3 mod 4
+  from 110).
+- *The recommendation's range* (reviewer 2): nine rows go from -2.5 ..
+  -7.1 to -inf, and pcm_cmp / pcm_chord from -0.9 / 0.0 to their -55
+  floor.
+- *"-472 on the tick frames"* (reviewer 2's open question, measured
+  here).  Every shifted write of sq1 / sq1_env: -472 on the gate-expiry
+  frames 33 / 78, -464 on a plain tick frame (133, item 7's 1866 - 1402),
+  -1388 .. -1444 on the note frames, -649 on frame 153, +395 on 176.  The
+  results paragraph now lists them.
+- "Two DAC slots" -> about 1.8.
+
+*Recorded, not acted on:*
+
+- The guard admits a small early window (reviewer 1).  An event whose
+  aligned cycle falls up to about 2.5 k cycles after a SoundMain (bound
+  -2533 .. -486 at 48 kHz, -2946 .. -898 at 22050) is taken by that
+  SoundMain, one frame early.  Under 1.1 % of a frame, never late; no
+  micro event falls in it.  The exact bound is the blip's 1024-cycle lead
+  plus one 1024-cycle step, which equals one blip frame by construction,
+  not by derivation.
+- The MIDI path's tempo takes effect on the current frame's add, where
+  the ROM's TEMPO takes effect from the next frame's (MPlayStart seeds the
+  first add with 150).  This is the cause of the LFO grid; reviewer 1
+  suggests seeding tempoC = 150 - tempoI at the origin or applying tempo
+  after the add.  Slice 3, with the tempo grid (no fix beyond the offset
+  here).
+- CC 120 with the latch off writes the PSG at its call cycle (known since
+  slice 1).
+- The unit test recomputes O rather than calling the renderer's static
+  `midi_rom_start_samples`, and covers PCM only, not the CGB START path.
+- `ROM_FIRST_TICK_CYCLE` repeats the literal 124773 instead of sharing
+  FRAME1_START (private to m4a_engine.c).
+- Step 1's nominal is round(2528.81) = 2529 and the test's
+  floor = 2528; both are dispatched 704 cycles after S_3.
+- A trailing `--midi-start` with no value falls to "Unknown option" and
+  the usage text, as every other option does.
+- The step-1 prediction text (the LFO direction, bend's range) is kept as
+  written; the results say where it was wrong.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
