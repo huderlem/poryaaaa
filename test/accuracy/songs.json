@@ -179,7 +179,7 @@
     "length": 25,
     "release": 100,
     "seconds": 2.0,
-    "note": "cry_reverse Cry_Pidgey (gCryTable[403]) with CRY_MODE_ECHO_START (reverse, length 25, release 100, pitch 15600 = TIE key 61 + TUNE 56, volume 90; the mode's chorus 192 is not patchable, so it stays 0 and this is one track): the 0.17 s sample is gone by frame 14, so the EOT on frame 28 finds an empty chain and the xRELE byte reaches no channel"
+    "note": "cry_reverse Cry_Pidgey (gCryTable[403]) with CRY_MODE_ECHO_START (reverse, length 25, release 100, pitch 15600 = TIE key 61 + TUNE 56, volume 90; kept as the one-track form with chorus 0 -- cry_pidgey_echo_start_chorus is the complete mode with its chorus 192, slice 6): the 0.17 s sample is gone by frame 14, so the EOT on frame 28 finds an empty chain and the xRELE byte reaches no channel"
   },
   {
     "name": "cry_bulbasaur_encounter",

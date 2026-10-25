@@ -1265,10 +1265,11 @@ after it moved **+0x1c** (`CgbSound` 0x8001020 -> 0x800103c, `MPlayMain`
 0x80025e4 -> 0x8002600, `ply_note` 0x80028c0 -> 0x80028dc, `gCryTable`
 0x0802afac -> 0x0802afc8, `_081DCFB0` 0x8001d70 -> 0x8001d8c; `StartTest`
 itself +0x14; IWRAM unchanged, `gPokemonCrySongs` 0x03001f20); the compiled
-`CgbSound` is byte-identical at the new address (541 instructions compared
-address-normalised; the three `bl CgbModVol` / `CgbOscOff` encodings are
-the same relative offsets, the one differing word is the literal-pool ROM
-pointer, +0x1c), so the `CgbSound_*` labels in the skill and the probe
+`CgbSound` is byte-identical at the new address (505 Thumb instructions
+and 19 literal-pool words compared address-normalised -- the two objdump
+listings of 541 lines include the header and a tail past CgbSound's end;
+the three `bl CgbModVol` / `CgbOscOff` encodings are the same relative
+offsets, the one differing word is the literal-pool ROM pointer, +0x1c), so the `CgbSound_*` labels in the skill and the probe
 header are step 7's +0x1c (loop 0x800106c .. next 0x800146c, each checked
 to land on the same instruction).  The references' directory moved to
 `build/accuracy/refs/d28b3dc2950d-mGBA_0.10.5+m4a_blip/`.  **Neutrality**:
@@ -2656,6 +2657,50 @@ The work, in order (commits on `accuracy-harness` after 385f4c7): the
 ROM / probe / mgba_render change with the symbol shift and neutrality; the
 CLI, runner, corpus, unit tests, README, skill and probe step 9; the
 baseline and this section; then the review paragraph below.
+
+**Code review of the cry-chorus slice (2026-10-25).**  Two independent
+reviews (reviewer 1: `SetPokemonCryChorus` against m4a_cry.c -- trackCount,
+the TUNE2 overwrite, the s8 arithmetic for 192 and the `& 0x7F`
+equivalence of 192 and -64, the order after `SetPokemonCryPitch` and its
+discarded carry, the pointer words and relocations; `MPlayStart`'s
+`min(songHeader->trackCount, mplayInfo->trackCount)` with the cry players'
+MPlayOpen(2) and the clearing loop; MPlayMain's loop over two tracks with
+two `ply_note`s on the start tick (track 1 taking chans[1] because the
+search skips track 0's channel, as the port's first-free allocation does),
+`ply_tune`'s signed tune and its path through TrkVolPitSet / MidiKeyToFreq
+on both tracks, the per-track dead-channel unlink on consecutive frames,
+`ply_endtie` / `ply_fine` per track; the two-part template layout and the
+GOTO; every unit-test expectation re-derived; the chorus-0 path untouched.
+Reviewer 2: the AccParams layout offset by offset with the ABI alignment
+(no padding, 28 bytes, chorus at 19), the ROM's bytes at 0xC0 by xxd, both
+patchers' byte 11 and argument indices, StartCry's order and the u32 ->
+s8 conversion against PlayCryInternal, the full before / after symbol
+tables (243296 lines each; +0x14 for StartTest, +0x1c for every ROM
+symbol from AgbMain on, 0 for all 24 IWRAM and both EWRAM symbols), each
+of the 14 `CgbSound_*` labels on its instruction, the template bytes by
+hand, the modes against sound.c, the ids against cry_tables.inc, the
+runner / claim_check keys, the CLI range and cast, the effect on chorus-0
+inputs).  **No divergence** in either.  **Cosmetic, adopted** (comments
+and notes only, no code or input changed; `claim_check.sh` re-run after
+them: 53 diffed, 0 moved writes, the harness identical to the baseline):
+the kept one-track entry's note and the variants-table comment no longer
+say chorus "is not patchable"; `m4a_cry.h`'s field comment said "TUNE c_v
++ chorus" where the second track's TUNE is (chorus + the pitch setter's
+TUNE) & 0x7F; the step-9 instruction count was the objdump line count
+(505 instructions + 19 literal words, not 541).  **Not acted on**: on the
+GBA `gPokemonCrySong` persists across cries, so a chorus-0 cry after a
+chorus cry carries the previous chorus in tuneValue2 (the pitch setter's
+`a`), which only track 1 reads and track 1 does not exist at chorus 0 --
+no audio differs, and the port builds from the pristine template (a later
+"second cry" slice may revisit); `MPlayStart`'s unk_B / status / priority
+precondition is not ported (true from silence on cry player 0, the only
+case the harness plays); `poryaaaa_render` prints "chorus -64" for
+`--cry-chorus 192` (the s8 the game passes).  **Untested branch, noted for
+a later slice**: `ply_endtie` / `ply_fine` with a live channel on each of
+two chains -- none of the three modes keeps a channel alive to its EOT at
+these pitches, so the two-channel release tail (and `_SKIP`) remain
+unmeasured.  No code changed after the baseline, so
+`2026-10-25_cry-chorus.json` stands as saved.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

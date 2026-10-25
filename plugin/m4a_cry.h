@@ -40,7 +40,7 @@ typedef struct {
     uint16_t length;    /* SetPokemonCryLength: xWAIT ticks (140) */
     uint32_t progress;  /* SetPokemonCryProgress: XCMD 0x0D's word (0) */
     uint8_t release;    /* SetPokemonCryRelease: xRELE (0) */
-    int8_t chorus;      /* SetPokemonCryChorus: 0 = one track, else two with TUNE c_v + chorus */
+    int8_t chorus;      /* SetPokemonCryChorus: 0 = one track, else two, the second track's TUNE = (chorus + the pitch setter's TUNE) & 0x7F */
     uint8_t priority;   /* SetPokemonCryPriority (CRY_PRIORITY_NORMAL 10) */
 } M4ACryParams;
 

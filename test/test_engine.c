@@ -4433,7 +4433,7 @@ static void test_cry_song(void)
          * length 15 (0x0F 0x00), release 125 (0x7D) */
         { "cry_jynx_growl1", 15200, 0, 120, 15, 125, 0, 1, 0x3B, 0x70, 0x00, 0x40, 0x78, 0x0F, 0x00, 0x7D },
         /* CRY_MODE_ECHO_START on cry_reverse Cry_Pidgey: pitch 15600 (b = 0x3D70 -> key 0x3D, tune 0x38, tune2 0x48),
-         * volume 90 (VOL 0x5A), length 25 (0x19 0x00), release 100 (0x64); the mode's chorus 192 is not patchable (0, one track) */
+         * volume 90 (VOL 0x5A), length 25 (0x19 0x00), release 100 (0x64); the one-track form with chorus 0 (the complete mode is the slice 6 row below) */
         { "cry_pidgey_echo_start", 15600, 0, 90, 25, 100, 0, 1, 0x3D, 0x38, 0x48, 0x40, 0x5A, 0x19, 0x00, 0x64 },
         /* Milestone 4 slice 6, the chorus modes (SetPokemonCryChorus: a nonzero value sets trackCount 2 and
          * overwrites TUNE2 with (chorus + TUNE) & 0x7F, discarding the pitch setter's +16 carry):
