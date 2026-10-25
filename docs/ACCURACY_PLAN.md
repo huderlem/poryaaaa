@@ -2432,8 +2432,10 @@ reviews independently, not adopted here**: the look-behind of sample 0
 at the end of a completed reverse walk (Unk2 with r3 = -1, block
 0x3FFFFFF at `wav + 0x83FFFFEF`, open bus) decodes to a non-zero value on
 the GBA and to 0 in the port -- the run attributed and measured above
-(-inf with mgba's 33 bytes), a mixer change deferred to its own slice
-and review by the task's rule.  **Pre-existing, unreached**: the
+(-inf with mgba's 33 bytes).  **Decided 2026-10-25: not wanted** -- the
+port keeps the zero block; cry_bulbasaur_reverse and cry_pidgey_echo_start
+stay FAIL on this documented single sample, like the five floor FAILs, and
+no later review should re-raise it.  **Pre-existing, unreached**: the
 start-offset clamp for an offset past the sample end (slice 3's
 host-memory guard; the GBA mixes bytes past the sample to the first
 crossing, the port the extra block's; `SetPokemonCryProgress(0)` is the
