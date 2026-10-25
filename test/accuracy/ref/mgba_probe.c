@@ -9,11 +9,15 @@
  *       -I$MGBA/build/include $MGBA/build/libmgba-static.a -lz -lpng -lm \
  *       -lpthread -lrt -ldl /usr/lib/x86_64-linux-gnu/libEGL.so /usr/lib/x86_64-linux-gnu/libGL.so
  *   ./mgba_probe build/accuracy/rom/accuracy_test.gba out.txt <frames> <type> <id> \
- *       build/accuracy/rom/accuracy_test.map
+ *       build/accuracy/rom/accuracy_test.map [player]
  *
  * type/id as in mgba_render (0 = song, 2 = micro, id = line in micro.cfg
  * from 0 or the song id).  Filter FIFO writes (040000A0/A4) out of the log to
- * see the rest.
+ * see the rest.  `player` (eighth argument, default gMPlayInfo_BGM) names
+ * the MusicPlayerInfo symbol whose track flags and tempoC the `.frames`
+ * summary reads: gMPlayInfo_SE1 / SE2 / SE3 for a sound effect (the song
+ * table's `ms` field).  The breakpoint log itself covers every player (r7
+ * at MPlayMain's labels is the MusicPlayerInfo).
  *
  * Besides the raw log, `<out>.frames` gets one line per engine frame k
  * (frame k >= 1 starts at cycle 124773 + (k - 1) * 280896; cycles are given
@@ -76,7 +80,7 @@
 /* IWRAM symbols read at breakpoints, taken from the map (fallbacks are the
  * 2026-10-24 build's addresses) */
 static uint32_t ADDR_gSoundInfo = 0x03000f70;
-static uint32_t ADDR_gMPlayInfo_BGM = 0x03002008;
+static uint32_t ADDR_gMPlayInfo_BGM = 0x03002008;   /* the player the .frames summary reads (see main) */
 #define O_SoundInfo_c15    10
 #define O_MPlayInfo_trackCount 8
 #define O_MPlayInfo_tempoC 0x22
@@ -363,7 +367,9 @@ static void writeStats(FILE* f, struct LateStats* s) {
 }
 
 int main(int argc, char** argv) {
-	if (argc < 6) { fprintf(stderr, "probe rom out.txt frames type id [map]\n"); return 1; }
+	if (argc < 6) { fprintf(stderr, "probe rom out.txt frames type id [map [player-symbol]]\n"); return 1; }
+	const char* playerSym = argc > 7 ? argv[7] : "gMPlayInfo_BGM";
+	int playerFound = 0;
 	gFrames = atol(argv[3]);
 	int type = atoi(argv[4]), id = atoi(argv[5]);
 	FILE* f = fopen(argv[1], "rb"); fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
@@ -386,7 +392,7 @@ int main(int argc, char** argv) {
 				int take = !strncmp(name, "ply_", 4) || !strncmp(name, "CgbSound_", 9);
 				for (int i = 0; !take && want[i]; ++i) if (!strcmp(name, want[i])) take = 1;
 				if (!strcmp(name, "gSoundInfo")) ADDR_gSoundInfo = (uint32_t) a;
-				if (!strcmp(name, "gMPlayInfo_BGM")) ADDR_gMPlayInfo_BGM = (uint32_t) a;
+				if (!strcmp(name, playerSym)) { ADDR_gMPlayInfo_BGM = (uint32_t) a; playerFound = 1; }
 				if (take && gNumSyms < 256) {
 					int dup = 0;
 					for (int i = 0; i < gNumSyms; ++i) if (!strcmp(gSyms[i].name, name)) dup = 1;
@@ -395,6 +401,7 @@ int main(int argc, char** argv) {
 			}
 		}
 		if (m) fclose(m);
+		if (!playerFound && argc > 7) { fprintf(stderr, "player symbol %s not in %s\n", playerSym, argv[6]); return 1; }
 	}
 	mLogSetDefaultLogger(&sLogger);
 	struct VFile* vf = VFileMemChunk(rom, n); free(rom);
@@ -444,7 +451,7 @@ int main(int argc, char** argv) {
 	char path[1024];
 	snprintf(path, sizeof path, "%s.frames", argv[2]);
 	FILE* ff = fopen(path, "w");
-	fprintf(ff, "# frame | m4aSoundMain SoundMain MPlayMain CgbSound SoundMainRAM (cycles from line 160 start) | vsync (from line 150) | mplay calls, ply_note, ply_all, tracks exist/start/count, tempoC | c15 before->after | writes\n");
+	fprintf(ff, "# frame | m4aSoundMain SoundMain MPlayMain CgbSound SoundMainRAM (cycles from line 160 start) | vsync (from line 150) | mplay calls, ply_note, ply_all, tracks exist/start/count, tempoC (%s) | c15 before->after | writes\n", playerSym);
 	for (int k = 1; k < MAX_FRAMES; ++k) {
 		struct FrameRec* r = &gFrameRecs[k];
 		if (!r->used) continue;

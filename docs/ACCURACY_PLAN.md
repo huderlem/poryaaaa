@@ -794,6 +794,91 @@ track order at equal priority 48 (mt_chimney, one instance); the pitch
 pass's TrkVolPitSet keeps the full 50 for PITSET with modT != 0 (the -2 is
 ply_note's only); `_081DDA52` -> `_081DD9E6` 12.
 
+### SoundMain timing probe, step 4: the SE players (2026-10-24, milestone 4 slice 1)
+
+`mgba_probe` takes an eighth argument, the `gMPlayInfo_*` symbol whose
+track flags and tempoC the `.frames` summary reads (default
+`gMPlayInfo_BGM`; the breakpoint log always covers every player, r7 at
+MPlayMain's labels being the MusicPlayerInfo), and `probe_mplay.py
+--player SE1|SE2|SE3|<addr>` selects the run it prints.  Runs: the six
+SEs of the corpus for 180 frames each (type 0, ids 33 se_exp, 16 se_faint,
+24 se_contest_place, 51 se_truck_unload, 90 se_low_health, 86
+se_rain_stop), 3 s; the numbers below hold on every one of their 177
+complete frames.  Cycles from VBlank line 160.
+
+**The chain.**  `MPlayOpen` prepends each player to SoundInfo's list
+(BGM, SE1, SE2, SE3, then the two cry players, `m4aSoundInit`), and
+MPlayMain calls the previously opened player before its own body
+(`_081DD82E`: `bl call_r3` on `o_MusicPlayerInfo_func`), so SoundMain
+enters cry 1 at 291, cry 0 at 346, SE3 401, SE2 456, SE1 511, BGM 566, and
+the bodies run BGM first.  A paused player costs 71 from its entry to
+`_081DDA6C` only when it is the BGM player (ident check, func test, push,
+status test); every other paused player resumes at the deeper player's
+`_081DDA6C` and reaches its own `_081DDA6C` **63** later (the deeper
+player's epilogue, `pop {r0}`, the register pushes, the status test).  A
+playing SE player resumes the same way and reaches FadeOutBody **88**
+after the deeper `_081DDA6C` and `_081DD9BC` **54** after that (142; the
+BGM player's 96 + 54 = 150 includes its ident and func tests).  After its
+`_081DDA6C` the outer paused players unwind 63 each and CgbSound follows
+the last by 55.  Measured positions, all frames:
+
+| player | gMPlayTable | tracks | body starts at | FadeOutBody | `_081DD9BC` | `_081DDA6C` -> CgbSound |
+|---|---|---|---|---|---|---|
+| BGM | 0 | 10 | 566 (entry) | 662 | 716 | 370 = 5 x 63 + 55 |
+| SE1 | 1 | 3 | 637 (BGM's `_081DDA6C`) | 725 | 779 | 307 = 4 x 63 + 55 |
+| SE2 | 2 | 9 | 700 | 788 | 842 | 244 |
+| SE3 | 3 | 1 | 763 | 851 | 905 | 181 |
+
+With every player paused CgbSound is at 1007 whichever player the test
+selected (frame 2 of every run, and every frame after the SE's FINE:
+637 + 63 + 307 = 700 + 63 + 244 = 763 + 63 + 181 = 1007).  The engine's
+`m4a_sequencer_set_player` derives entry / head / paused / exit from
+`M4A_CYC_MP_BGM_ENTRY` 566, `M4A_CYC_MP_PAUSED` 71, `M4A_CYC_MP_IDLE` 63,
+`M4A_CYC_MP_SE_HEAD` 142 and `M4A_CYC_MP_TAIL` 55, and both track loops
+run over the player's track count (3 / 9 / 1), each non-existing track
+costing the 16 / 14 of step 3 (se_truck_unload: 8 empty SE2 tracks per
+tick, 16 + 18 each; se_contest_place: 5 empty tracks in the apply pass).
+Track counts and the `ms` field are read from
+`sound/music_player_table.inc` and `sound/song_table.inc`; the plan's
+earlier "+291 / +346 / ... give the others" is the entry order above.
+
+**Paths the SEs took that the songs never did** (each verified by the
+write diff going to 0 on the test named):
+- **ply_fine**, measured for the first time: entry -> `ply_fine_done` 16
+  with an empty chain (se_faint, se_contest_place's tracks 2-4), or entry
+  -> `ply_fine_loop` 10, loop -> `ply_fine_ok` 14 (SF_ON tested, SF_STOP
+  set), ok -> RealClearChain 12, RealClearChain -> `ply_fine_done` 50
+  (prev 0 / next 0; the walk's 54 less the loop's taken `bne`), and
+  `ply_fine_done` -> `_081DD994` 28: the handler returns to the flags test
+  at `_081DD926`, which finds the track gone and takes the `beq
+  _081DD994`, so FINE's cost ends at `_081DD994`, not `_081DD938` (44 empty,
+  114 with one channel: se_exp, se_truck_unload, se_rain_stop,
+  se_contest_place's track 1).  Step 3 charged the 90 default plus 14 + 54
+  per channel: +46 / +44 on the FINE frame.  A chain of two or more
+  channels at FINE is still unmeasured (est.: the walk's
+  `M4A_CYC_WALK_UNLINK_*` for the continuing iterations).
+- **The tick with no track left** (the frame after FINE, status ->
+  PAUSE): `_081DD9A4` -> `_081DDA6C` **24** (clock increment, the `cmp r4`,
+  the status store, the branch), se_truck_unload frame 31 = 842 + 22 + 8 x
+  34 + 16 + 10 + 24 + 244 = 1430; `M4A_CYC_TICK_ALL_DONE`.  Step 3 charged
+  the exit straight from `_081DD9A4` (R1#14 in its review, "the frame where
+  every track has finished", unmeasured then).
+- **Square 1's second NR14 write** (sweep register bit 3 clear: se_faint's
+  voice 90, sweep 0x17): NR14 -> NR14 **24**, then -> channel_complete
+  **2** (`CGB_CYC_NR14_NR14` / `CGB_CYC_NR14_DONE`, step 3's *est.* 14 + 6;
+  se_faint's start frame was -10 / -6 on the writes after it).
+
+**Write-cycle residual** (engine minus mgba, every PSG write of the 180
+frames, `probe_diff.py` threshold 0) after the three corrections: se_exp
+0 on 284 writes, se_faint 0 on 38, se_contest_place 0 on 51,
+se_truck_unload 0 on 22, se_low_health 0 on 100 (se_rain_stop has no PSG
+writes); `entry_diff.py` / `cmd_diff.py` / `track_diff.py`: 0 divergences
+on all 177 frames of each.  The three corrections moved nothing else: the
+write diff of every probed micro-test and song in `build/probe/` (14 PSG
+micro-tests, pcm / pcm_cmp / wave over 180 frames, the six songs over 1200)
+stayed at 0, and the harness read the timing-3 baseline to the decimal
+(38/38, every delta 0.0).
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`

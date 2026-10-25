@@ -2,10 +2,10 @@
 """Per-segment MPlayMain costs from an mgba_probe raw log recorded with the
 ELF's nm listing as the symbol file (internal labels + registers).
 
-    probe_mplay.py build/probe/groudon.txt [more logs ...] [frame ...]
+    probe_mplay.py [--player BGM|SE1|SE2|SE3|<hex addr>] build/probe/groudon.txt [more logs ...] [frame ...]
 
-With frame numbers: prints the breakpoint sequence of the BGM player's
-MPlayMain run for those engine frames (cycle relative to the MPlayMain
+With frame numbers: prints the breakpoint sequence of the selected player's
+(default BGM) MPlayMain run for those engine frames (cycle relative to the MPlayMain
 entry, delta from the previous breakpoint, label, registers).  Always:
 a table of (from label -> to label) deltas with min/median/max and count,
 over every frame, so each segment of the tick / command / apply loops is a
@@ -21,6 +21,8 @@ F1 = 124773
 CPF = 280896
 L160 = 160 * 1232
 BGM = 0x03002008
+# gMPlayInfo_* of the 2026-10-24 ROM (test/accuracy/rom/build/accuracy_test.map)
+PLAYERS = {"BGM": 0x03002008, "SE1": 0x030021D8, "SE2": 0x03002218, "SE3": 0x030023DC}
 LINE = re.compile(r"^\s*(\d+) f(\d+) v\s*(\d+) ([BW]) ([0-9A-F]{8}) ?(.*)$")
 REG = re.compile(r"r0=([0-9A-F]+) r3=([0-9A-F]+) r4=([0-9A-F]+) r5=([0-9A-F]+) r7=([0-9A-F]+)")
 
@@ -129,7 +131,7 @@ def main(paths, show):
               prev = e
           if k in show:
               t0 = run[0][0]
-              print(f"== {path} frame {k}: MPlayMain(BGM) at +{run[0][1]} (line-160 relative), CgbSound at +{run[-1][1]}")
+              print(f"== {path} frame {k}: MPlayMain(player) at +{run[0][1]} (line-160 relative), CgbSound at +{run[-1][1]}")
               prev = None
               for e in run:
                   d = e[0] - prev[0] if prev else 0
@@ -147,5 +149,9 @@ def main(paths, show):
 
 
 if __name__ == "__main__":
-    paths = [a for a in sys.argv[1:] if not a.isdigit()]
-    main(paths, set(int(a) for a in sys.argv[1:] if a.isdigit()))
+    args = sys.argv[1:]
+    if args and args[0] == "--player":
+        BGM = PLAYERS.get(args[1].upper()) or int(args[1], 16)
+        args = args[2:]
+    paths = [a for a in args if not a.isdigit()]
+    main(paths, set(int(a) for a in args if a.isdigit()))
