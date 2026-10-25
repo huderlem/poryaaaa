@@ -1465,6 +1465,132 @@ each entry, at the same cycles since the two share every frame's work):
 19158272 = 0.0704, 0.1381, 0.4052, 0.4722, 0.6069, 0.9079, 1.0750,
 1.1419 s.
 
+### SoundMain timing probe, step 11: a second cry while one plays (2026-10-25, milestone 4 slice 8a)
+
+Ground truth only: the ROM, the two patchers and the probe runs.  No engine,
+`poryaaaa_render`, runner or `songs.json` change (the engine runs one
+sequencer per render; two concurrent players are slice 8b, which starts
+from the numbers below).
+
+**The ROM change.**  `struct AccParams` gains `u16 id2` (block offset 20)
+and `u8 startFrame2` (offset 22) from its reserved bytes (5 remain, 23..27;
+the block stays 28 bytes, every existing field at its offset, both new
+bytes 0 in the ROM data so a block patched by an older renderer plays as
+before).  `startFrame2` is the VBlank count on which `StartCry(id2, 0, 120,
+15360, 140, 0, 0)` runs -- `PlayCryInternal`'s CRY_MODE_NORMAL defaults
+through the same `StartCry` / `SetPokemonCry*` / `SetPokemonCryTone` path as
+the first cry; no per-cry mode fields.  `mgba_render --id2 / --start-frame2`
+and `mgba_probe`'s fifteenth / sixteenth arguments patch block bytes 12..14;
+`mgba_probe`'s eighth argument accepts `symbol[N]` (N * 0x40, one
+MusicPlayerInfo, past the symbol) so the `.frames` summary can read
+`gPokemonCryMusicPlayers[1]`.
+
+**Where the second start lives, and why** (found by measurement, kept as a
+rule): the first version put a second per-frame check in `AgbMain`'s loop
+(`started2`, `StartCry` called from the loop).  agbcc then emitted two more
+prologue instructions (`sub sp, #12` for `StartCry`'s stack arguments and a
+register init), so every boot-time register write -- `m4aSoundInit`'s, the
+timer-0 start included -- landed **6 cycles later** (probe `W` lines 213
+against 207, 15438 against 15432), and with the timer's phase against the
+65536 Hz DAC slot grid moved, mgba's ordering of a timer-0 overflow against
+the slot it coincides with flipped on the coincidences: **every**
+DirectSound reference changed (pcm: 555 one-sample events in 3 s at the
+128-PCM-sample beat of the 1254-cycle timer period against the 256-cycle
+slot, the PCM step landing one slot later; every -inf PCM row fell to -40 dB;
+PSG rows unchanged).  Not scheduler lateness: the probe's `.events` on the
+same ROM reads 4 crossings, and the `.frames` of cry_jynx_faint_full are
+identical, since those are VBlank-relative.  Bisection: the +0x2c symbol
+shift alone (a padded crt0, the old loop) gives references byte-identical
+to the baseline; the loop change alone moves them.  Two further attempts
+(a state variable with a non-inlined `StartTest(state, frame)`; the same
+with the block pointer in a register) each changed the prologue by one
+instruction (`push {r4, r5, lr}` instead of `{r4, r5, r6, lr}`; the pointer
+load hoisted before `RegisterRamReset`) and still moved pcm.  The version
+kept: `AgbMain` is **textually identical** to the slice-7 ROM's (agbcc emits
+the same code, the one difference the `bl StartTest` offset), and
+`StartTest`, after starting the test, waits for `startFrame2` itself
+(`VBlankIntrWait` per frame from `startFrame`) and starts the second cry
+before returning to the loop.  Boot path and steady-state loop are the old
+instruction stream; the only extra execution is inside `StartTest` on the
+start frame (silence: a late FIFO sample of silence is silence) and, when a
+second cry is requested, the per-frame wait until it starts.  Rule for the
+next ROM change: the boot path up to `m4aSoundInit` and the per-frame loop
+must stay instruction-identical; check pcm / pcm_cmp / cry_bulbasaur
+renders against the baseline references byte for byte before the harness.
+
+**The symbol shift.**  `StartTest` grew by 0x40 (0x58 -> 0x98 bytes), so
+every ROM symbol from `AgbMain` on moved **+0x40** (nm tables before /
+after: 14530 names, the same set; 16 ROM symbols before `AgbMain` at 0x0,
+9461 at +0x40, 49 IWRAM / 233770 other at 0; `AgbMain` 0x8000300 ->
+0x8000340, `CgbSound` 0x800103c -> **0x800107c**, `MPlayMain` 0x8002600 ->
+0x8002640, `ply_note` 0x80028dc -> 0x800291c, `_081DCFB0` 0x8001d8c ->
+0x8001dcc, `gCryTable` 0x0802afc8 -> 0x0802b008; `StartCry` 0x80001e8 and
+`StartTest` 0x8000288 unchanged; IWRAM unchanged: `gPokemonCrySongs`
+0x03001f20, `gPokemonCryMusicPlayers` 0x03001f88, `gPokemonCryTracks`
+0x03002258, `gSoundInfo` 0x03000f70, `SoundMainRAM_Buffer` 0x03000770).  The
+compiled `CgbSound` compared address-normalised over its 586 objdump lines
+(the body, `m4aMPlayTempoControl` and the start of `m4aMPlayVolumeControl`
+follow in the range): every offset and every instruction byte equal but the
+one literal-pool ROM pointer (0x08002f28 -> 0x08002f68, +0x40), so the
+`CgbSound_*` labels are step 9's +0x40 (loop 0x80010ac, active 0x80010c2,
+step2 0x800113c, start 0x8001154, nostart 0x8001232, oscoff 0x8001256,
+step 0x80012a4, modvol 0x80012b8, stepdone 0x8001398, envdone 0x80013aa,
+pit 0x80013b4, vol 0x800142c, done 0x80014a8, next 0x80014ac), each checked
+to land on the same instruction as before.
+
+**Gates.**  The cry_jynx_faint_full probe (type 1, 123, 14440 0 120 140 200
+0) re-run under the new ROM gives a `.frames` file identical to the old
+ROM's (its `.events` differ from the 2026-10-24 log of the slice-4 ROM, which
+is not a gate; the references decide).  **Harness neutrality**: the full
+default harness with the new ROM and the unchanged engine gives every one
+of the 62 rows identical to `2026-10-25_cry-two-chain-release.json` in
+every field of report.json but the ref path (53/62, the same nine FAILs,
+`compare_reports.py` 0 regressions, every row 0.0); the references'
+directory moved to `build/accuracy/refs/56b288f4b49f-mGBA_0.10.5+m4a_blip/`.
+pcm, pcm_cmp, cry_bulbasaur and sq1 rendered on the new ROM are
+byte-identical to the baseline's reference WAVs (`cmp`).
+
+**Before the first probe: which player the second cry takes, and why**
+(`~/pokeemerald/src/m4a.c` `SetPokemonCryTone`, lines 1660-1699).  The
+function loops i = 0, 1 over `gPokemonCryTracks[i * 2]` (each cry player's
+track 0): a player is **free** when that track's `flags` are 0 and either
+its `chan` is 0 or `chan->track != track` (a channel it no longer owns);
+the first free player is taken (`goto start_song`).  If neither is free,
+the player with the **largest `clock`** wins (`maxClock <
+gPokemonCryMusicPlayers[i].clock`, strict, so a tie takes index 0): the cry
+that has been playing longest is replaced.  Then `ident++`, the template
+`gPokemonCrySong` is copied to `gPokemonCrySongs[i]` (0x03001f20 + 0x34 * i:
+52 bytes each), its `tone`, `part[0..1]` and `gotoTarget` are pointed into
+that copy, `ident = ID_NUMBER`, `MPlayStart(&gPokemonCryMusicPlayers[i],
+...)`.  **The priority test**: `MPlayStart` (m4a.c 611) starts when
+`!unk_B || ((no songHeader || !START on track 0) && (no TRACK status ||
+PAUSE)) || mplayInfo->priority <= songHeader->priority`; the cry players'
+`unk_B` is 0 (`MPlayOpen`'s `Clear64byte`, never set -- only the
+`gMPlayTable` players get `unk_A`), so the first disjunct holds and a cry
+always restarts the player SetPokemonCryTone chose; the priority byte
+(`SetPokemonCryPriority(10)`, CRY_PRIORITY_NORMAL, into the song header's
+`priority`) reaches `mplayInfo->priority` and the tracks, and matters only
+in `ply_note`'s channel steal when no channel is free (m4a_1.s 1690-1740:
+the lowest-priority ON channel, ties to the one with the higher `track`
+pointer).  **Expectation for both runs**: on the second start frame cry
+player 0's track 0 has MPT_FLG_EXIST (the first cry is playing), so player
+0 is not free; player 1's track 0 has flags 0 and `chan` 0 (m4aSoundInit's
+`track->chan = 0`, nothing ever played on it), so the second cry lands on
+**cry player 1** (`gPokemonCryMusicPlayers[1]` 0x03001fc8, tracks
+0x030022f8 / 0x03002348, song copy 0x03001f54), whose MPlayMain entry is
+the **first** of the six in SoundMain's order (step 4: 291; the body runs
+after cry 0's `_081DDA6C`, step 5's est. 889 / 977 / 1031 / exit 55).
+`ply_note`'s channel scan (m4a_1.s `_081DDBFA`: the first channel without
+SF_ON in index order) finds channel 0 (0x03000fc0) held by the first cry
+and takes **channel 1 (0x03001000)**.  Each cry has its own track (one
+track per cry song at chorus 0), so **no track's chain ever holds two
+channels** in these runs and `_SKIP` 18 stays est.  The second cry's own
+frame costs: its start tick on its frame, the steady tick, the whole-frame
+CgbSound entry with both playing, the death / unlink frames and any
+`_081DCFB0` stamps are read from the probe below, not predicted.
+
+**Probe runs**: recorded below after the runs.
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`

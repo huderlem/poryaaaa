@@ -20,7 +20,11 @@
  *   mgba_render <rom.gba> <out.wav> --frames N [--rate 48000]
  *               [--type song|cry|micro|none] [--id N] [--pitch N] [--pan N]
  *               [--volume N] [--length N] [--release N] [--chorus N]
- *               [--start-frame N] [--native-resampler]
+ *               [--start-frame N] [--id2 N --start-frame2 N] [--native-resampler]
+ *
+ * --id2 / --start-frame2 start a second cry (gCryTable index N, PlayCryInternal's
+ * CRY_MODE_NORMAL defaults) on VBlank N while the first test plays; start
+ * frame 0 (the default) means no second cry.
  */
 #include <mgba/core/blip_buf.h>
 #include <mgba/core/config.h>
@@ -52,6 +56,8 @@ struct Params {
 	int release;  /* cry: SetPokemonCryRelease's u8 (PlayCryInternal's 0) */
 	int chorus;   /* cry: SetPokemonCryChorus's s8 (PlayCryInternal's 0; its u32 192 is the s8 -64) */
 	int startFrame;
+	int id2;          /* second cry: gCryTable index, CRY_MODE_NORMAL's defaults */
+	int startFrame2;  /* its start frame; 0 = none */
 };
 
 static void quietLog(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args) {
@@ -103,7 +109,7 @@ static void usage(const char* prog) {
 	fprintf(stderr,
 	        "Usage: %s <rom.gba> <out.wav> --frames N [--rate HZ] [--type song|cry|micro|none]\n"
 	        "          [--id N] [--pitch N] [--pan N] [--volume N] [--length N] [--release N]\n"
-	        "          [--chorus N] [--start-frame N]\n"
+	        "          [--chorus N] [--start-frame N] [--id2 N --start-frame2 N]\n"
 	        "          [--native-resampler]\n",
 	        prog);
 }
@@ -144,6 +150,9 @@ static int patchParams(uint8_t* rom, size_t size, const struct Params* p) {
 			b[9] = (uint8_t) ((p->length >> 8) & 0xFF);
 			b[10] = (uint8_t) p->release;
 			b[11] = (uint8_t) (int8_t) p->chorus;
+			b[12] = (uint8_t) (p->id2 & 0xFF);
+			b[13] = (uint8_t) (p->id2 >> 8);
+			b[14] = (uint8_t) p->startFrame2;
 			return 1;
 		}
 	}
@@ -201,7 +210,7 @@ int main(int argc, char** argv) {
 	const char* outPath = argv[2];
 	long frames = -1;
 	int rate = 48000;
-	struct Params p = { TYPE_NONE, 0, 15360, 0, 120, 140, 0, 0, 1 };
+	struct Params p = { TYPE_NONE, 0, 15360, 0, 120, 140, 0, 0, 1, 0, 0 };
 
 	for (i = 3; i < argc; ++i) {
 		const char* a = argv[i];
@@ -235,6 +244,10 @@ int main(int argc, char** argv) {
 			p.chorus = atoi(v); ++i;
 		} else if (!strcmp(a, "--start-frame") && v) {
 			p.startFrame = atoi(v); ++i;
+		} else if (!strcmp(a, "--id2") && v) {
+			p.id2 = atoi(v); ++i;
+		} else if (!strcmp(a, "--start-frame2") && v) {
+			p.startFrame2 = atoi(v); ++i;
 		} else {
 			usage(argv[0]);
 			return 1;

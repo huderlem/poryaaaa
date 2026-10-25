@@ -23,7 +23,12 @@ struct AccParams
     u16 length;        /* cry: SetPokemonCryLength (PlayCryInternal's 140) */
     u8 release;        /* cry: SetPokemonCryRelease (PlayCryInternal's 0) */
     s8 chorus;         /* cry: SetPokemonCryChorus (PlayCryInternal's 0; nonzero = two tracks) */
-    u8 reserved[8];
+    u16 id2;           /* second cry: gCryTable index, started on startFrame2 with CRY_MODE_NORMAL's
+                        * defaults (volume 120, pan 0, pitch 15360, length 140, release 0, chorus 0)
+                        * through the same StartCry path, so SetPokemonCryTone picks its player */
+    u8 startFrame2;    /* VBlank count at which the second cry starts; 0 = no second cry (a block
+                        * patched by an older renderer plays as before) */
+    u8 reserved[5];
 };
 
 enum
@@ -70,8 +75,19 @@ static void StartCry(u16 index, s8 pan, u8 volume, s16 pitch, u16 length, u8 rel
     SetPokemonCryTone(&gCryTable[index]);
 }
 
+/* Starts the test on gAccParams.startFrame (AgbMain's loop calls this on that
+ * VBlank) and, if startFrame2 is nonzero, waits here for the second cry's frame
+ * and starts it with CRY_MODE_NORMAL's defaults, then returns to the loop.
+ * The wait lives in this function so that AgbMain stays textually identical to
+ * the ROM before the second cry existed and agbcc emits the same prologue and
+ * steady-state loop: mgba's ordering of a timer-0 overflow against the DAC
+ * slot it coincides with depends on the timer's start cycle, and two extra
+ * prologue instructions (6 cycles before m4aSoundInit) once moved every
+ * DirectSound reference (plan, probe step 11). */
 static void StartTest(void)
 {
+    u32 frame;
+
     switch (gAccParams.type)
     {
     case ACC_TYPE_SONG:
@@ -87,6 +103,18 @@ static void StartTest(void)
         break;
     default:
         break;
+    }
+
+    if (gAccParams.startFrame2 != 0)
+    {
+        /* AgbMain's frame count is startFrame here (it counts VBlanks from 1). */
+        frame = gAccParams.startFrame ? gAccParams.startFrame : 1;
+        while (frame < gAccParams.startFrame2)
+        {
+            VBlankIntrWait();
+            frame++;
+        }
+        StartCry(gAccParams.id2, 0, 120, 15360, 140, 0, 0);
     }
 }
 
