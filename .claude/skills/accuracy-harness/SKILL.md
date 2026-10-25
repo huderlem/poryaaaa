@@ -22,6 +22,7 @@ test/accuracy/tools/accuracy.py                    # all tests, compiled-song in
 test/accuracy/tools/accuracy.py --tests micro      # or song, se, or name,name
 test/accuracy/tools/accuracy.py --input midi       # the plugin's MIDI path instead of the .s
 test/accuracy/tools/accuracy.py --input midi --midi-quantize   # ... with poryaaaa_render --quantize (the frame latch)
+test/accuracy/tools/accuracy.py --input midi --midi-start rom  # ... with MIDI time 0 at the ROM's first song tick
 test/accuracy/tools/accuracy.py --committed-refs   # no mgba build needed, micro-tests only
 build/poryaaaa_song_tests build/accuracy/rom       # .s parser vs ROM, byte for byte
 ```
@@ -34,18 +35,34 @@ skipped: no MIDI).  `--midi-quantize` adds `poryaaaa_render --quantize`,
 the MIDI event latch (milestone 5 slice 1: note on / off, CC, program,
 bend, XCMD applied at the top of the next VBlank tick, in arrival order,
 after the gate walk; a note-off latched into the same frame as its note-on
-gives the GBA's one-tick note).  **The midi-input reports are their own
-baseline family** (`baselines/<date>_midi-path-*.json`, the report's
-`"input"` field says `midi` and `"midi_quantize"` says which form): never
+gives the GBA's one-tick note).  `--midi-start rom` adds `poryaaaa_render
+--midi-start rom` (slice 2a): MIDI time 0 at the ROM's first song tick,
+frame 3's SoundMain (883882 cycles), every event dispatched 2522 samples
+later at 48 kHz -- the last sample a blip frame (2048 cycles) before that
+SoundMain, since the machine sits up to a blip frame past a sample's cycle
+when the sample is dispatched; the nominal 2529 would start every first
+note on frame 4.  **The midi-input reports are their own baseline family**
+(`baselines/<date>_midi-path-*.json`, the report's `"input"` field says
+`midi`, `"midi_quantize"` and `"midi_start"` say which form): never
 compare one against a song-input baseline with `compare_reports.py`, and
 never save a midi run as the song-input baseline.  What separates the two
 paths today is not the mix grid (both paths mix the same SoundMainRAM
 frame, bit-identical when a note lands on the same frame) but the MIDI
-path's time origin (ROM cycle 0 where the song's tick 0 is frame 3's
-SoundMain: an event after the first frame 3 frames early on ticks that
-are multiples of 4, 4 frames on others from tick 21) and its
-tempo grid (exact BPM where the ROM ticks on tempoC / 150); plan,
-"Milestone 5 slice 1".
+path's time origin (with the default `--midi-start zero`, ROM cycle 0
+where the song's tick 0 is frame 3's SoundMain: an event after the first
+frame 3 frames early on ticks that are multiples of 4, 4 frames on others
+from tick 21; `rom` removes it) and its tempo grid (exact BPM where the
+ROM ticks on tempoC / 150: with `rom`, tick n on frame 3 + ceil(1.2443 n)
+against the ROM's 3 + ceil(1.25 n), one frame early on bend, the lfo
+rows, psg_mix and vol's ramp ticks 110, 114, ..., 130, and the engine's LFO one frame
+late on every fifth tick).  Aligned, the eleven PCM rows without such an
+event are bit-identical to their `--song` renders (-inf, pcm_cmp /
+pcm_chord at their -55 floor); the PSG rows keep the fixed CgbSound entry
+(same writes, -2667 / -472 / -1388 cycles), and two SEs show the per-tick
+command batching (a VOL before a note in one tick reaches only the new
+note on the GBA, every channel on the MIDI path).  To take a midi row
+apart, diff it against its own `--song` render, not the reference; plan,
+"Milestone 5 slice 1" and "slice 2a".
 
 Output: a table on stdout and `build/accuracy/report.json`. poryaaaa WAVs and
 logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-mgba>/`.

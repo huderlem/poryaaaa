@@ -5842,6 +5842,74 @@ static void latch_hook(M4AEngine *e, void *user)
     latch_hook_started = m4a_engine_note_on(e, 3, 60, 127);
 }
 
+/*
+ * poryaaaa_render --midi-start rom puts MIDI time 0 at output sample
+ * O = floor((883882 - GBA_BLIP_FRAME) * rate / 2^24): the last sample a blip
+ * frame before frame 3's SoundMain, the ROM's first song tick.  That rests on
+ * the dispatch granularity: after the kept boot and O samples the machine
+ * must be past frame 2's SoundMain and short of frame 3's, so an event
+ * dispatched there is applied by the first tick, latched or not (plan,
+ * milestone 5 slice 2a).
+ */
+static void test_midi_start_origin(void)
+{
+    printf("Testing the --midi-start rom origin (dispatch before frame 3's SoundMain)...\n");
+
+    const int64_t soundMain2 = 124773 + 1 * GBA_CYCLES_PER_FRAME + 160 * GBA_CYCLES_PER_LINE + M4A_CYC_SOUNDMAIN_ENTRY;
+    const int64_t soundMain3 = soundMain2 + GBA_CYCLES_PER_FRAME;
+    ASSERT_EQ(soundMain3, 883882, "frame 3's SoundMain at 883882 cycles");
+
+    WaveData *wd = seq_test_wave();
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+
+    static const int rates[] = { 22050, 44100, 48000, 96000 };
+    for (int q = 0; q < 2; q++) {
+        for (size_t r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
+            char msg[128];
+            M4AEngine engine;
+            m4a_engine_init(&engine, (float)rates[r]);
+            m4a_engine_set_voicegroup(&engine, voices);
+            m4a_engine_boot(&engine, true);
+            m4a_engine_set_quantize_events(&engine, q == 1);
+            m4a_engine_program_change(&engine, 0, 0);
+
+            int origin = (int)((double)(soundMain3 - GBA_BLIP_FRAME) * rates[r] / (double)GBA_CPU_HZ);
+            float *buf = malloc(sizeof(float) * (size_t)(origin + 4096) * 2);
+            m4a_engine_process(&engine, buf, buf + origin + 4096, origin);
+            snprintf(msg, sizeof(msg), "%d Hz%s: sample %d dispatched after frame 2's SoundMain",
+                     rates[r], q ? " latched" : "", origin);
+            ASSERT(engine.gba.now > soundMain2, msg);
+            snprintf(msg, sizeof(msg), "%d Hz%s: sample %d dispatched before frame 3's SoundMain",
+                     rates[r], q ? " latched" : "", origin);
+            ASSERT(engine.gba.now < soundMain3 && engine.nextSoundMain == soundMain3, msg);
+
+            m4a_engine_note_on(&engine, 0, 60, 127);
+            /* Run to just past frame 3's SoundMain: the note's channel has
+             * been through SoundMainRAM (START taken), i.e. it plays on the
+             * ROM's first tick frame. */
+            int more = (int)((double)(soundMain3 - engine.gba.now + 2 * GBA_BLIP_FRAME) * rates[r] / GBA_CPU_HZ) + 1;
+            m4a_engine_process(&engine, buf, buf + origin + 4096, more);
+            snprintf(msg, sizeof(msg), "%d Hz%s: frame 3's SoundMain has run", rates[r], q ? " latched" : "");
+            ASSERT(engine.gba.now >= soundMain3 && engine.nextSoundMain == soundMain3 + GBA_CYCLES_PER_FRAME, msg);
+            bool started = false;
+            for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+                if ((engine.pcmChannels[i].status & CHN_ON) && !(engine.pcmChannels[i].status & CHN_START))
+                    started = true;
+            snprintf(msg, sizeof(msg), "%d Hz%s: the note started on frame 3", rates[r], q ? " latched" : "");
+            ASSERT(started, msg);
+            free(buf);
+            m4a_engine_destroy(&engine);
+        }
+    }
+    free(wd);
+}
+
 static void test_event_latch(void)
 {
     printf("Testing the MIDI event latch (quantizeEvents)...\n");
@@ -6131,6 +6199,7 @@ int main(void)
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();
     test_event_latch();
+    test_midi_start_origin();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

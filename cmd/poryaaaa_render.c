@@ -782,6 +782,10 @@ static void print_usage(const char *prog)
         "                              runs a track's commands, in arrival order; a note shorter\n"
         "                              than a frame plays one tick).  Default: events apply at\n"
         "                              their sample position.  (--song / --cry already run on the tick.)\n"
+        "  --midi-start <zero|rom>     --midi only: where MIDI time 0 sits.  zero (default): output\n"
+        "                              sample 0, the ROM's reset.  rom: the ROM's first song tick,\n"
+        "                              frame 3's SoundMain (52.68 ms), so tick n plays on the frame\n"
+        "                              the compiled song's tick n would\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
         "  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates\n"
@@ -1279,6 +1283,26 @@ static int cmp_render_event_pos(const void *a, const void *b)
     return (pa > pb) - (pa < pb);
 }
 
+/*
+ * --midi-start rom: the output sample MIDI time 0 is dispatched at.  The
+ * ROM's first song tick is frame 3's SoundMain (MPlayStart runs on frame 2):
+ * 124773 + 2 x 280896 + 160 x 1232 + 197 = 883882 cycles, m4a_engine.c's
+ * FRAME1_START and SOUNDMAIN_FRAME_OFFSET.  An event dispatched after s
+ * output samples finds the machine up to one blip frame (GBA_BLIP_FRAME)
+ * past sample s's cycle, since m4a_engine_process runs it until the blip
+ * holds the samples; an event at MIDI time 0 must still precede that
+ * SoundMain, so the origin is the last sample a blip frame before it
+ * (2522 at 48 kHz, dispatched at cycle 882538; plan, milestone 5 slice 2a).
+ */
+#define ROM_FIRST_TICK_CYCLE (124773 + 2 * GBA_CYCLES_PER_FRAME \
+                              + 160 * GBA_CYCLES_PER_LINE + M4A_CYC_SOUNDMAIN_ENTRY)
+
+static uint64_t midi_rom_start_samples(double sampleRate)
+{
+    return (uint64_t)((double)(ROM_FIRST_TICK_CYCLE - GBA_BLIP_FRAME) * sampleRate
+                      / (double)GBA_CPU_HZ);
+}
+
 /* Dispatch one RenderEvent to the engine */
 static void dispatch_event(M4AEngine *engine, const RenderEvent *ev,
                             int useTrackIndex)
@@ -1364,6 +1388,7 @@ int main(int argc, char *argv[])
     bool        portamento    = false;
     bool        pwm           = false;
     bool        quantize      = false;  /* --quantize: the MIDI event latch */
+    bool        midiStartRom  = false;  /* --midi-start rom: MIDI time 0 at the first song tick */
     int         maxChannels   = 5;
     int         sampleRateHz  = 44100;
     int         pcmFreqMode   = M4A_PCM_FREQ_MODE_DEFAULT; /* SOUND_MODE_FREQ_13379 */
@@ -1454,6 +1479,16 @@ int main(int argc, char *argv[])
             respectBaseMidiKey = true;
         } else if (strcmp(argv[i], "--quantize") == 0) {
             quantize = true;
+        } else if (strcmp(argv[i], "--midi-start") == 0 && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (strcmp(v, "rom") == 0) {
+                midiStartRom = true;
+            } else if (strcmp(v, "zero") == 0) {
+                midiStartRom = false;
+            } else {
+                fprintf(stderr, "--midi-start takes zero or rom, not %s\n", v);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--portamento") == 0) {
             portamento = true;
         } else if (strcmp(argv[i], "--pwm") == 0) {
@@ -1544,6 +1579,8 @@ int main(int argc, char *argv[])
     if (songPath || cryId >= 0) {
         if (quantize)
             fprintf(stderr, "Note: --quantize only applies to --midi (the sequencer already runs on the tick)\n");
+        if (midiStartRom)
+            fprintf(stderr, "Note: --midi-start only applies to --midi (the sequencer starts on the ROM's frame)\n");
         if (songVolumeSet || reverbSet)
             fprintf(stderr, "Note: --song-volume / --reverb are ignored with --song / --cry "
                             "(the song data carries its own volume and reverb)\n");
@@ -1864,6 +1901,22 @@ int main(int argc, char *argv[])
         renderEvtCount = events->count;
     }
 
+    /* --midi-start rom: every event is dispatched O samples later.  The
+     * render length and the fadeout move with it where they are MIDI time
+     * (the tail after the last event, the loop-count fade); an explicit
+     * --total-duration-seconds is output time and stays.  The loop
+     * expansion above works in MIDI time, unchanged. */
+    uint64_t midiOrigin = midiStartRom ? midi_rom_start_samples(sampleRate) : 0;
+    if (midiStartRom) {
+        if (totalDurSeconds < 0.0) {
+            totalSamples += midiOrigin;
+            if (fadeStartSample != UINT64_MAX)
+                fadeStartSample += midiOrigin;
+        }
+        printf("  MIDI time 0 at output sample %llu (--midi-start rom)\n",
+               (unsigned long long)midiOrigin);
+    }
+
     printf("  Total render: %.2f s (%llu samples)\n",
            (double)totalSamples / sampleRate,
            (unsigned long long)totalSamples);
@@ -1934,14 +1987,14 @@ oom:
     for (int i = 0; i < renderEvtCount; i++) {
         const RenderEvent *ev = &renderEvts[i];
 
-        if (ev->samplePos >= totalSamples) break; /* safety: don't write past buffer */
+        uint64_t evPos = ev->samplePos + midiOrigin;
+        if (evPos >= totalSamples) break; /* safety: don't write past buffer */
 
         /* Render audio up to this event */
-        if (ev->samplePos > samplePos)
-            render_frames(&engine, outL, outR, samplePos,
-                          ev->samplePos - samplePos);
+        if (evPos > samplePos)
+            render_frames(&engine, outL, outR, samplePos, evPos - samplePos);
 
-        samplePos = ev->samplePos;
+        samplePos = evPos;
         dispatch_event(&engine, ev, useTrackIndex);
     }
 

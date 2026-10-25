@@ -5167,6 +5167,395 @@ block drain during the quiet boot, as they apply there today; the
 1024-event capacity spans every block until the next SoundMain (dense
 automation reaches the in-order overflow, no longer a correctness issue).
 
+### Milestone 5 slice 2a: the MIDI start alignment (2026-10-25)
+
+Scope, small on purpose: the start alignment of `poryaaaa_render`'s
+`--midi` path alone, behind a flag (`--midi-start rom|zero`, default
+`zero`, so today's output stays byte-identical).  Plugin, GUI, config and
+CLAP transport wiring are slice 2b; the tempo grid, the velocity table and
+the LFO / CgbSound order are slice 3.  **The sequencer path is not
+touched.**  Before any change all three baselines reproduced:
+`claim_check.sh` against `2026-10-25_cry-over-song-rows.json` 59 diffed,
+0 moved, 57/66, 0 regressions, every row 0.0, unit 1580/1580, blip
+49112/0, songs 561/561; `accuracy.py --input midi --midi-quantize` 0
+field differences on 44 rows against `2026-10-25_midi-path-latch.json`;
+`accuracy.py --input midi` 0 field differences against
+`2026-10-25_midi-path-start.json`.
+
+**Step 1, predictions (written before the code).**
+
+*The render loop as it stands* (`cmd/poryaaaa_render.c`, the `--midi`
+branch of `main`).  `parse_midi` places every event at
+`tick_to_sample(tick)` (exact tempo map, `(uint64_t)(samples + 0.5)`; the
+micro MIDIs are all 24 ticks per beat at 500000 us per beat, so one tick
+is **exactly 1000 output samples at 48 kHz**).  The loop renders up to an
+event's sample with `render_frames` and then calls `dispatch_event`.
+`m4a_engine_boot(&engine, true)` has already run the machine to frame 2's
+SoundMain (602986 cycles) and kept its output, so output sample s is ROM
+time s x 2^24 / rate, and today MIDI time 0 is output sample 0.
+`m4a_engine_process` reads the blip until it holds the samples asked for
+and runs `run_until(now + 1024)` while it does not; the blip publishes
+samples per 2048-cycle frame (`GBA_BLIP_FRAME`), so after s samples the
+machine sits at the first 2048-cycle frame end that makes sample s
+readable.  **Measured** (a scratch program stepping a booted engine one
+sample at a time, 20 s at 48 kHz): after the boot's 1722 samples, the
+machine cycle at the dispatch of sample s is c(s) - 150 .. c(s) + 1893,
+c(s) = s x 2^24 / 48000, periodic in 375 samples (131072 cycles).
+Independent of how the loop chunks the render: the machine only runs
+when the blip is short.
+
+*The ROM's start.*  `MPlayStart` on frame 2 (tempoC 0, tempoI 150), the
+first MPlayMain on frame 3's SoundMain at 124773 + 2 x 280896 + 160 x 1232
++ 197 = **883882 cycles (52.68 ms, 2528.81 samples at 48 kHz)**, and the
+song's TEMPO 120 from that tick on: tick n on frame **3 + ceil(1.25 n)**
+(frames 3, 5, 6, 7, 8, 10, ...).
+
+*How to offset: shift every event by a whole number of samples, O,
+taken from a cycle stamp.*  The samples are the renderer's only clock
+(the engine API takes sample counts, there is no run-to-cycle), so the
+offset is an integer sample shift applied at dispatch: an event at MIDI
+sample p is dispatched after `p + O` output samples.  `totalSamples` and
+`fadeStartSample` move by O only where they are MIDI time (the natural
+length's tail and the loop-count fade); with `--total-duration-seconds`
+(the harness) they are output time and stay.  The loop expansion and the
+gate-carry run in MIDI time as today, so their arithmetic is untouched;
+an event they produce in MIDI time that lands at or past `totalSamples`
+after the shift is dropped by the loop's existing `break`.
+
+*The boundary.*  An event dispatched at machine cycle d is applied
+before SoundMain k iff d < S_k (`run_until` runs a SoundMain due at the
+`until` cycle), with or without the latch: without it the entry point
+acts at once and SoundMain k mixes it; with it the event is queued and
+drained at the top of tick k.  The ROM's tick 0 is applied *at* S_3, so
+MIDI time 0 needs d < S_3 strictly.  The nominal shift round(2528.81) =
+2529 fails that: the dispatch of sample 2529 is at cycle **884586, 704
+cycles after S_3** (samples 2526 .. 2531 all wait for the blip frame
+ending at 884586), so every row's first note would start on frame 4, one
+frame late.  The last sample dispatched before S_3 is 2525 (882538).  So
+the origin is the last sample at least one blip frame before frame 3's
+SoundMain: **O = floor((883882 - 2048) x rate / 2^24)**, 2522 at 48 kHz.
+Its dispatch is at 882538, 1344 cycles before S_3, at every rate checked
+(22050 / 32768 / 44100 / 48000 / 88200 / 96000 / 192000: O = 1158 / 1722 /
+2317 / 2522 / 4635 / 5045 / 10091, the last pre-S_3 sample 1160 / 1724 /
+2320 / 2525 / 4640 / 5050 / 10101).  The rule this gives: an event at MIDI
+time t is applied at the first SoundMain at or after 883882 + t x 2^24
+cycles, except that an event 661 .. 2027 cycles after a SoundMain
+(measured over ticks 0 .. 139: dispatch minus ideal cycle) would be taken
+by that SoundMain, one frame early.
+
+*Dispatch lateness against the micro events.*  With O = 2522 every micro
+event's dispatch is at least **1344 cycles before** its SoundMain (tick 0)
+and at least **14720 cycles after** the previous one (bend's tick 78):
+no micro event crosses a SoundMain through the dispatch lateness or the
+guard, so the frames are the exact-time ones, **3 + ceil(1.2443 n)**
+(n x 349525.33 cycles from S_3).
+
+*Per micro MIDI, which events land on the ROM's frame* (each event's
+frame computed from the measured dispatch cycles, the 31 MIDIs; the same
+computation at O = 0 reproduces slice 1's statement exactly -- 3 frames
+early on multiples of 4, 4 frames on the others from tick 21).  All of
+them, except these, **one frame early** (ceil(1.2443 n) < ceil(1.25 n)):
+bend 45, 57, 69, 81, 90, 93, 102, 126 (8 of its 35 event ticks); lfo_vib,
+lfo_trem, lfo_pan 102, 126; psg_mix 90, 102, 114; vol 110, 114, 118, 122,
+126, 130 (the ticks = 2 mod 4 of its ramp; 108, 112, ..., 132 land on the
+ROM's frame -- the slice-1 review's "vol 110 .. 130" was the range, not
+the set).  pcm_adsr's note-off at 78, an exception at O = 0, lands on the
+ROM's frame.  At O = 2529 the same list plus tick 0 one frame late on
+every row.
+
+*A second difference the alignment does not touch: the engine's LFO
+grid.*  The MIDI path's accumulator (`m4a_engine_tick`, `!seq`) starts at
+tempoI 150 and is consumed by the boot's frame-2 tick; the MIDI's tempo
+event (MIDI time 0) is dispatched between S_2 and S_3 at both origins, so
+tempoI 120 from frame 3 and LFO ticks on frames 4, 5, 6, 7, 9, ... where
+the ROM's song ticks (and its LFO steps) fall on 3, 5, 6, 7, 8, 10, ...:
+**one frame early on every fifth tick**, and the engine's tick count since
+the note differs from the ROM's by one on those frames.  Part of the
+tempo grid (step 2 of slice 1; slice 3).
+
+*Predictions per row* (`--input midi --midi-start rom`, the same with
+`--midi-quantize`):
+
+- **Lag 0.0 on every PCM row**, and on every micro row whose events
+  correlate at all (the PSG rows too: their note frames now match).
+- **The PCM rows with no exception events and no LFO null as the song
+  path does**: pcm, pcm_hi, pcm_adsr, pcm_drum, pcm_reverb, pcm_bass, pan,
+  vel, tune **-inf** (bit-identical to the reference); pcm_cmp and
+  pcm_chord at their song-path floor (-55.0 / -55.7, the scheduler
+  lateness crossings).  **pcm is identical sample for sample to the
+  `--song` render over the whole file** (no exception events).  The
+  `ref` / `test` RMS of these rows equal.
+- **vol**: six volume steps one frame early -> a residual of six
+  one-frame volume differences of one ramp step each, shallow but deep
+  under today's -4.6: predicted -25 .. -40 dB.  **bend**: eight bend
+  steps one frame early, the same kind, predicted -20 .. -35.
+- **lfo_vib / lfo_trem / lfo_pan / lfo_delay**: not null -- the LFO grid
+  above (lfo_delay has no exception event and still does not null: the
+  test of the grid statement), plus two one-frame-early events on the
+  first three.  lfo_psg adds slice 1's item 6 (the LFO reaches the PSG
+  one CgbSound later).
+- **The PSG rows** (sq1 .. noise7, tune_psg, psg_mix; the PSG half of
+  pcm_psg): bounded by slice 1's item 7, the fixed CgbSound entry (1402
+  from line 160 every frame against the ROM's 1866 on tick frames and
+  4069 .. 10304 on frame 3): the squares (DAC-slot accuracy, free-running
+  duty) improve the most but do not reach -inf (464 cycles is two DAC
+  slots on every tick frame); wave / wave_alt / noise / noise7 stay
+  shallow (phase on the CPU clock); psg_mix also carries three
+  exception events; pcm_psg nulls its PCM half and keeps the PSG half's
+  residual.
+- **The songs**: drift unchanged (4.2 .. 5.1 ms/s, the tempo grid), null
+  still about 0 .. +2 dB (decorrelated after a few seconds); the lag
+  column about 50 ms smaller where the aligner tracked the start.  **The
+  SEs**: lag about 0 where the SE's events land on ROM frames; their
+  tempo grids are their own (not predicted per row).
+- **The latch**: aligned and aligned-latched runs **byte-identical**
+  (slice 1's prediction 12, unchanged by a shift: an event between S_{k-1}
+  and S_k is applied before S_k either way).
+- **Neither flag** equals the start baseline in every field; the latch
+  alone equals the latch baseline.
+
+**Step 2, the offset** (`cmd/poryaaaa_render.c`; no engine change).
+`--midi-start zero|rom` (default `zero`; the `--midi` path only, a note
+with `--song` / `--cry`): `rom` sets `midiOrigin =
+midi_rom_start_samples(rate)` = floor((`ROM_FIRST_TICK_CYCLE` -
+`GBA_BLIP_FRAME`) x rate / `GBA_CPU_HZ`), `ROM_FIRST_TICK_CYCLE` = 124773
++ 2 x 280896 + 160 x 1232 + 197 = 883882; the render loop dispatches
+every event after `samplePos + midiOrigin` output samples, and the natural
+length's `totalSamples` / the loop-count `fadeStartSample` move by the same
+amount (an explicit `--total-duration-seconds` does not).  The renderer
+prints "MIDI time 0 at output sample N".  `accuracy.py --midi-start
+zero|rom` passes it through (only `rom` adds the flag) and the midi report
+carries `"midi_start"` next to `"midi_quantize"`.  Unit test
+`test_midi_start_origin` (33 assertions): frame 3's SoundMain at 883882;
+at 22050 / 44100 / 48000 / 96000 Hz, latched and not, after the kept boot
+and O samples the machine is past frame 2's SoundMain and short of frame
+3's (`nextSoundMain` still 883882), and a note-on dispatched there has
+been through SoundMainRAM (START taken) once frame 3's SoundMain has run.
+Checked against the nominal origin (floor(883882 x rate / 2^24)): 16 of its
+assertions fail.  Unit **1613/1613** (1580 + 33).
+
+**Step 3, the measurement** (`accuracy.py --input midi`, the four
+configurations on the slice's build, the same references):
+
+- neither flag: **0 field differences on 44 rows** against
+  `2026-10-25_midi-path-start.json`;
+- `--midi-quantize` alone: **0 field differences on 44 rows** against
+  `2026-10-25_midi-path-latch.json`;
+- `--midi-start rom`: `baselines/2026-10-25_midi-path-aligned.json` /
+  `.txt`, **12/44** at -40 dB (start baseline 0/44);
+- `--midi-start rom --midi-quantize`:
+  `baselines/2026-10-25_midi-path-aligned-latch.json` / `.txt`, 0 field
+  differences against the aligned run and the 44 WAVs **byte-identical**
+  (`cmp`) to it; every one of the 44 differs from the unaligned render.
+
+`compare_reports.py 2026-10-25_midi-path-start.json
+2026-10-25_midi-path-aligned.json` (within the midi family): 31 improved,
+2 over 1 dB the other way (sq1_env -4.8 -> -3.5, se_low_health -3.6 ->
+-1.9: two PSG rows at noise level before and after, attributed below).
+The aligned run against the start baseline:
+
+| test | lag ms | gain dB | null | worst1s | ref / test dBFS | drift | start lag / null / worst1s |
+|------|-------:|--------:|-----:|--------:|----------------:|------:|---------------------------:|
+| sq1 | 0.0 | -0.0 | -37.2 | -32.9 | -16.8 / -16.8 | - | 49.9 / -3.0 / -1.3 |
+| sq1_env | 0.2 | -2.2 | -3.5 | -1.2 | -18.3 / -18.3 | - | 50.2 / -4.8 / -1.2 |
+| sq1_sweep | 0.0 | -0.0 | -43.1 | -37.1 | -17.0 / -17.0 | - | 0.0 / -0.3 / 2.7 |
+| sq1_alt | 0.0 | -0.0 | -35.5 | -30.6 | -16.8 / -16.8 | - | 49.8 / -0.6 / 1.7 |
+| sq2 | 0.0 | 0.0 | -inf | -inf | -18.1 / -18.1 | - | -19.1 / -2.2 / -0.9 |
+| sq2_alt | 0.0 | -0.0 | -34.5 | -29.7 | -18.1 / -18.1 | - | 47.9 / -0.2 / 2.6 |
+| wave | 0.2 | -0.3 | -11.8 | -9.4 | -19.8 / -19.8 | - | 50.1 / -8.4 / -6.2 |
+| wave_alt | 0.1 | -0.4 | -10.6 | -8.2 | -19.8 / -19.8 | - | 49.8 / -7.7 / -7.5 |
+| noise | 0.0 | -1.5 | -5.1 | -3.1 | -20.0 / -20.0 | - | 0.0 / 0.9 / 4.1 |
+| noise7 | 0.0 | -1.2 | -6.0 | -2.9 | -18.5 / -18.5 | - | 67.0 / -0.2 / 2.4 |
+| pcm | 0.0 | 0.0 | -inf | -inf | -21.4 / -21.4 | - | 34.8 / -6.4 / -2.0 |
+| pcm_hi | 0.0 | 0.0 | -inf | -inf | -20.9 / -20.9 | - | 160.5 / -3.6 / -1.1 |
+| pcm_adsr | 0.0 | 0.0 | -inf | -inf | -29.9 / -29.9 | - | 50.2 / -2.5 / 5.5 |
+| pcm_drum | 0.0 | 0.0 | -inf | -inf | -21.9 / -21.9 | - | 50.2 / -6.6 / -3.6 |
+| pcm_cmp | 0.0 | 0.0 | -55.0 | -50.2 | -27.1 / -27.1 | - | 0.0 / -0.9 / 3.4 |
+| pcm_reverb | 0.0 | 0.0 | -inf | -inf | -21.0 / -21.0 | - | 50.2 / -7.1 / -1.4 |
+| pcm_chord | 0.0 | -0.0 | -55.7 | -51.9 | -14.2 / -14.2 | - | -11.2 / 0.0 / 2.3 |
+| pcm_bass | 0.0 | 0.0 | -inf | -inf | -25.2 / -25.2 | - | 50.2 / -3.4 / -0.9 |
+| pan | 0.0 | 0.0 | -inf | -inf | -19.5 / -19.5 | - | 50.2 / -5.2 / -0.9 |
+| vol | 0.0 | -0.1 | -31.2 | -20.3 | -25.3 / -25.2 | - | 30.8 / -4.6 / -2.3 |
+| vel | 0.0 | 0.0 | -inf | -inf | -26.5 / -26.5 | - | 19.2 / -5.9 / -0.8 |
+| bend | 5.0 | -8.5 | 1.0 | 3.4 | -20.2 / -20.2 | - | 55.7 / 0.7 / 3.3 |
+| lfo_vib | -3.8 | -3.6 | -1.7 | -0.6 | -20.1 / -20.1 | - | -4.2 / -1.2 / -0.5 |
+| lfo_trem | 3.9 | -0.2 | -13.4 | -8.6 | -20.1 / -20.1 | - | 110.6 / -5.2 / -0.7 |
+| lfo_pan | 3.9 | -0.2 | -13.4 | -8.6 | -20.1 / -20.1 | - | 64.8 / -5.1 / -0.7 |
+| lfo_delay | -3.5 | -3.0 | -2.3 | -1.2 | -21.0 / -21.0 | - | -3.5 / -2.3 / -1.0 |
+| lfo_psg | -18.8 | -6.5 | 0.2 | 1.0 | -17.1 / -17.9 | - | 196.3 / -0.2 / 2.6 |
+| tune | 0.0 | 0.0 | -inf | -inf | -21.6 / -21.6 | - | 50.1 / -6.3 / -2.1 |
+| tune_psg | 0.0 | -0.0 | -33.5 | -26.5 | -18.0 / -18.0 | - | 49.7 / -12.2 / -10.2 |
+| psg_mix | 0.0 | -3.2 | -2.1 | 1.9 | -15.2 / -15.1 | - | 0.0 / -0.3 / 2.9 |
+| pcm_psg | 0.0 | -0.1 | -17.3 | -14.4 | -13.3 / -13.3 | - | -15.3 / -4.3 / -2.8 |
+| mus_littleroot | 16.7 | -14.8 | 2.1 | 4.0 | -23.7 / -23.7 | 5.0 | 67.0 / 2.1 / 4.0 |
+| mus_weather_groudon | 55.7 | -2.9 | -2.4 | 2.1 | -31.1 / -31.1 | 4.7 | 105.9 / -0.5 / 4.5 |
+| mus_vs_wild | 67.0 | -14.8 | 2.1 | 3.7 | -20.9 / -20.9 | 4.2 | 117.2 / 2.1 / 3.6 |
+| mus_mt_chimney | 16.7 | -11.9 | 1.7 | 3.7 | -23.5 / -23.5 | 4.6 | 67.0 / 1.9 / 3.5 |
+| mus_rg_vs_trainer | 33.5 | -16.2 | 2.3 | 3.9 | -19.6 / -19.6 | 4.2 | 100.5 / 2.3 / 3.7 |
+| mus_vs_trainer | 67.0 | -13.6 | 2.0 | 3.5 | -20.4 / -20.4 | 5.0 | 117.2 / 1.9 / 3.7 |
+| mus_credits | 178.0 | -15.3 | 2.2 | 5.4 | -23.0 / -23.0 | 4.6 | 155.4 / 2.3 / 4.8 |
+| se_exp | -1.9 | -13.4 | 2.0 | 3.0 | -24.8 / -24.8 | - | 57.1 / 1.9 / 2.2 |
+| se_faint | 0.0 | -1.3 | -5.5 | -2.4 | -29.9 / -29.9 | - | 0.0 / -1.5 / 2.4 |
+| se_contest_place | 0.0 | -0.4 | -10.8 | -8.5 | -26.9 / -26.9 | - | 50.2 / -0.8 / -0.8 |
+| se_truck_unload | 0.0 | -8.8 | 1.1 | 1.1 | -39.2 / -39.2 | - | 12.3 / 2.2 / 2.4 |
+| se_low_health | 7.9 | -3.4 | -1.9 | -0.5 | -24.0 / -24.0 | - | 50.1 / -3.6 / -2.5 |
+| se_rain_stop | 0.0 | 0.0 | -32.9 | -23.4 | -41.3 / -41.3 | - | 0.0 / -4.9 / 1.8 |
+
+**Which predictions held.**
+
+- *The origin and the boundary*: held.  The dispatch cycles predicted
+  from the scratch program are the ones the unit test checks, and the
+  per-event frames reproduce slice 1's measured statement at O = 0.
+- *Lag 0.0 on every PCM row*: held (lfo_trem / lfo_pan 3.9, lfo_vib
+  -3.8, lfo_delay -3.5 and bend 5.0 are rows that do not correlate; see
+  below).  Also 0.0 on every PSG micro row but sq1_env / wave / wave_alt
+  (0.1 .. 0.2) and lfo_psg (-18.8).
+- *The PCM rows with no exception event and no LFO null as the song path
+  does*: **held on all eleven**.  pcm, pcm_hi, pcm_adsr, pcm_drum,
+  pcm_reverb, pcm_bass, pan, vel and tune are -inf; pcm_cmp is -55.0 /
+  -50.2 and pcm_chord -55.7 / -51.9, their song-path floor.  Each of the
+  eleven WAVs is **identical sample for sample to its own `--song`
+  render**, and their ref / test RMS are equal.  **pcm is identical to the
+  `--song` render over the whole file** (144000 samples; zero diverges at
+  25080, as slice 1 found).
+- *vol -25 .. -40*: held, -31.2.  The first divergence from the song
+  render is on frame 140, its first exception (tick 110).
+- *bend -20 .. -35*: **did not hold**, +1.0.  The first divergence is
+  frame 59, its first exception (tick 45), as predicted.  The size is
+  wrong because a pitch step one frame early moves a PCM sample's
+  playback position for the rest of the note (a frequency x one frame of
+  phase), so after the first early step the note never re-converges.  I
+  had treated it as a one-frame level step, like vol.
+- *The lfo rows do not null, from the LFO grid*: held (lfo_vib -1.7,
+  lfo_trem / lfo_pan -13.4, lfo_delay -2.3, lfo_psg +0.2).  But the
+  prediction stated the grid's direction wrong.  Against the aligned notes
+  the engine's LFO steps on frames 4, 9, 14, ... where the ROM's step on
+  3, 8, 13, ...: **one frame late on every fifth tick**.  (The engine's
+  frame-2 boot tick is the one the ROM takes on frame 3, so as a set the
+  engine's tick frames are the ROM's minus one; read against the music,
+  the 5k + 3 step comes a frame late.)  The first divergence from the song
+  render is frame 3 on lfo_vib / lfo_trem / lfo_pan (no delay) and frame
+  43 on lfo_delay (a pitch, 3382 vs 3569, on a ROM-only tick frame, 43 =
+  3 mod 5), and it is the LFO, not an event.
+- *The PSG rows bounded by items 6 and 7*: held.  The write logs of sq1 /
+  sq2 / sq1_env (a scratch build of the renderer with `--psg-log` on the
+  MIDI path) carry **the same registers and values in the same order as
+  the `--song` render's**, offset by exactly item 7's entry difference:
+  -2667 cycles on frame 3 (1402 against 4069), -472 on the tick frames,
+  -1388 / -1438 on the note frames.  sq1 / sq1_alt / sq2_alt / tune_psg
+  diverge from the song render at frame 33's -472 (-33.5 .. -37.2);
+  sq1_sweep at frame 63 (-43.1, worst -37.1).  **sq2 is -inf**: the same
+  shifts on its channel-2 writes leave the output unchanged.  I had
+  predicted no square would reach -inf, so this is better than predicted;
+  it is not taken apart write by write.  sq1_env carries the hardware
+  envelope (NR12 0xA3, period 3), so the -472 shift moves its steps
+  against the 512 Hz frame sequencer from frame 48 on (-3.5, the row that
+  "regresses" by 1.3 dB from noise level).  wave / wave_alt / noise /
+  noise7 diverge at frame 3 (-5.1 .. -11.8).  pcm_psg's channel state is
+  identical to the song path's on every frame (a scratch tick dump of
+  every channel's status, key, velocity, volumes, envelope and frequency
+  after each tick), so its -17.3 is its PSG writes.  psg_mix's first state
+  difference is its tick-90 exception (frame 115); before that, its writes.
+- *The songs*: held.  Drift 4.2 .. 5.0 ms/s, null -2.4 .. +2.3.  The lag
+  moved by 50 .. 67 ms on six songs (littleroot 67.0 -> 16.7, groudon
+  105.9 -> 55.7, vs_wild 117.2 -> 67.0, mt_chimney 67.0 -> 16.7,
+  rg_vs_trainer 100.5 -> 33.5, vs_trainer 117.2 -> 67.0) and the other
+  way on credits (155.4 -> 178.0): the aligner choosing within a drifting
+  file.
+- *The latch*: held, byte-identical.  *Neither flag* / *latch alone*:
+  held, 0 field differences.
+
+**Attribution of every row that does not null.**  Each row's render was
+diffed sample by sample against its own `--song` render: the same engine,
+differing only in the input path.
+
+- **Frame exceptions** (step 1's list): vol (frame 140 = tick 110), bend
+  (frame 59 = tick 45), psg_mix (tick 90, after its PSG residual).  For
+  the SEs the same computation over each SE's own tempo (ROM tick n on the
+  accumulator's frame with TEMPO = round(60e6 / us per beat), MIDI frame
+  from the dispatch cycles): se_exp (240 BPM) has 20 of 131 event ticks
+  one frame early, its first at tick 45; its first state difference is
+  that tick's CGB pitch on frame 31.  se_contest_place (144 BPM) has
+  ticks 25 .. 27 one frame early.  se_faint, se_truck_unload,
+  se_low_health and se_rain_stop have none.
+- **The tempo grid** (slice 1's item 2): the songs' drift, and the LFO
+  grid on the lfo rows.
+- **The PSG write timing** (items 6 and 7): every PSG micro row, the PSG
+  half of pcm_psg, and se_faint / se_truck_unload (noise only) /
+  se_low_health (one square).  Their channel state is identical to the
+  song path's on every frame and the output still differs.
+- **Unpredicted -- the per-tick command batching** (found by the tick
+  dump, not by step 1): se_rain_stop (-32.9) and se_contest_place (frame
+  25).  On the GBA, a VOL (or PAN, BEND, ...) followed in the same tick by
+  a note on the same track reaches only the new note.  `ply_note` runs
+  TrkVolPitSet for the new channel and clears the track's pending VOLCHG /
+  PITCHG flags (`m4a_sequencer.c` ply_note's `t->flags &= 0xF0`), so the
+  end-of-tick pass never updates the older channels in the chain.  Here
+  that is the releasing note: se_rain_stop's tick 24 is a note-off, VOL
+  70, and the same key again; the song path keeps the releasing channel
+  at 20 / 19 and the MIDI path moves it to 17 / 17, a one-LSB residual
+  (max 195) over that note's release.  On the MIDI path `m4a_engine_cc`
+  applies the controller to every channel of the track at once.
+  Unaffected by the latch: the drain applies CCs one by one, as the
+  unlatched path does.  For slice 3, next to the tempo grid: a drain that
+  sets the track's flags and runs the pass at its end unless a note
+  consumed them, as MPlayMain does.
+- **Unpredicted, no harness effect -- the track priority**: the MIDI path's
+  tracks have priority 0 where mid2agb's `-P` writes the song header's
+  (se_rain_stop -P2: the song path's channels carry priority 2).  It only
+  enters ply_note's steal decision between players or against a busier
+  track, which no single-player row exercises.  A renderer flag would map
+  it (slice 3).
+
+**Step 4, the gates.**  `claim_check.sh` against
+`2026-10-25_cry-over-song-rows.json` after the change: **59 tests diffed,
+0 moved, 57/66, 0 regressions, every row 0.0** (the song-input gate
+unchanged), unit **1613/1613**, blip 49112/0, songs 561/561.  The two
+aligned baselines saved as above.
+
+**Recommendation on the default** (the user decides; not flipped here).
+I recommend making `rom` the default for `--midi`, and `--midi-start rom`
+the runner's default for `--input midi`:
+
+- It is the origin the ROM, and the `--song` / `--cry` paths of the same
+  renderer, already use.
+- Eleven PCM rows go from -2.5 .. -7.1 dB to bit-exact, and the residual
+  left over is attributable term by term to slice 3's items.
+- The cost: 52.5 ms (2522 samples at 48 kHz) of leading boot silence in
+  every MIDI render, which `--song` renders already have; `zero` stays
+  available.
+
+If the user flips it, the midi baseline family keeps its two zero-origin
+files as the history, and the aligned pair becomes "the" midi baseline.
+
+**What slice 2b (the plugin) needs.**
+
+- *The transport-driven latch default* in `m4a_plugin.c`
+  `plugin_process`: `m4a_engine_set_quantize_events(&engine, playing)`
+  from `CLAP_TRANSPORT_IS_PLAYING`, before the block's events.  The flip
+  to off flushes in order; the flip to on queues from the next event.
+- *The manual override*, a tri-state (transport / on / off): a GUI
+  Options item, a `poryaaaa.cfg` key and a CLAP state byte appended after
+  the existing ones.  Back-compatible: an old state without the byte loads
+  as "transport".
+- *The slice-1 hazards*:
+  - On the playing -> stopped edge, flush or drop the queue *before*
+    `m4a_engine_reset_portamento`, or note-ons queued before the stop
+    record glide history after the reset.
+  - A CLAP `NOTE_CHOKE` should bypass the latch (cut at once, and drop
+    that key's queued note-on), not become a deferred note-off or, in its
+    own frame, a one-tick note.
+  - The first block's events drain during the quiet boot.
+  - The 1024-event capacity spans every block until the next SoundMain.
+- *Start alignment in the plugin: none.*  The host's timeline has no
+  MIDI time 0 that a ROM frame corresponds to: the plugin's frame phase is
+  set by when it booted, and the latch already puts every event on a
+  frame edge.  Aligning the boot so that the host's song position 0 falls
+  on a SoundMain would make an offline bounce repeatable to the sample
+  across runs, but that is a separate design (a frame-phase reset on the
+  transport start), not this offset.  The renderer's `rom` origin stays a
+  renderer / harness concept.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
