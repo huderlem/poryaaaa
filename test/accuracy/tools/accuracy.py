@@ -28,7 +28,12 @@ Steps (all idempotent, cached under --build-dir):
      arguments; a nonzero chorus makes the cry song two tracks) go to both
      renderers (mgba_render --pitch / --pan / --volume / --length / --release /
      --chorus, poryaaaa_render --cry-pitch / --cry-pan / --cry-volume /
-     --cry-length / --cry-release / --cry-chorus).
+     --cry-length / --cry-release / --cry-chorus).  "id2" / "start_frame2"
+     start a second cry (gCryTable index, CRY_MODE_NORMAL's defaults) on
+     VBlank start_frame2 (1..255) while the first plays, as mgba_render
+     names them (--id2 N --start-frame2 F; AccParams bytes 12..14), and go
+     to poryaaaa_render as --cry2 N --cry2-start-frame F (cry player 1,
+     a second sequencer chained after cry 0's).
      Cries have no MIDI, so --input midi skips them.
   4. metrics.compare on each pair; a table on stdout and a JSON report.
 
@@ -140,10 +145,15 @@ def build_tests(args):
                 if "id" not in s:
                     print(f"warning: {name}: a cry needs its gCryTable index as \"id\", skipping", file=sys.stderr)
                     continue
+                if ("id2" in s) != ("start_frame2" in s):
+                    print(f"warning: {name}: a second cry needs both \"id2\" and \"start_frame2\", skipping", file=sys.stderr)
+                    continue
                 tests.append(dict(name=name, group="cry", type="cry", id=int(s["id"]), midi=None, song=None,
                                   voicegroup=None, volume=None, reverb=None, extended=False,
                                   seconds=float(s.get("seconds", 2.0)), player=None, cry=int(s["id"]),
-                                  cry_params={k: int(s[k]) for k in CRY_PARAM_KEYS if k in s}))
+                                  cry_params={k: int(s[k]) for k in CRY_PARAM_KEYS if k in s},
+                                  cry2=int(s["id2"]) if "id2" in s else None,
+                                  cry2_start_frame=int(s["start_frame2"]) if "id2" in s else None))
                 continue
             const = name.upper()
             if const not in ids:
@@ -261,6 +271,8 @@ def render_reference(args, t, ref_dir):
            "--rate", str(args.rate), "--type", t["type"], "--id", str(t["id"])]
     for k, v in sorted(t.get("cry_params", {}).items()):      # StartCry's pitch / pan / volume / length / release / chorus
         cmd += ["--" + k, str(v)]
+    if t.get("cry2") is not None:                             # a second cry at the defaults on VBlank start_frame2
+        cmd += ["--id2", str(t["cry2"]), "--start-frame2", str(t["cry2_start_frame"])]
     if run(cmd, wav + ".log") != 0:
         raise SystemExit(f"mgba_render failed for {t['name']}, see {wav}.log")
     return wav
@@ -278,6 +290,8 @@ def render_poryaaaa(args, t, overlay, out_dir):
         cmd = [args.poryaaaa_render, overlay, "--cry", str(t["cry"])] + common
         for k, v in sorted(t.get("cry_params", {}).items()):
             cmd += ["--cry-" + k, str(v)]
+        if t.get("cry2") is not None:                         # the second cry on cry player 1, chained after cry 0's
+            cmd += ["--cry2", str(t["cry2"]), "--cry2-start-frame", str(t["cry2_start_frame"])]
     elif args.input == "song":
         if not t["song"] or not os.path.exists(t["song"]):
             raise SystemExit(f"compiled song {t['song']} not found; build the ROM or use --input midi")

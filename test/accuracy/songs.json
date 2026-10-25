@@ -238,5 +238,23 @@
     "chorus": 20,
     "seconds": 3.0,
     "note": "Cry_Wailord (gCryTable[381]) with CRY_MODE_HIGH_PITCH (the same template bytes as cry_jynx_high_pitch: TIE key 62, TUNE 28 / 48, VOL 90, xWAIT 50, xRELE 200): the 20846-sample cry (1.83 / 1.79 s on the two tracks) still sounding on both chains at the EOT on frame 53, the same two-channel release to the stop on frame 71 on a second sample"
+  },
+  {
+    "name": "cry_second_bulbasaur_pidgey",
+    "type": "cry",
+    "id": 0,
+    "id2": 15,
+    "start_frame2": 20,
+    "seconds": 3.0,
+    "note": "two cries at once (slice 8b-i / 8b-ii): Cry_Bulbasaur (gCryTable[0]) at the defaults on cry player 0, then StartCry of Cry_Pidgey (gCryTable[15]) at CRY_MODE_NORMAL's defaults on VBlank 20 (its start tick on engine frame 22) while the first still sounds -- SetPokemonCryTone's first free player gives cry player 1 (engine tracks 2..3) and ply_note's index-order scan gives channel 1 over the live channel 0 (the 4736 start frame); the 1902-sample Pidgey dies through the count path on frame 50, Bulbasaur's 8183 samples on frame 33, both EOTs (frames 143 / 162) find empty chains; the probe log build/probe/cry_second_bulbasaur_pidgey.txt, 180 frames"
+  },
+  {
+    "name": "cry_second_jynx_wailord",
+    "type": "cry",
+    "id": 123,
+    "id2": 381,
+    "start_frame2": 60,
+    "seconds": 4.0,
+    "note": "two long cries at once: Cry_Jynx (gCryTable[123], 23524 samples, the longest) on cry player 0, then Cry_Wailord (gCryTable[381], 20846 samples) at the defaults on VBlank 60 (start tick on frame 62) on cry player 1 and channel 1; both samples still sounding together from frame 62 to Jynx's count-path death on frame 137, Wailord's on frame 181, then both EOTs on empty chains (143 / 202) -- 4 s covers the second EOT; the probe log build/probe/cry_second_jynx_wailord.txt, 240 frames"
   }
 ]

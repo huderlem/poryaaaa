@@ -13,8 +13,9 @@
 # The write diff needs the probe logs (build/probe/<name>.txt from
 # mgba_probe; not committed) and renders each test for the probe's length:
 # micro-tests 1.2 s (70 frames) or 3 s (180), songs 20 s (1200) or 10 s
-# (600), SEs 3 s with --player, cries 3 s with --cry (the id and any
-# pitch / pan / volume / length / release / chorus from songs.json).
+# (600), SEs 3 s with --player, cries 3 s (180 frames) or 4 s (240) with
+# --cry (the id and any pitch / pan / volume / length / release / chorus
+# from songs.json, and --cry2 / --cry2-start-frame for an id2 / start_frame2).
 set -u
 cd "$(dirname "$0")/../../.."
 BASE=${1:-$(ls -t test/accuracy/baselines/*.json | head -1)}
@@ -43,6 +44,8 @@ import json
 for s in json.load(open("test/accuracy/songs.json")):
     if s.get("type") == "cry" and "id" in s:
         extra = " ".join("--cry-%s %d" % (k, s[k]) for k in ("pitch", "pan", "volume", "length", "release", "chorus") if k in s)
+        if "id2" in s:
+            extra += " --cry2 %d --cry2-start-frame %d" % (s["id2"], s["start_frame2"])
         print(s["name"], "--cry %d %s" % (s["id"], extra))')
 moved=0; checked=0
 for f in build/probe/*.txt; do
@@ -67,7 +70,7 @@ for f in build/probe/*.txt; do
         [ -f "build/accuracy/rom/$src" ] || continue
         src="--song build/accuracy/rom/$src"
     fi
-    if [ "$frames" -gt 1000 ]; then d=20; elif [ "$frames" -gt 500 ]; then d=10; elif [ "$frames" -gt 100 ]; then d=3.0; else d=1.2; fi
+    if [ "$frames" -gt 1000 ]; then d=20; elif [ "$frames" -gt 500 ]; then d=10; elif [ "$frames" -gt 200 ]; then d=4.0; elif [ "$frames" -gt 100 ]; then d=3.0; else d=1.2; fi
     if ! build/poryaaaa_render build/accuracy/project $src $args --output "$OUT/$n.wav" \
             --sample-rate 48000 --total-duration-seconds $d --fadeout 0 --tail 0 \
             --psg-log "$OUT/$n.engine.log" > "$OUT/$n.render.log" 2>&1; then
