@@ -2796,6 +2796,89 @@ these pitches, so the two-channel release tail (and `_SKIP`) remain
 unmeasured.  No code changed after the baseline, so
 `2026-10-25_cry-chorus.json` stands as saved.
 
+### Done: milestone 4 slice 7, the two-channel release (2026-10-25)
+
+The branch slice 6 left unexercised: `ply_endtie` and `ply_fine` with a
+live channel on **each** of the cry player's two chains, the EOT releasing
+two chained channels at once and their two release tails.  CRY_MODE_HIGH_PITCH
+whole (src/sound.c `PlayCryInternal`: length 50, release 200, pitch
+15800, chorus 20, volume 90) on the two samples still sounding at tick
+50, Cry_Jynx (gCryTable 123) and Cry_Wailord (381).  **No ROM, CLI,
+runner or engine change**: every parameter was patchable since slice 6
+and the sequencer's per-track model composes the two-live-chain EOT
+without a new constant (probe step 10 above).  Baseline
+`baselines/2026-10-25_cry-two-chain-release.json` / `.txt`: **53/62 pass
+at -40 dB**; the 60 previous rows are identical to `2026-10-25_cry-chorus.json`
+in **every** field of report.json, the ref path included (the ROM did not
+change; `compare_reports.py`: 0 regressions, 0 improvements, every -inf
+still -inf, every row 0.0; the eight documented FAILs as before).
+`poryaaaa_unit_tests` 1394/1394 (21 new), `poryaaaa_blip_tests` 49112/0,
+`poryaaaa_song_tests` 561/561.  `claim_check.sh`: 55 probed tests (the two
+new ones added), 0 moved writes.
+
+| test | gCryTable | mode | tracks / samples | null | worst 1 s | ref dBFS | |
+|---|---|---|---|---|---|---|---|
+| cry_jynx_high_pitch | 123 | CRY_MODE_HIGH_PITCH: length 50, release 200, pitch 15800, chorus 20, volume 90 | two channels on Cry_Jynx's 23524 samples at TUNE 28 / 48 (11422 / 11630 Hz, 2.06 / 2.02 s), both alive at the EOT on frame 53, both released over 18 frames and stopped on 71 | -42.8 | -33.4 | -29.0 | FAIL |
+| cry_wailord_high_pitch | 381 | the same mode | two channels on Cry_Wailord's 20846 samples (1.83 / 1.79 s), the same EOT and tails | -51.3 | -51.2 | -25.4 | PASS |
+
+**The template bytes** (step 10's table, by hand before the first render,
+pinned by `test_cry_song`'s variants rows 13-14): trackCount 2, TIE key
+0x3E, TUNE 0x1C, TUNE2 0x30, VOL 0x5A, xWAIT 0x32 0x00, xRELE 0xC8 on
+both (the sample is the tone word, the template does not change with it).
+The probe confirms the key on both tracks at the EOT (`_081DD938` r3 =
+0x3E after each `ply_endtie`).
+
+**The EOT cost with two live chains, probe against engine**: **2596** on
+frame 53 of both entries, the engine's `frameCycles` 2596 on the same frame
+(`test_sequencer_cycles_cry_high_pitch_two_chain`, `entry_diff.py` 0 on
+every complete frame of both), composed from the existing per-track terms
+(2360 for two empty chains + 118 per live chain: `ply_endtie`'s match 82
+instead of 54 and `ply_fine`'s `_loop` / `_ok` / `RealClearChain` / `_done`
+86 instead of 16).  Nothing derived, nothing fitted.  **`_SKIP` 18 stays
+est.**: this run does not produce a `ply_endtie` pass-over (one channel per
+chain, `RealClearChain`'s prev 0 / next 0 on both; each walk ends at its
+match).  It needs two channels on one track's chain, i.e. a second cry
+while one plays -- a later slice.
+
+**Death frames, probe against engine, both channels of both entries**:
+the probe's two `_081DCFB0` stamps on raw f72 = frame **71** per entry
+(channels 0x03000FC0 and 0x03001000, 69 cycles apart in one SoundMainRAM
+pass; cycles 19986289 / 19986358 on both entries); the engine's two
+channels lose CHN_ON on frame **71** on both tracks (the unit test asserts
+71 / 71 against the probe's stamps), after the 18 passes 199 .. 1 on
+frames 53..70 that the test asserts on both channels.  The chains do not
+differ.  The last non-zero output sample agrees with the reference's on
+both (1.2206 / 1.2217 s).
+
+**Per-test sequencer residual**: `entry_diff.py` 0 on every complete frame
+of both entries (the listed line is the probe's unfinished frame 179, as on
+every 180-frame cry probe), `cmd_diff.py` 0, `track_diff.py` 0, with no
+engine edit.
+
+**Residual attribution** (skill, "Attributing a residual below -40 dB";
+runs of output samples differing by more than 20 int16 LSB; the crossing
+times from the probes' `L timer0` lines, 8 per entry at the same cycles:
+0.0704, 0.1381, 0.4052, 0.4722, 0.6069, 0.9079, 1.0750, 1.1419 s):
+cry_jynx_high_pitch has seven single-PCM-sample runs at 0.0706 / 0.1383 /
+0.4054 / 0.4724 / 0.6071 / 0.9081 / 1.0751 s, each 0.2 ms after a crossing
+(126 .. 1668 LSB; the 1.1419 crossing produces nothing above the threshold),
+cry_wailord_high_pitch five, at 0.1383 / 0.4054 / 0.4724 / 0.6071 / 0.9081 s
+(113 .. 1629 LSB; the 0.0704, 1.0750 and 1.1419 crossings nothing) -- the
+scheduler-lateness floor on both, no run anywhere else.  **Why Jynx FAILs
+and Wailord passes**: the gate is the worst 1 s window, and Jynx's worst
+window starts at 1.0 s, where the reference holds only the release tail
+(ref -52.9 dBFS over the window; -44 / -50 dBFS per 0.1 s at 1.0 / 1.1 s,
+silence from 1.22 s): the one-LSB run at 1.0751 s (192 LSB, one PCM LSB)
+against that quiet tail reads -33.4 dB, while the same crossing produces
+no run on Wailord and its 1.0 s window nulls to -inf.  Over the whole file
+Jynx is -42.8 and over its 0.0 / 0.1 s windows -43.0 / -42.7.  The FAIL is
+the floor against a near-silent window, the ninth documented floor FAIL;
+nothing in the engine addresses it (deferred item 1c), leave it.
+
+The work, in order (commits on `accuracy-harness` after 5a2c611): the
+corpus, probe step 10, unit tests and docs; the baseline and this section;
+then the review paragraph below.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
