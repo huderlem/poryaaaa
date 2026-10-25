@@ -879,6 +879,81 @@ micro-tests, pcm / pcm_cmp / wave over 180 frames, the six songs over 1200)
 stayed at 0, and the harness read the timing-3 baseline to the decimal
 (38/38, every delta 0.0).
 
+### SoundMain timing probe, step 5: the cry players (2026-10-24, milestone 4 slice 2)
+
+Runs: four cries, probe type 1 (`ACC_TYPE_CRY`, the ROM's `StartCry` with
+mgba_render's defaults pan 0, volume 120, pitch 15360 = key 60 at C_V,
+length 140, priority 10), ids 15 Cry_Pidgey, 0 Cry_Bulbasaur, 381
+Cry_Wailord, 123 Cry_Jynx, 180 frames each, the eighth argument
+`gPokemonCryMusicPlayers` (in the ELF's nm listing; cry 1 is +0x40, so
+`probe_mplay.py --player 03001f88` / `03001fc8` by address).  Cycles from
+VBlank line 160; every number below holds on all 177 complete frames of
+each of the four runs unless a frame is named.
+
+**Which player.**  `SetPokemonCryTone` from silence takes cry 0
+(`gPokemonCryMusicPlayers[0]` 0x03001F88, tracks `gPokemonCryTracks[0..1]`
+0x03002258 / 0x030022A8): r7 at every MPlayMain label of the playing run
+is 0x3001F88 on all four cries; cry 1 (0x3001FC8) only ever shows its
+paused `_081DDA6C`.
+
+**The chain** (step 4's rule, measured on the cry players): SE3's
+`_081DDA6C` at **826** (= 566 + 71 + 3 x 63) every frame; the playing cry
+0 reaches FadeOutBody **88** later (914) and `_081DD9BC` 54 after that
+(**968** = 826 + 142, the SE head); after its own `_081DDA6C` the paused
+cry 1 unwinds **63** and CgbSound follows **55** later: exit **118**.  With
+every player paused (frame 2 and from frame 145 on) CgbSound is at
+**1007**, as for the SE runs.  The player's second track (the song has
+one) costs the step-3 16 in the tick loop and 14 in the apply pass.  Cry 1
+playing is not measured (no run starts two cries): the chain rule gives
+entry 889 / exit 55, est.
+
+| player | gMPlayTable | tracks | body starts at | FadeOutBody | `_081DD9BC` | `_081DDA6C` -> CgbSound |
+|---|---|---|---|---|---|---|
+| cry 0 | (4th after BGM) | 2 | 826 (SE3's `_081DDA6C`) | 914 | 968 | 118 = 63 + 55 |
+| cry 1 | (5th) | 2 | 889 est. | 977 est. | 1031 est. | 55 est. |
+
+**The song data is in IWRAM.**  `gPokemonCrySongs` (0x03001F20) holds the
+patched template, so every song-data byte MPlayMain reads costs less than
+from ROM (WS0 3/1 with prefetch).  Measured pairs, ROM song (step 3) vs
+cry (same labels, same state): command fetch `_081DD8E0 -> _081DD8EC` 21
+vs **14**; ply_vol 89 vs **82**; ply_pan 91 vs **84**; ply_tune (step 3's
+default 90) **84**; ply_voice 184 vs **177**; ply_goto 110 vs **82**
+(`ply_goto` -> `ply_goto_1` 2 -> `_081DD938` 80; four bytes); ply_xcmd ->
+its sub-handler 61 vs **54**; ply_note -> `_081DDB46` with key and
+velocity bytes 114 vs **93** (three reads: the key, the velocity and the
+gate test that finds the next command byte).  Every pair differs by **7
+per song-data byte read** (`M4A_CYC_ROM_BYTE`): 7, 7, 7, 7, 28, 7, 21.
+The rest of the frame -- the chain walk, Clear64byte 20 + 33, SoundMainBTM
+68, the wait path 28, the empty-track 16 / 14, ply_note after
+`_081DDB46` (22 / 4 / 40 / 14 / 14 / 12 / 33 / 48 / 18 / 14 / 232 / 78 /
+12 / 20 / 235 / 14 / 30), ply_fine 16 + 28 -- is the same as on a ROM
+song, as it reads RAM structures only.
+
+**Handlers measured for the first time** (RAM song data; the ROM values
+are est. as RAM + 7 per byte read, no vanilla song uses them): `ply_xcmd_0D`
+-> `_081DD938` **120** (four bytes; ROM est. 148); `ply_xrele` -> `_081DD938`
+**48** (ROM est. 55); `ply_xwait` -> `_081DD938` **108** while timer <
+length (ROM est. 122) and **102** on the tick it expires (frame 143; ROM
+est. 116); `ply_endtie` -> `_081DD938` **54** with no key byte and an empty
+chain (the sample had ended; step 3's ROM 89 / 95 on rg_vs_trainer are
+kept as they were measured, their chain state unrecorded).
+
+**The frames of a cry** (CgbSound entry): 3 (start tick: TUNE, GOTO,
+VOICE, VOL, XCMD 0D, XCMD RELE, PAN, TIE, XCMD WAIT) **4077**; the steady
+xwait tick **1596** (fetch, xcmd 54 + xwait 108, the wait path, one live
+channel in the walk); the tick after the sample ended **1689** (the walk
+unlinks the dead channel: Pidgey frame 14, Bulbasaur 50, Wailord 122, Jynx
+137) then **1576**; 143 (xwait expires, EOT, FINE) **1810**; 144 (the
+finished tick, `M4A_CYC_TICK_ALL_DONE`) **1192**; 145 on **1007**.
+
+**The cry data in the ROM** (`gCryTable`, 388 entries, every ToneData
+`20 3C 00 00 <wav> FF 00 FF 00`: `cry` = `voice_directsound_compressed
+60, 0, sample, 255, 0, 255, 0`).  Every cry sample header is type 1
+(DPCM), status 0 (**no cry loops**), freq 10764288 (10512 Hz); sizes run
+from 1902 (Pidgey, 0.18 s) to 23524 (Jynx, 2.24 s), so at pitch 15360 no
+cry reaches the 140-tick EOT with its sample still playing; the EOT finds
+an empty chain on every cry.
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`
