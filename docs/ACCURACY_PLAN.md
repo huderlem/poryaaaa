@@ -1253,6 +1253,123 @@ cry_bulbasaur_reverse **0** timer-0 slot crossings, cry_pidgey_echo_start
 **0**, cry_jynx_growl1 4 (cycles 1180928, 2304515, 3428098, 5675266 =
 0.0704, 0.1374, 0.2043, 0.3383 s; the last two inside the release tail).
 
+### SoundMain timing probe, step 9: cry chorus, the two-track modes (2026-10-25, milestone 4 slice 6)
+
+**The ROM change.**  `struct AccParams` gains `s8 chorus` from its reserved
+bytes (offset 19 of the `PORYACC1` block, default 0 in the ROM data, the
+block stays 28 bytes), `StartCry` passes it to `SetPokemonCryChorus` in
+`PlayCryInternal`'s order (after Release, before Priority); `mgba_render
+--chorus` and `mgba_probe`'s fourteenth argument patch byte 11 of the
+block.  `StartCry` / `StartTest` grew main.o by 0x1c, so every ROM symbol
+after it moved **+0x1c** (`CgbSound` 0x8001020 -> 0x800103c, `MPlayMain`
+0x80025e4 -> 0x8002600, `ply_note` 0x80028c0 -> 0x80028dc, `gCryTable`
+0x0802afac -> 0x0802afc8, `_081DCFB0` 0x8001d70 -> 0x8001d8c; `StartTest`
+itself +0x14; IWRAM unchanged, `gPokemonCrySongs` 0x03001f20); the compiled
+`CgbSound` is byte-identical at the new address (541 instructions compared
+address-normalised; the three `bl CgbModVol` / `CgbOscOff` encodings are
+the same relative offsets, the one differing word is the literal-pool ROM
+pointer, +0x1c), so the `CgbSound_*` labels in the skill and the probe
+header are step 7's +0x1c (loop 0x800106c .. next 0x800146c, each checked
+to land on the same instruction).  The references' directory moved to
+`build/accuracy/refs/d28b3dc2950d-mGBA_0.10.5+m4a_blip/`.  **Neutrality**:
+the full default harness with the new ROM and the unchanged engine gives
+every one of the 57 rows identical to `2026-10-25_cry-reverse.json` in
+every field of report.json but the ref path (50/57, 32 rows still -inf);
+the cry_jynx_faint probe re-run under the new ROM gives a `.frames` file
+identical to the old ROM's.
+
+**The modes** (src/sound.c `PlayCryInternal`, whole modes; `chorus` is a
+`u32` there and `SetPokemonCryChorus` takes `s8`, so 192 is the s8 -64 --
+the same byte 0xC0, and `(val + tuneValue) & 0x7F` is the same for both):
+(a) CRY_MODE_ENCOUNTER on Cry_Bulbasaur (id 0): release 225, pitch 15600,
+chorus 20, volume 90, length the default 140; (b) CRY_MODE_ECHO_END on
+Cry_Jynx (id 123): release 220, pitch 15555, chorus 192, volume 70, length
+140; (c) CRY_MODE_ECHO_START complete on cry_reverse Cry_Pidgey (id 403):
+reverse, length 25, release 100, pitch 15600, chorus 192, volume 90 --
+slice 5's cry_pidgey_echo_start with its chorus restored (that entry stays
+as the one-track form).
+
+**The template bytes**, worked by hand before the first render
+(`SetPokemonCryPitch` as steps 6-8: b = pitch + 0x80, TIE key = b >> 8,
+TUNE = (b >> 1) & 0x7F, TUNE2 = (16 + TUNE) & 0x7F; then
+`SetPokemonCryChorus` with a nonzero value sets trackCount (0x00) to 2 and
+**overwrites TUNE2 (0x19) with (chorus + TUNE) & 0x7F**, so the pitch
+setter's `a = tuneValue2 - tuneValue` carry is discarded; `SetPokemonCryVolume`
+the VOL byte at 0x1D, `SetPokemonCryLength` the xWAIT u16 at 0x2E..0x2F,
+`SetPokemonCryRelease` the xRELE byte at 0x26):
+
+| entry | id | mode | pitch | b | trackCount (0x00) | TIE key (0x2A) | TUNE (0x12) | TUNE2 (0x19) | VOL (0x1D) | xWAIT (0x2E,0x2F) | xRELE (0x26) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| cry_bulbasaur_encounter | 0 | CRY_MODE_ENCOUNTER: release 225, pitch 15600, chorus 20, volume 90 | 15600 | 0x3D70 | 2 | 0x3D (61) | 0x38 (56) | (20 + 56) & 0x7F = 0x4C (76) | 0x5A (90) | 0x8C 0x00 (140) | 0xE1 (225) |
+| cry_jynx_echo_end | 123 | CRY_MODE_ECHO_END: release 220, pitch 15555, chorus 192, volume 70 | 15555 | 0x3D43 | 2 | 0x3D (61) | 0x21 (33) | (192 + 33) & 0x7F = 0x61 (97) | 0x46 (70) | 0x8C 0x00 (140) | 0xDC (220) |
+| cry_pidgey_echo_start_chorus | 403 | CRY_MODE_ECHO_START: reverse, length 25, release 100, pitch 15600, chorus 192, volume 90 | 15600 | 0x3D70 | 2 | 0x3D (61) | 0x38 (56) | (192 + 56) & 0x7F = 0x78 (120) | 0x5A (90) | 0x19 0x00 (25) | 0x64 (100) |
+
+PAN 0x40 on all three.  Both tracks share the body from `cont` (VOICE 0,
+VOL, XCMD 0x0D, xRELE, PAN, TIE key, xWAIT, EOT, FINE): track 0 starts at
+`part0` (TUNE then GOTO cont), track 1 at `part1` (TUNE2, falling into
+cont), so the two channels carry the same key and differ in `tune` only.
+Length against pitch, as slices 4 and 5 checked: Cry_Bulbasaur's 8183
+samples at key 61 (about 11.0 / 11.1 kHz on the two tracks) run 0.74 s and
+end through the count path around frame 50, long before tick 140 -- so
+(a)'s EOT finds two empty chains and the mode's release 225 reaches no
+channel (the task's expectation that the EOT releases both live channels
+does not hold for this sample; the mode is kept whole, not altered);
+Cry_Jynx's 23524 at key 61 + TUNE 33 / 97 (about 10.83 / 11.47 kHz: 2.17
+/ 2.05 s, i.e. about 130 / 123 frames from frame 3) end through the count
+path around frames 133 / 126, **before** tick 140 on frame 143 -- unlike
+cry_jynx_faint's pitch 14440, which outlives the EOT -- so (b)'s EOT also
+finds two empty chains and the mode's release 220 reaches no channel (the
+task's expectation of a two-channel release at the EOT holds for neither
+(a) nor (b); the modes are kept whole); Cry_Pidgey's 1902 backwards are
+gone by frame 14, (c)'s EOT on frame 28 finds empty chains as slice 5's
+entry did.  The probe confirms the TIE key on **both** tracks after each
+EOT: `_081DD938`'s r3 = 0x3D on the line after each of the two
+`ply_endtie`s (r5 = 0x03002258 for track 0, 0x030022A8 for track 1).
+
+**The probe runs** (type 1, 180 frames, `gPokemonCryMusicPlayers`, the six
+parameters as the ninth to fourteenth arguments; cycles from VBlank line
+160).  The two-track frame skeleton, identical on all three entries where
+both tracks live: the start tick **6792** on frame 3 (`ply_note` twice, the
+setup commands of both tracks: ply_tune 2, ply_goto 1, ply_voice 2, ply_vol
+2, ply_xcmd 6 (0x0D 2, xRELE 2, xWAIT 2), ply_pan 2; the one-track start was
+4077), **1932** on every frame with both channels alive (the one-track
+1596), the unlink tick of the first channel to run out **2025** (= 1932 +
+93, the one-track unlink was 1596 + 93 = 1689), the next frame with one
+dead track and the other's unlink **2005** (= 1932 - 20 + 93: the dead
+track costs 20 less, as the one-track 1576), **1892** with both dead (1932
+- 40), the EOT on two empty chains **2360** (two `ply_endtie` -> `_081DD938`
+54 and two `ply_fine` -> `_done`; the one-track empty-chain EOT was 1810),
+1192 on the frame after, 1007 from then on.  Per entry: cry_bulbasaur_encounter
+unlinks on frames **47** (track 1, TUNE 76, 11.14 kHz) and **48** (track
+0, TUNE 56, 11.0 kHz), the EOT on 143; cry_jynx_echo_end unlinks on **126**
+(track 1, TUNE 97) and **133** (track 0, TUNE 33), the EOT on 143;
+cry_pidgey_echo_start_chorus unlinks on **13** (track 1, TUNE 120) and
+**14** (track 0, TUNE 56), the EOT on 28.  **No `_081DCFB0` stamp in any of
+the three** (every channel ends through the count path; no release tail
+ever runs), so there are no death stamps to compare: the deaths are the
+unlink frames, and the engine's channels lose CHN_ON on the frame before
+each unlink (46 / 47 on (a), `test_sequencer_cycles_cry_encounter_chorus`).
+
+**No new timing constant.**  The engine's existing per-track and
+per-command model (the RAM command costs of step 5, `ply_note` on the cry,
+the per-track tick with its unlink and dead-track terms, the EOT path)
+composes to the two-track skeleton without any change: `entry_diff.py` 0
+divergences on all 177 complete frames of each of the three entries,
+`cmd_diff.py` 0, `track_diff.py` 0, before any engine edit.  Nothing was
+derived or fitted.  **`_SKIP` 18 stays est.**: the two tracks each own a
+one-channel chain (`track->chan` per track), so `ply_endtie`'s walk still
+never passes over a channel; no run in this slice puts two channels on
+one track's chain either.
+
+Scheduler-lateness floor (`.events`, `L timer0` lines): cry_bulbasaur_encounter
+5 timer-0 slot crossings (cycles 2872577, 3428103, 9046018, 10737665,
+11293191 = 0.1712, 0.2043, 0.5392, 0.6400, 0.6731 s), cry_jynx_echo_end 10
+(1180928, 4551683, 7922432, 7934976, 15787520, 15800064, 18034689,
+20281856, 21405441, 31517699 = 0.0704, 0.2713, 0.4722, 0.4730, 0.9410,
+0.9418, 1.0750, 1.2089, 1.2759, 1.8786 s; two pairs 12544 cycles apart),
+cry_pidgey_echo_start_chorus 3 (1748994, 2872578, 3428096 = 0.1042,
+0.1712, 0.2043 s).
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`

@@ -4410,36 +4410,46 @@ static void test_cry_song(void)
     ASSERT(base != NULL, "cry: default song built (variants)");
     if (!base) return;
     static const struct {
-        const char *name; int16_t pitch; int8_t pan; uint8_t volume; uint16_t length; uint8_t release;
-        uint8_t key, tune, tune2, panByte, volByte, waitLo, waitHi, releaseByte;
-    } variants[9] = {
+        const char *name; int16_t pitch; int8_t pan; uint8_t volume; uint16_t length; uint8_t release; int8_t chorus;
+        uint8_t trackCount, key, tune, tune2, panByte, volByte, waitLo, waitHi, releaseByte;
+    } variants[12] = {
         /* Cry_Jynx at CRY_MODE_FAINT's 14440: b = 0x38E8 -> key 0x38, tune 0x74, tune2 (16 + 0x74) & 0x7F */
-        { "cry_jynx_faint", 14440, 0, 120, 140, 0, 0x38, 0x74, 0x04, 0x40, 0x78, 0x8C, 0x00, 0x00 },
+        { "cry_jynx_faint", 14440, 0, 120, 140, 0, 0, 1, 0x38, 0x74, 0x04, 0x40, 0x78, 0x8C, 0x00, 0x00 },
         /* Cry_Bulbasaur at CRY_MODE_HIGH_PITCH's 15800, pan 63: b = 0x3E38 -> key 0x3E, tune 0x1C, tune2 0x2C; PAN (63 + 64) & 0x7F */
-        { "cry_bulbasaur_howl", 15800, 63, 120, 140, 0, 0x3E, 0x1C, 0x2C, 0x7F, 0x78, 0x8C, 0x00, 0x00 },
+        { "cry_bulbasaur_howl", 15800, 63, 120, 140, 0, 0, 1, 0x3E, 0x1C, 0x2C, 0x7F, 0x78, 0x8C, 0x00, 0x00 },
         /* Cry_Pidgey at volume 90 (CRY_MODE_ENCOUNTER's): VOL 0x5A */
-        { "cry_pidgey_quiet", 15360, 0, 90, 140, 0, 0x3C, 0x40, 0x50, 0x40, 0x5A, 0x8C, 0x00, 0x00 },
+        { "cry_pidgey_quiet", 15360, 0, 90, 140, 0, 0, 1, 0x3C, 0x40, 0x50, 0x40, 0x5A, 0x8C, 0x00, 0x00 },
         /* Milestone 4 slice 4, whole modes (src/sound.c PlayCryInternal; none sets chorus):
          * CRY_MODE_FAINT on Cry_Jynx: pitch 14440, length 140 (xWAIT 0x8C 0x00), release 200 (xRELE 0xC8) */
-        { "cry_jynx_faint_full", 14440, 0, 120, 140, 200, 0x38, 0x74, 0x04, 0x40, 0x78, 0x8C, 0x00, 0xC8 },
+        { "cry_jynx_faint_full", 14440, 0, 120, 140, 200, 0, 1, 0x38, 0x74, 0x04, 0x40, 0x78, 0x8C, 0x00, 0xC8 },
         /* CRY_MODE_DOUBLES on Cry_Wailord: pitch 15360, length 20 (0x14 0x00), release 225 (0xE1) */
-        { "cry_wailord_doubles", 15360, 0, 120, 20, 225, 0x3C, 0x40, 0x50, 0x40, 0x78, 0x14, 0x00, 0xE1 },
+        { "cry_wailord_doubles", 15360, 0, 120, 20, 225, 0, 1, 0x3C, 0x40, 0x50, 0x40, 0x78, 0x14, 0x00, 0xE1 },
         /* CRY_MODE_ROAR_2 on Cry_Pidgey: pitch 15616 (b = 0x3D80 -> key 0x3D, tune 0x40, tune2 0x50), length 60 (0x3C 0x00), release 225 */
-        { "cry_pidgey_roar2", 15616, 0, 120, 60, 225, 0x3D, 0x40, 0x50, 0x40, 0x78, 0x3C, 0x00, 0xE1 },
+        { "cry_pidgey_roar2", 15616, 0, 120, 60, 225, 0, 1, 0x3D, 0x40, 0x50, 0x40, 0x78, 0x3C, 0x00, 0xE1 },
         /* Milestone 4 slice 5, the reverse cries (gCryTable_Reverse's entries; the type byte is the
          * voice's, the template does not change): cry_reverse Cry_Bulbasaur at CRY_MODE_NORMAL's defaults */
-        { "cry_bulbasaur_reverse", 15360, 0, 120, 140, 0, 0x3C, 0x40, 0x50, 0x40, 0x78, 0x8C, 0x00, 0x00 },
+        { "cry_bulbasaur_reverse", 15360, 0, 120, 140, 0, 0, 1, 0x3C, 0x40, 0x50, 0x40, 0x78, 0x8C, 0x00, 0x00 },
         /* CRY_MODE_GROWL_1 on cry_reverse Cry_Jynx: pitch 15200 (b = 0x3BE0 -> key 0x3B, tune 0x70, tune2 (16 + 0x70) & 0x7F = 0x00),
          * length 15 (0x0F 0x00), release 125 (0x7D) */
-        { "cry_jynx_growl1", 15200, 0, 120, 15, 125, 0x3B, 0x70, 0x00, 0x40, 0x78, 0x0F, 0x00, 0x7D },
+        { "cry_jynx_growl1", 15200, 0, 120, 15, 125, 0, 1, 0x3B, 0x70, 0x00, 0x40, 0x78, 0x0F, 0x00, 0x7D },
         /* CRY_MODE_ECHO_START on cry_reverse Cry_Pidgey: pitch 15600 (b = 0x3D70 -> key 0x3D, tune 0x38, tune2 0x48),
          * volume 90 (VOL 0x5A), length 25 (0x19 0x00), release 100 (0x64); the mode's chorus 192 is not patchable (0, one track) */
-        { "cry_pidgey_echo_start", 15600, 0, 90, 25, 100, 0x3D, 0x38, 0x48, 0x40, 0x5A, 0x19, 0x00, 0x64 },
+        { "cry_pidgey_echo_start", 15600, 0, 90, 25, 100, 0, 1, 0x3D, 0x38, 0x48, 0x40, 0x5A, 0x19, 0x00, 0x64 },
+        /* Milestone 4 slice 6, the chorus modes (SetPokemonCryChorus: a nonzero value sets trackCount 2 and
+         * overwrites TUNE2 with (chorus + TUNE) & 0x7F, discarding the pitch setter's +16 carry):
+         * CRY_MODE_ENCOUNTER on Cry_Bulbasaur: release 225, pitch 15600 (key 0x3D, tune 0x38), chorus 20 -> TUNE2 (20 + 56) & 0x7F = 0x4C, volume 90 */
+        { "cry_bulbasaur_encounter", 15600, 0, 90, 140, 225, 20, 2, 0x3D, 0x38, 0x4C, 0x40, 0x5A, 0x8C, 0x00, 0xE1 },
+        /* CRY_MODE_ECHO_END on Cry_Jynx: release 220, pitch 15555 (b = 0x3D43 -> key 0x3D, tune 0x21), chorus 192 (the s8 -64)
+         * -> TUNE2 (192 + 33) & 0x7F = 0x61, volume 70 (VOL 0x46) */
+        { "cry_jynx_echo_end", 15555, 0, 70, 140, 220, (int8_t)192, 2, 0x3D, 0x21, 0x61, 0x40, 0x46, 0x8C, 0x00, 0xDC },
+        /* CRY_MODE_ECHO_START complete on cry_reverse Cry_Pidgey: cry_pidgey_echo_start's bytes plus chorus 192
+         * -> trackCount 2, TUNE2 (192 + 56) & 0x7F = 0x78 */
+        { "cry_pidgey_echo_start_chorus", 15600, 0, 90, 25, 100, (int8_t)192, 2, 0x3D, 0x38, 0x78, 0x40, 0x5A, 0x19, 0x00, 0x64 },
     };
-    for (int k = 0; k < 9; k++) {
+    for (int k = 0; k < 12; k++) {
         M4ACryParams v = d;
         v.pitch = variants[k].pitch; v.pan = variants[k].pan; v.volume = variants[k].volume;
-        v.length = variants[k].length; v.release = variants[k].release;
+        v.length = variants[k].length; v.release = variants[k].release; v.chorus = variants[k].chorus;
         M4ASong *vs = m4a_cry_song_new(&v);
         ASSERT(vs != NULL, "cry: variant song built");
         if (!vs) continue;
@@ -4448,12 +4458,14 @@ static void test_cry_song(void)
         ASSERT(vs->data[0x2A] == variants[k].key && vs->data[0x12] == variants[k].tune
                && vs->data[0x19] == variants[k].tune2 && vs->data[0x28] == variants[k].panByte
                && vs->data[0x1D] == variants[k].volByte, msg);
+        snprintf(msg, sizeof(msg), "cry: %s trackCount byte (0x00) and M4ASong.trackCount", variants[k].name);
+        ASSERT(vs->data[0x00] == variants[k].trackCount && vs->trackCount == variants[k].trackCount, msg);
         snprintf(msg, sizeof(msg), "cry: %s xWAIT u16 (0x2E, 0x2F) / xRELE (0x26) bytes", variants[k].name);
         ASSERT(vs->data[0x2E] == variants[k].waitLo && vs->data[0x2F] == variants[k].waitHi
                && vs->data[0x26] == variants[k].releaseByte, msg);
         int same = 1;
         for (int i = 0; i < M4A_CRY_SONG_SIZE; i++)
-            if (i != 0x2A && i != 0x12 && i != 0x19 && i != 0x28 && i != 0x1D && i != 0x2E && i != 0x2F && i != 0x26
+            if (i != 0x00 && i != 0x2A && i != 0x12 && i != 0x19 && i != 0x28 && i != 0x1D && i != 0x2E && i != 0x2F && i != 0x26
                 && vs->data[i] != base->data[i])
                 same = 0;
         snprintf(msg, sizeof(msg), "cry: %s differs from the default song in those bytes only", variants[k].name);
@@ -5157,6 +5169,157 @@ static void test_sequencer_cycles_cry_growl1_reverse(void)
     free(wd);
 }
 
+
+/* A chorus cry on cry player 0: SetPokemonCryChorus makes the song two
+ * tracks (part0: TUNE, GOTO cont; part1: TUNE2, falling into cont), MPlayStart
+ * takes min(songHeader->trackCount, mplayInfo->trackCount) = 2 of them, and
+ * the start tick runs ply_note on both, so two PCM channels are keyed on the
+ * same key from the same sample, a TUNE step apart (cry_bulbasaur_encounter's
+ * values: TUNE 56 and 76). */
+static void test_sequencer_cry_two_tracks(void)
+{
+    printf("Testing the sequencer running a two-track (chorus) cry on cry player 0...\n");
+    static int8_t decoded[8183 + 2 * M4A_DPCM_BLOCK_SAMPLES];
+    WaveData *wd = make_dpcm_wave(8183, 0, 0, decoded);
+    wd->freq = 10512u << 10;
+    static ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_CRY;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF; voices[0].decay = 0; voices[0].sustain = 0xFF; voices[0].release = 0;
+
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    p.pitch = 15600; p.volume = 90; p.release = 225; p.chorus = 20;      /* CRY_MODE_ENCOUNTER */
+    M4ASong *song = m4a_cry_song_new(&p);
+    ASSERT(song != NULL, "cry two tracks: song built");
+    if (!song) { free(wd); return; }
+    ASSERT_EQ(song->trackCount, 2, "cry two tracks: the song header says two tracks");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&seq, M4A_PLAYER_CRY0), 0, "cry two tracks: cry player 0");
+    m4a_engine_boot(&engine, false);
+    m4a_sequencer_start(&seq, song);
+    ASSERT_EQ(seq.trackCount, 2, "cry two tracks: MPlayStart takes both tracks (the player has two)");
+    ASSERT(seq.tracks[0].cmdPtr == 0x11 && seq.tracks[1].cmdPtr == 0x18, "cry two tracks: track 0 at part0 (0x11), track 1 at part1 (0x18)");
+
+    static float outL[4096], outR[4096];
+    advance_frames(&engine, 4, outL, outR);              /* through the start tick on frame 3 */
+    int on = 0, c0 = -1, c1 = -1;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
+        if (engine.pcmChannels[i].status & CHN_ON) {
+            on++;
+            if (engine.pcmChannels[i].trackIndex == 0) c0 = i;
+            if (engine.pcmChannels[i].trackIndex == 1) c1 = i;
+        }
+    }
+    ASSERT_EQ(on, 2, "cry two tracks: two PCM channels are sounding after the start tick");
+    ASSERT(c0 >= 0 && c1 >= 0, "cry two tracks: one channel on each of the two tracks");
+    if (c0 >= 0 && c1 >= 0) {
+        ASSERT(engine.pcmChannels[c0].key == 0x3D && engine.pcmChannels[c1].key == 0x3D, "cry two tracks: both channels keyed on the TIE key 61");
+        ASSERT(engine.tracks[0].tune == 56 - 64 && engine.tracks[1].tune == 76 - 64, "cry two tracks: track TUNE 56 and 76 (c_v-relative -8 and +12), a 20-step chorus apart");
+        ASSERT(engine.pcmChannels[c1].frequency > engine.pcmChannels[c0].frequency, "cry two tracks: the second channel runs faster (TUNE2 above TUNE)");
+        ASSERT(engine.pcmChannels[c0].envelopeVolume == 255 && engine.pcmChannels[c1].envelopeVolume == 255, "cry two tracks: both envelopes at 255 (attack 255, sustain 255)");
+        ASSERT(engine.pcmChannels[c0].release == 225 && engine.pcmChannels[c1].release == 225, "cry two tracks: both channels carry xRELE's 225");
+    }
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+    free(wd);
+}
+
+/* cry_bulbasaur_encounter's probe (plan, "SoundMain timing probe, step 9"):
+ * the two-track cry on cry player 0.  CgbSound entry (cycles from VBlank
+ * line 160): 6792 on frame 3 (the start tick with two tracks and two
+ * ply_notes), 1932 with both channels alive, 2025 on frame 47 (the faster
+ * track's channel ran out of data: its unlink tick), 2005 on 48 (the other
+ * track's unlink, the first track already dead), 1892 with both dead, 2360
+ * on frame 143 (the EOT on two empty chains; the mode's release 225 reaches
+ * no channel), 1192 on 144, 1007 from 145.  Both envelopes hold 255 for the
+ * channels' whole lives (attack 255, sustain 255, no release ever
+ * applied); the deaths are the count path's. */
+static void test_sequencer_cycles_cry_encounter_chorus(void)
+{
+    printf("Testing sequencer CgbSound entry on a two-track cry (cry_bulbasaur_encounter probe)...\n");
+    static int8_t decoded[8183 + 2 * M4A_DPCM_BLOCK_SAMPLES];
+    WaveData *wd = make_dpcm_wave(8183, 0, 0, decoded);
+    wd->freq = 10512u << 10;
+    static ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_CRY;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF; voices[0].decay = 0; voices[0].sustain = 0xFF; voices[0].release = 0;
+
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    p.pitch = 15600; p.volume = 90; p.release = 225; p.chorus = 20;      /* CRY_MODE_ENCOUNTER */
+    M4ASong *song = m4a_cry_song_new(&p);
+    ASSERT(song != NULL, "cry encounter cycles: song built");
+    if (!song) { free(wd); return; }
+    ASSERT(song->data[0x00] == 2 && song->data[0x2A] == 0x3D && song->data[0x12] == 0x38 && song->data[0x19] == 0x4C
+           && song->data[0x1D] == 0x5A && song->data[0x2E] == 0x8C && song->data[0x2F] == 0x00 && song->data[0x26] == 0xE1,
+           "cry encounter cycles: trackCount 2, TIE key 61, TUNE 56, TUNE2 76, VOL 90, xWAIT 140, xRELE 225");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&seq, M4A_PLAYER_CRY0), 0, "cry encounter cycles: cry player 0");
+    m4a_engine_boot(&engine, false);
+    m4a_sequencer_start(&seq, song);
+
+    static float outL[4096], outR[4096];
+    int mismatches = 0, envBad = -1;
+    int death[2] = { -1, -1 };          /* the frame after whose processing each track's channel is no longer CHN_ON */
+    int chan[2] = { -1, -1 };
+    for (int k = 3; k <= 150; k++) {
+        int expected = k == 3 ? 6792 : k < 47 ? 1932 : k == 47 ? 2025 : k == 48 ? 2005 : k < 143 ? 1892
+                     : k == 143 ? 2360 : k == 144 ? 1192 : 1007;
+        advance_frames(&engine, 1, outL, outR);
+        if (seq.frameCycles != expected) {
+            if (mismatches++ < 5)
+                printf("  frame %d: engine %d, mgba %d\n", k, seq.frameCycles, expected);
+        }
+        if (k == 3) {
+            for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+                if ((engine.pcmChannels[i].status & CHN_ON) && engine.pcmChannels[i].trackIndex >= 0 && engine.pcmChannels[i].trackIndex < 2)
+                    chan[engine.pcmChannels[i].trackIndex] = i;
+        }
+        for (int t = 0; t < 2; t++) {
+            if (chan[t] < 0) continue;
+            const M4APCMChannel *ch = &engine.pcmChannels[chan[t]];
+            if (death[t] < 0 && !(ch->status & CHN_ON))
+                death[t] = k;
+            if (death[t] < 0 && ch->envelopeVolume != 255 && envBad < 0) {
+                envBad = k;
+                printf("  frame %d: track %d env %d\n", k, t, ch->envelopeVolume);
+            }
+        }
+    }
+    ASSERT(chan[0] >= 0 && chan[1] >= 0, "cry encounter cycles: both tracks keyed a channel on the start tick (frame 3)");
+    ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the cry_bulbasaur_encounter probe on frames 3..150 (cry 0, two tracks)");
+    ASSERT_EQ(envBad, -1, "cry encounter cycles: both envelopes hold 255 while the channels live (no release is ever applied)");
+    /* The probe's unlink ticks are on frames 47 (track 1, TUNE 76, the faster
+     * one) and 48 (track 0, TUNE 56): the channel ran out during the
+     * previous frame's SoundMainRAM, so it is dead after frames 46 / 47. */
+    ASSERT_EQ(death[1], 46, "cry encounter cycles: track 1's channel (TUNE 76) ends through the count path on frame 46, its unlink tick on 47");
+    ASSERT_EQ(death[0], 47, "cry encounter cycles: track 0's channel (TUNE 56) ends through the count path on frame 47, its unlink tick on 48");
+    ASSERT(m4a_sequencer_finished(&seq), "sequencer: the cry finished (both tracks gone at the EOT on 143)");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -5217,6 +5380,8 @@ int main(void)
     test_pcm_release_envelope();
     test_sequencer_cycles_cry_faint_full();
     test_sequencer_cycles_cry_growl1_reverse();
+    test_sequencer_cry_two_tracks();
+    test_sequencer_cycles_cry_encounter_chorus();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

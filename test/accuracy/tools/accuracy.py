@@ -23,11 +23,12 @@ Steps (all idempotent, cached under --build-dir):
      (mgba_render --type cry --id N, PlayCryInternal's CRY_MODE_NORMAL
      defaults) and poryaaaa_render --cry N: the cry song template on cry
      player 0 with the cry's DPCM sample as its one voice.  Optional
-     "pitch", "pan", "volume", "length", "release" keys (SetPokemonCryPitch /
-     Panpot / Volume / Length / Release's arguments) go to both renderers
-     (mgba_render --pitch / --pan / --volume / --length / --release,
-     poryaaaa_render --cry-pitch / --cry-pan / --cry-volume / --cry-length /
-     --cry-release).
+     "pitch", "pan", "volume", "length", "release", "chorus" keys
+     (SetPokemonCryPitch / Panpot / Volume / Length / Release / Chorus's
+     arguments; a nonzero chorus makes the cry song two tracks) go to both
+     renderers (mgba_render --pitch / --pan / --volume / --length / --release /
+     --chorus, poryaaaa_render --cry-pitch / --cry-pan / --cry-volume /
+     --cry-length / --cry-release / --cry-chorus).
      Cries have no MIDI, so --input midi skips them.
   4. metrics.compare on each pair; a table on stdout and a JSON report.
 
@@ -46,7 +47,7 @@ import subprocess
 import sys
 
 # songs.json cry keys = the SetPokemonCry* setters StartCry takes: mgba_render --<key>, poryaaaa_render --cry-<key>.
-CRY_PARAM_KEYS = ("pitch", "pan", "volume", "length", "release")
+CRY_PARAM_KEYS = ("pitch", "pan", "volume", "length", "release", "chorus")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import metrics  # noqa: E402
@@ -133,9 +134,9 @@ def build_tests(args):
             name = s["name"]
             kind = s.get("type", "song")       # "song": vanilla music; "se": a sound effect; "cry": a Pokemon cry
             if kind == "cry":
-                # StartCry in the ROM (--type cry --id N [--pitch/--pan/--volume/--length/--release]),
+                # StartCry in the ROM (--type cry --id N [--pitch/--pan/--volume/--length/--release/--chorus]),
                 # the cry song template on cry player 0 in poryaaaa_render
-                # (--cry N [--cry-pitch/--cry-pan/--cry-volume/--cry-length/--cry-release]).
+                # (--cry N [--cry-pitch/--cry-pan/--cry-volume/--cry-length/--cry-release/--cry-chorus]).
                 if "id" not in s:
                     print(f"warning: {name}: a cry needs its gCryTable index as \"id\", skipping", file=sys.stderr)
                     continue
@@ -258,7 +259,7 @@ def render_reference(args, t, ref_dir):
         raise SystemExit(f"no mgba_render and no committed reference for {t['name']}")
     cmd = [args.mgba_render, args.rom, wav, "--frames", str(frames_for(t["seconds"])),
            "--rate", str(args.rate), "--type", t["type"], "--id", str(t["id"])]
-    for k, v in sorted(t.get("cry_params", {}).items()):      # StartCry's pitch / pan / volume / length / release
+    for k, v in sorted(t.get("cry_params", {}).items()):      # StartCry's pitch / pan / volume / length / release / chorus
         cmd += ["--" + k, str(v)]
     if run(cmd, wav + ".log") != 0:
         raise SystemExit(f"mgba_render failed for {t['name']}, see {wav}.log")

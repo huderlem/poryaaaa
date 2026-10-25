@@ -180,5 +180,39 @@
     "release": 100,
     "seconds": 2.0,
     "note": "cry_reverse Cry_Pidgey (gCryTable[403]) with CRY_MODE_ECHO_START (reverse, length 25, release 100, pitch 15600 = TIE key 61 + TUNE 56, volume 90; the mode's chorus 192 is not patchable, so it stays 0 and this is one track): the 0.17 s sample is gone by frame 14, so the EOT on frame 28 finds an empty chain and the xRELE byte reaches no channel"
+  },
+  {
+    "name": "cry_bulbasaur_encounter",
+    "type": "cry",
+    "id": 0,
+    "pitch": 15600,
+    "volume": 90,
+    "release": 225,
+    "chorus": 20,
+    "seconds": 2.5,
+    "note": "Cry_Bulbasaur (gCryTable[0]) with CRY_MODE_ENCOUNTER (release 225, pitch 15600 = TIE key 61 + TUNE 56, chorus 20, volume 90; length the default 140): the first two-track cry song (SetPokemonCryChorus: trackCount 2, the second track's TUNE = (20 + 56) & 0x7F = 76), both tracks keyed on the same 8183-sample DPCM data a TUNE step apart (about 11.0 and 11.1 kHz); as in cry_bulbasaur the samples run out through the count path (around frame 50) long before the 140-tick EOT, which then finds empty chains and the mode's release 225 reaches no channel"
+  },
+  {
+    "name": "cry_jynx_echo_end",
+    "type": "cry",
+    "id": 123,
+    "pitch": 15555,
+    "volume": 70,
+    "release": 220,
+    "chorus": 192,
+    "seconds": 3.0,
+    "note": "Cry_Jynx (gCryTable[123]) with CRY_MODE_ECHO_END (release 220, pitch 15555 = TIE key 61 + TUNE 33, chorus 192, volume 70; length the default 140): the large chorus wraps the second track's TUNE to (192 + 33) & 0x7F = 97; the longest sample is still sounding on both tracks at the 140-tick EOT, so both channels are released together over the 220 tail"
+  },
+  {
+    "name": "cry_pidgey_echo_start_chorus",
+    "type": "cry",
+    "id": 403,
+    "pitch": 15600,
+    "volume": 90,
+    "length": 25,
+    "release": 100,
+    "chorus": 192,
+    "seconds": 2.0,
+    "note": "cry_reverse Cry_Pidgey (gCryTable[403]) with CRY_MODE_ECHO_START complete (reverse, length 25, release 100, pitch 15600 = TIE key 61 + TUNE 56, chorus 192, volume 90): cry_pidgey_echo_start with its chorus restored, two reversed tracks with the second's TUNE (192 + 56) & 0x7F = 120; both 0.17 s samples are gone long before the EOT on frame 28"
   }
 ]
