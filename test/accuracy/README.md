@@ -18,7 +18,7 @@ tooling; the plugin builds without it.
 | `tools/probe_diff.py` | Diffs the PSG register writes of a probe log against `poryaaaa_render --song ... --psg-log <file>`, write by write, in cycles. The check that the timing model reproduces mgba's write cycles. |
 | `../test_song_parser.c` (`poryaaaa_song_tests`) | Byte-exact check of the `.s` parser (`plugin/m4a_song.c`) against the ROM: every song under `build/accuracy/rom/{micro,songs}` is parsed, relocated to its address from `accuracy_test.map` and compared with `accuracy_test.gba`. Runs as part of the `accuracy` target. |
 | `tools/gen_micro_midis.py` | Generates `rom/micro/*.mid` and `micro.cfg`. Re-run after editing; then rebuild the ROM. |
-| `songs.json` | Vanilla song corpus (name, seconds, note): PSG + DirectSound (littleroot), pure PSG (weather_groudon), DirectSound-heavy battle (vs_wild), noise (mt_chimney), FRLG drumset (rg_vs_trainer), MEMACC (vs_trainer), long (credits, 60 s). No vanilla music uses compressed samples; the `pcm_cmp` micro-test covers DPCM until cries arrive in milestone 4. |
+| `songs.json` | Vanilla corpus (name, type, seconds, note). Songs: PSG + DirectSound (littleroot), pure PSG (weather_groudon), DirectSound-heavy battle (vs_wild), noise (mt_chimney), FRLG drumset (rg_vs_trainer), MEMACC (vs_trainer), long (credits, 60 s). Sound effects (`"type": "se"`, played by `m4aSongNumStart` on the player `sound/song_table.inc` names, which the runner passes to `poryaaaa_render --player`): se_exp and se_faint (SE1, 3 tracks), se_contest_place and se_truck_unload (SE2, 9 tracks), se_low_health and se_rain_stop (SE3, 1 track). No vanilla music uses compressed samples; the `pcm_cmp` micro-test covers DPCM until cries arrive. |
 | `refs/micro/` | Committed micro-test references (FLAC) and `manifest.json` (ROM hash, mgba version). Lets the micro-tests run without an mgba build. |
 | `baselines/` | Saved reports. |
 
@@ -59,5 +59,10 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   `--update-refs`.
 - Vanilla song: append to `songs.json`; the id comes from
   `include/constants/songs.h` and the mid2agb options from `midi.cfg`.
-- Cries and SE (milestone 4): the ROM already accepts `--type cry --id N`
-  (cry table index, `PlayCryInternal` defaults) and `--type song` with SE ids.
+- Sound effect: append `{"name": "se_xxx", "type": "se", "seconds": N}`;
+  the music player (SE1 / SE2 / SE3, 3 / 9 / 1 tracks) comes from
+  `sound/song_table.inc`, the compiled `.s` is already under
+  `build/accuracy/rom/songs/`.  `--tests se` runs them alone.
+- Cries (milestone 4, next slice): the ROM already accepts `--type cry --id N`
+  (cry table index, `PlayCryInternal` defaults); the runner has no entry
+  type for them yet.

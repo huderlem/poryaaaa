@@ -15,7 +15,10 @@ Steps (all idempotent, cached under --build-dir):
      byte-identical to what mgba plays) through the MPlayMain sequencer
      port; with --input midi it plays the MIDI with the mid2agb options from
      the .cfg mapped to flags (-V -> --song-volume, -R -> --reverb,
-     -G -> voicegroup).
+     -G -> voicegroup).  A sound effect (songs.json "type": "se") is an
+     m4aSongNumStart of its song id in the ROM and plays on the music player
+     the song table names (sound/song_table.inc, the `ms` field: SE1 / SE2 /
+     SE3 with 3 / 9 / 1 tracks), passed to poryaaaa_render as --player.
   4. metrics.compare on each pair; a table on stdout and a JSON report.
 
 Typical use (after `make` in test/accuracy/rom and building mgba_render and
@@ -76,6 +79,17 @@ def mid2agb_opts(opts):
     return vg, vol, rev, ext
 
 
+def song_players(pokeemerald):
+    """song_table.inc: song name -> music player ("bgm", "se1", "se2", "se3"), its `ms` field."""
+    players = {}
+    with open(os.path.join(pokeemerald, "sound", "song_table.inc")) as f:
+        for line in f:
+            m = re.match(r"\s*song\s+(\w+)\s*,\s*MUSIC_PLAYER_(\w+)\s*,", line)
+            if m:
+                players[m.group(1)] = m.group(2).lower()
+    return players
+
+
 def song_ids(pokeemerald):
     ids = {}
     with open(os.path.join(pokeemerald, "include", "constants", "songs.h")) as f:
@@ -99,20 +113,34 @@ def build_tests(args):
         midi_dir = os.path.join(args.pokeemerald, "sound", "songs", "midi")
         cfg = dict(parse_cfg(os.path.join(midi_dir, "midi.cfg")))
         ids = song_ids(args.pokeemerald)
+        players = song_players(args.pokeemerald)
         with open(os.path.join(ACC_DIR, "songs.json")) as f:
             songs = json.load(f)
         for s in songs:
             name = s["name"]
+            kind = s.get("type", "song")       # "song": vanilla music; "se": a sound effect
             const = name.upper()
             if const not in ids:
                 print(f"warning: {const} not in songs.h, skipping", file=sys.stderr)
                 continue
+            if kind not in ("song", "se"):
+                print(f"warning: {name}: unknown type {kind!r}, skipping", file=sys.stderr)
+                continue
+            player = None
+            if kind == "se":
+                player = players.get(name)
+                if player is None:
+                    print(f"warning: {name} not in song_table.inc, skipping", file=sys.stderr)
+                    continue
             vg, vol, rev, ext = mid2agb_opts(cfg[name])
-            tests.append(dict(name=name, group="song", type="song", id=ids[const],
+            # Both play through m4aSongNumStart in the ROM (--type song); the
+            # song table's player decides the track count and MPlayMain position.
+            tests.append(dict(name=name, group=kind, type="song", id=ids[const],
                               midi=os.path.join(midi_dir, name + ".mid"),
                               song=os.path.join(args.rom_dir, "songs", name + ".s") if args.rom_dir else None,
                               voicegroup=vg, volume=vol, reverb=rev, extended=ext,
-                              seconds=float(s.get("seconds", 20.0))))
+                              seconds=float(s.get("seconds", 20.0 if kind == "song" else 3.0)),
+                              player=player))
     if args.tests:
         wanted = set(args.tests.split(","))
         tests = [t for t in tests if t["name"] in wanted or t["group"] in wanted]
@@ -224,6 +252,8 @@ def render_poryaaaa(args, t, overlay, out_dir):
         cmd += ["--song-volume", str(t["volume"]), "--reverb", str(t["reverb"])]
         if t["extended"]:
             cmd.append("--extended-clocks")
+    if t.get("player"):
+        cmd += ["--player", t["player"]]
     cmd += args.poryaaaa_args
     if run(cmd, wav + ".log") != 0:
         raise SystemExit(f"poryaaaa_render failed for {t['name']}, see {wav}.log")
@@ -249,7 +279,7 @@ def main():
     ap.add_argument("--gate", type=float, default=-40.0, help="pass threshold in dB for the raw null depth (full and worst window)")
     ap.add_argument("--min-lag", type=float, default=-0.02, help="alignment search window start, seconds (test delayed by this much)")
     ap.add_argument("--max-lag", type=float, default=0.2, help="alignment search window end, seconds")
-    ap.add_argument("--tests", default=None, help="comma-separated test names or groups (micro, song)")
+    ap.add_argument("--tests", default=None, help="comma-separated test names or groups (micro, song, se)")
     ap.add_argument("--input", choices=("song", "midi"), default="song",
                     help="what poryaaaa_render plays: the compiled .s from the ROM build (default) or the MIDI")
     ap.add_argument("--update-refs", action="store_true", help="store micro-test references in test/accuracy/refs/micro")

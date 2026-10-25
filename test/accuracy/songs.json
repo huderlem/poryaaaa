@@ -33,5 +33,41 @@
     "name": "mus_credits",
     "seconds": 60.0,
     "note": "long track"
+  },
+  {
+    "name": "se_exp",
+    "type": "se",
+    "seconds": 3.0,
+    "note": "SE1 player (3 tracks): square 1 only, a TIE held through pitch bends and ended by EOT"
+  },
+  {
+    "name": "se_faint",
+    "type": "se",
+    "seconds": 2.0,
+    "note": "SE1, all 3 of the player's tracks: DirectSound snare, square 1 with a sweep (NR10 bit 3 clear), noise"
+  },
+  {
+    "name": "se_contest_place",
+    "type": "se",
+    "seconds": 2.0,
+    "note": "SE2 player (9 tracks), 4 tracks: DirectSound timpani, strings keysplit, square 1 and square 2"
+  },
+  {
+    "name": "se_truck_unload",
+    "type": "se",
+    "seconds": 2.0,
+    "note": "SE2, noise only (voice_noise, two notes); FINE with a chained channel"
+  },
+  {
+    "name": "se_low_health",
+    "type": "se",
+    "seconds": 2.0,
+    "note": "SE3 player (1 track): square 1 only, GOTO loop, XCMD pseudo-echo, priority 3"
+  },
+  {
+    "name": "se_rain_stop",
+    "type": "se",
+    "seconds": 2.0,
+    "note": "SE3, DirectSound only with BEND/BENDR, priority 2"
   }
 ]

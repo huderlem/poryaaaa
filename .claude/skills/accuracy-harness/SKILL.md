@@ -19,7 +19,7 @@ cmake -B build -DACCURACY_POKEEMERALD_DIR=$HOME/pokeemerald -DACCURACY_MGBA_DIR=
 cmake --build build --target accuracy
 # re-run only the comparison (after rebuilding poryaaaa_render yourself)
 test/accuracy/tools/accuracy.py                    # all tests, compiled-song input (default)
-test/accuracy/tools/accuracy.py --tests micro      # or song, or name,name
+test/accuracy/tools/accuracy.py --tests micro      # or song, se, or name,name
 test/accuracy/tools/accuracy.py --input midi       # the plugin's MIDI path instead of the .s
 test/accuracy/tools/accuracy.py --committed-refs   # no mgba build needed, micro-tests only
 build/poryaaaa_song_tests build/accuracy/rom       # .s parser vs ROM, byte for byte
@@ -258,8 +258,16 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
 - Vanilla song: append `{"name": "mus_xxx", "seconds": N}` to
   `test/accuracy/songs.json`. Id and mid2agb options are looked up
   automatically; the compiled `.s` is already in `build/accuracy/rom/songs/`.
-- Cry or SE: the ROM and `mgba_render` already accept `--type cry --id N`
-  and SE song ids; the runner needs a test entry type for them (milestone 4).
+- Sound effect: `{"name": "se_xxx", "type": "se", "seconds": N}` (2-4 s).
+  The runner reads its player from `sound/song_table.inc` and passes
+  `--player se1|se2|se3` to poryaaaa_render (3 / 9 / 1 tracks and the
+  player's MPlayMain chain position, `m4a_sequencer_set_player`).  To probe
+  one: `mgba_probe ... 180 0 <id> build/probe/syms.nm gMPlayInfo_SE1` (the
+  eighth argument picks the player the `.frames` summary reads) and
+  `probe_mplay.py --player SE1 ...`; render with `--player se1` for the
+  write diff.
+- Cry: the ROM and `mgba_render` accept `--type cry --id N`; the runner
+  needs a test entry type for it (milestone 4, next slice).
 
 ## Debugging a single test
 
