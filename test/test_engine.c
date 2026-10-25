@@ -6278,6 +6278,123 @@ static void test_engine_lfo_grid(void)
     m4a_song_free(song);
 }
 
+/* The last NR12 / NR13 / NR14 values a PSG got, and in which frame. */
+typedef struct {
+    uint32_t nr12, nr13, nr14;
+    int nr12Writes;
+} LfoOrderLog;
+
+static void lfo_order_log_cb(void *user, uint32_t reg, uint32_t value)
+{
+    LfoOrderLog *log = (LfoOrderLog *)user;
+    if (reg == PSG_REG_NR12) { log->nr12 = value; log->nr12Writes++; }
+    if (reg == PSG_REG_NR13) log->nr13 = value;
+    if (reg == PSG_REG_NR14) log->nr14 = value;
+}
+
+/* One frame: past the next SoundMain and its CgbSound writes (well inside
+ * the frame: CgbSound's writes end a few thousand cycles after its entry). */
+static void lfo_order_frame(M4AEngine *e, float *outL, float *outR)
+{
+    int64_t target = e->nextSoundMain + 60000;
+    while (e->gba.now < target)
+        m4a_engine_process(e, outL, outR, 64);
+}
+
+/*
+ * Without a sequencer the frame's LFO steps (and portamento, PWM) run before
+ * CgbSound, as MPlayMain does in SoundMain: a square's vibrato pitch set by a
+ * frame's LFO step is in NR13 / NR14 after that frame's CgbSound, and a
+ * tremolo step's volume change is written (NR12) in the same frame (plan,
+ * milestone 5 slice 4; before it, one frame later).  The sequencer path,
+ * whose MPlayMain runs in the frame hook, was already in this order.
+ */
+static void test_lfo_cgbsound_order(void)
+{
+    printf("Testing the LFO before CgbSound on the MIDI path...\n");
+    char msg[160];
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_SQUARE_1;     /* sq1, 50 % duty, sustain 15, no sweep */
+    voices[0].key = 60;
+    voices[0].wavePointer = (uint32_t *)(uintptr_t)2;
+    voices[0].sustain = 15;
+    float outL[1024], outR[1024];
+
+    for (int modT = 0; modT < 2; modT++) {
+        for (int q = 0; q < 2; q++) {
+            M4AEngine engine;
+            engine_init_booted(&engine, 48000.0f);
+            m4a_engine_set_voicegroup(&engine, voices);
+            m4a_engine_set_quantize_events(&engine, q == 1);
+            LfoOrderLog log = { 0 };
+            engine.psg[0].writeLog = lfo_order_log_cb;
+            engine.psg[0].writeLogUser = &log;
+            m4a_engine_set_tempo_bpm(&engine, 120.0);     /* the plugin's call */
+            m4a_engine_program_change(&engine, 0, 0);
+            m4a_engine_cc(&engine, 0, 0x16, (uint8_t)modT);
+            m4a_engine_cc(&engine, 0, 0x15, 40);
+            m4a_engine_cc(&engine, 0, 0x1, 24);
+            m4a_engine_note_on(&engine, 0, 60, 127);
+            M4ACGBChannel *sq = &engine.cgbChannels[0];
+            int bad = 0, changes = 0;
+            for (int f = 0; f < 90; f++) {
+                int8_t modM = engine.tracks[0].modM;
+                int writes = log.nr12Writes;
+                lfo_order_frame(&engine, outL, outR);
+                bool stepped = engine.tracks[0].modM != modM;
+                changes += stepped;
+                if (modT == 0) {
+                    uint32_t written = log.nr13 | ((log.nr14 & 7) << 8);
+                    bad += written != (sq->frequency & 0x7FF);
+                } else if (f > 0 && stepped) {
+                    bad += log.nr12Writes == writes;    /* the tremolo step written this frame */
+                }
+            }
+            snprintf(msg, sizeof(msg), "%s%s: every LFO step reaches the square in its own frame's CgbSound"
+                     " (%d modM changes in 90 frames, %d frames late)",
+                     modT ? "tremolo" : "vibrato", q ? " latched" : "", changes, bad);
+            ASSERT(bad == 0 && changes > 20, msg);
+            m4a_engine_destroy(&engine);
+        }
+    }
+
+    /* The sequencer path: the same vibrato from a song, unchanged order. */
+    M4ASong *song = seq_song(
+        "\t.byte\tTEMPO , 120/2\n"
+        "\t.byte\t\tVOICE , 0\n"
+        "\t.byte\t\tMODT  , 0\n"
+        "\t.byte\t\tLFOS  , 40\n"
+        "\t.byte\t\tMOD   , 24\n"
+        "\t.byte\t\tTIE   , Cn3 , v127\n"
+        "\t.byte\tW96\n"
+        "\t.byte\tEOT\n"
+        "\t.byte\tFINE\n");
+    ASSERT(song != NULL, "vibrato song parses");
+    if (!song) return;
+    M4AEngine engine;
+    engine_init_booted(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    LfoOrderLog log = { 0 };
+    engine.psg[0].writeLog = lfo_order_log_cb;
+    engine.psg[0].writeLogUser = &log;
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+    int bad = 0, changes = 0;
+    for (int f = 0; f < 90; f++) {
+        uint32_t freq = engine.cgbChannels[0].frequency;
+        lfo_order_frame(&engine, outL, outR);
+        changes += engine.cgbChannels[0].frequency != freq;
+        bad += (log.nr13 | ((log.nr14 & 7) << 8)) != (engine.cgbChannels[0].frequency & 0x7FF);
+    }
+    snprintf(msg, sizeof(msg), "sequencer: the vibrato pitch in NR13 / NR14 every frame (%d changes, %d late)", changes, bad);
+    ASSERT(bad == 0 && changes > 20, msg);
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
 static void test_event_latch(void)
 {
     printf("Testing the MIDI event latch (quantizeEvents)...\n");
@@ -7086,6 +7203,7 @@ int main(void)
     test_gba_start_delay_origin();
     test_gba_tempo_grid();
     test_engine_lfo_grid();
+    test_lfo_cgbsound_order();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

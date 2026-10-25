@@ -2128,6 +2128,13 @@ oom:
     m4a_engine_set_portamento_enabled(&engine, portamento);
     m4a_engine_set_pwm_enabled(&engine, pwm);
     m4a_engine_set_pcm_freq_mode(&engine, pcmFreqMode);
+    /* --psg-log on the MIDI path too, opened before the boot as the song
+     * path does, so the two logs compare line for line (probe_diff.py). */
+    if (psgLogPath) {
+        sPsgLog.f = fopen(psgLogPath, "w");
+        sPsgLog.engine = &engine;
+        engine.psg[0].writeLog = psg_log_cb;
+    }
     /* Keep the boot's output so MIDI and compiled-song renders of the same
      * material line up with each other and with an emulator recording. */
     m4a_engine_boot(&engine, true);
@@ -2204,6 +2211,10 @@ oom:
     int rc = output_audio(outL, outR, totalSamples, sampleRateHz, outputPath, doPlay);
 
     /* ---- Cleanup ---- */
+    if (sPsgLog.f) {
+        fclose(sPsgLog.f);
+        sPsgLog.f = NULL;
+    }
     free(outL);
     free(outR);
     m4a_engine_destroy(&engine);

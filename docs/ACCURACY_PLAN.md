@@ -7097,6 +7097,161 @@ poryaaaa and poryaaaa-standalone build.  All harness-neutral):
   or default, and its brief limits skill / README edits to that case; left
   to the user.  README.md has nothing this slice made wrong.
 
+### Milestone 5 slice 4: the LFO / CgbSound order (2026-10-25)
+
+Scope: in `m4a_engine_tick` without a sequencer, the frame's LFO steps,
+portamento and PWM run before the CgbSound passes, as MPlayMain runs
+before CgbSound in SoundMain -- for the plugin too (**decision, the
+user**: the ROM's order whatever the tempo source; the plugin's PSG
+vibrato / tremolo / PWM / glide reach the chip one frame earlier, PCM is
+unchanged, no flag).  Out of scope: the CgbSound entry (the fixed
+`cgbEntryCycles` on the MIDI path), per-tick command batching and
+ply_fine, the two-tick-frame interleave, the sequencer path (which runs
+its own MPlayMain in the frame hook before CgbSound already; byte-identical).
+Before any change the baselines reproduced (the slice 3b review's final
+gate on the same code): claim_check 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0, unit 1845/1845, blip 49112/0, songs 561/561;
+the four midi runs 0 field differences on 44 rows against
+`2026-10-25_midi-path-lfo-grid.json`, `-lfo-grid-latch.json`,
+`-aligned.json`, `-aligned-latch.json`.
+
+**Step 1, the reading.**  *SoundMain* (`m4a_1.s` 30-82): `MPlayMainHead`
+(each player's MPlayMain: the ticks with their LFO steps, the VOLCHG /
+PITCHG pass that sets the CGB `frequency` / `MO_PIT` and `MO_VOL`, and in
+the eventide sources MPlayProcessPortamento then MPlayProcessPulseWidthMod
+at its end, ccd2ad2e / 11f0b446), then `CgbSound`, then SoundMainRAM.
+So an LFO step of frame F reaches NRx3 / NRx4 (vibrato) or NRx2 and the
+retrigger (tremolo / autopan, MO_VOL) at frame F's CgbSound.  *The
+engine* (`sound_main`: `m4a_engine_tick`, then `m4a_sound_main_ram`):
+`m4a_engine_tick` runs the frame hook (a sequencer's whole MPlayMain),
+c15, the `!seq` PCM / CGB gate walks, the latched drain, the CgbSound
+passes, then `if (!seq)` the accumulator with `m4a_lfo_tick`, then
+`m4a_portamento_tick` and `m4a_pwm_tick` (both outside `!seq`).
+`m4a_lfo_tick` writes CGB state only (`cgb_set_pitch`: frequency, modify
+0x02; `cgb_chn_vol_set` and modify 0x01 for modT != 0), the PSG writes are
+CgbSound's; portamento's `apply_portamento_pitch` and PWM's dutyCycle /
+modify 0x04 likewise.  So on the `!seq` path the frame-F LFO value is
+written at frame F + 1's CgbSound: one frame late (slice 1 item 6).  PCM
+channels read `frequency` / volumes in SoundMainRAM, after the whole tick
+either way.  The sequencer's LFO is inside its hook (before CgbSound);
+with a sequencer the engine's portamento and PWM have nothing to do (the
+sequencer never sets `portamentoGliding` / `pwmPattern`), and they stay
+where they are on that path.
+
+*The change.*  The `!seq` block (accumulator, LFO, portamento, PWM) moves
+to after the latched drain and before the CgbSound passes; with a
+sequencer, portamento and PWM stay after CgbSound (byte-identical by
+construction).  Within the frame the order is then the ROM's: gate walk,
+commands (dispatched before the SoundMain or drained), LFO steps, the
+pass (folded into the steps), portamento, PWM, CgbSound, SoundMainRAM.
+For the measurement, `--psg-log` also works with `--midi` (the log opened
+before the boot, as the song path does; nothing else changes).
+
+*Predictions* (grid on and off alike, both latch forms the same):
+
+1. **Song input byte-identical**: claim_check 59 / 0 moved / 57/66 / 0
+   regressions / every row 0.0.
+2. **Every row without MOD byte-identical** on all four midi runs (33 on
+   the grid pair as in slice 3b; the same rows on the aligned pair), and
+   **the PCM LFO rows too** (lfo_vib, lfo_trem, lfo_pan, lfo_delay: PCM
+   reads after the tick); credits (no MOD in its window).
+3. **lfo_psg**: its MIDI-path write log carries the `--song` log's
+   registers, values and order frame for frame, offset only by the
+   CgbSound entry (slice 2a's -2667 on frame 3, about -464 on tick
+   frames); today the LFO's NRx3 / NRx4 / NRx2 writes come one frame late.
+   Null from +0.4 into the square rows' range or near it (sq1 -37.2 with
+   the same entry offset), but the tremolo half (MODT 1 from tick 72:
+   NRx2 rewrites with a retrigger on each step, phase reset at the entry
+   offset) keeps it shallower: -15 .. -37, not passing.
+4. **The songs**: the six with MOD in their windows change where a
+   modulated track is PSG; small changes, none passes, drift 0.0; their
+   first difference from `--song` stays (frame 3 / 13 / 20, the entry).
+5. **The aligned pair** (flag off) moves on the same rows (lfo_psg and
+   the songs): the plugin-wide order is not gated by the grid.  Both
+   pairs saved anew.
+
+**Step 2, the code.**  `plugin/m4a_engine.c`: `mplay_main_tail` (the
+tempo add with the held TEMPO, the LFO steps, `m4a_portamento_tick`,
+`m4a_pwm_tick`), called in `m4a_engine_tick` after the latched drain and
+before the CgbSound passes when there is no sequencer; with one,
+portamento and PWM stay after CgbSound.  `cmd/poryaaaa_render.c`:
+`--psg-log` on the `--midi` path (opened before the boot, closed at the
+end; the song path's code unchanged).  No flag; `m4a_plugin.c` unchanged
+(it gets the order through the engine).
+
+**Step 3, the unit test** (`test_lfo_cgbsound_order`, 6 assertions): a
+sq1 note with LFOS 40 / MOD 24 through the plugin's calls
+(`m4a_engine_set_tempo_bpm`, no grid), latched and not: vibrato (MODT 0)
+-- after each of 90 frames NR13 / NR14 hold the channel's frequency (72
+modM changes); tremolo (MODT 1) -- every frame whose LFO step changes
+modM has an NR12 write in that frame; a sequencer-driven vibrato song
+the same (unchanged order).  On the old engine (the test built against
+the previous `m4a_engine.c`) the four MIDI-path assertions fail (72 / 72
+/ 18 / 18 frames late), the sequencer one passes.  Unit **1851/1851**
+(1845 + 6).
+
+**Step 4, the measurement.**  Song-input gate: claim_check 59 diffed, 0
+moved, 57/66, 0 regressions, every row 0.0, 0 field differences on 66
+rows; blip 49112/0, songs 561/561; poryaaaa and poryaaaa-standalone
+build.  Midi: `baselines/2026-10-25_midi-path-lfo-order.json` / `.txt`,
+`-lfo-order-latch`, `-lfo-order-aligned`, `-lfo-order-aligned-latch`;
+grid 17/44 (lfo-grid 17/44), aligned 12/44 (12/44); latched =
+unlatched (fields and WAVs) on both pairs; `compare_reports.py` 0
+regressions over 1 dB on both (lfo-grid -> lfo-order, aligned ->
+lfo-order-aligned).  The rows that moved (every other row byte-identical
+to its slice 3b WAV, both pairs):
+
+| test | grid null / worst1s (lfo-grid) | aligned null / worst1s (aligned) | PSG writes vs `--song` (grid form) |
+|------|-------------------------------:|---------------------------------:|------------------------------------|
+| lfo_psg | -17.8 / -16.1 (+0.4 / +2.3), lag 0.0 (21.6) | -2.0 / 0.2 (0.2 / 1.0) | 265 of 265 matched, all on their frame (before: 182 matched, 92 one frame late) |
+| mus_littleroot | -14.7 / -10.4 (-10.3 / -6.3) | 2.2 / 4.0 (2.1 / 4.0) | 1181 of 1181, all on their frame (before: 984, 96 one late, more 3 .. 50 off) |
+| mus_weather_groudon | -2.8 / 0.3 (-1.1 / 2.9), lag -14.3, drift -0.6 | -1.5 / 3.1 (-2.4 / 2.1) | 2825 of 2825, all on their frame (before: 2692, 396 one late) |
+| mus_mt_chimney | -3.2 / -0.2 (-3.6 / -0.2) | 1.7 / 3.7 (1.7 / 3.7) | 4235 of 4235, all on their frame (before: 2929, 251 one late, more up to 233 off) |
+| mus_rg_vs_trainer | -5.0 / -0.2 (-5.1 / -0.4) | 2.3 / 3.9 (2.3 / 3.9) | 4228 of 4274; on their frame up to frame 905, then 30 one early and 8 six early (before: from 1031) |
+
+("PSG writes vs `--song`": `--psg-log` of the grid-form MIDI render and
+of the `--song` render, 20 s for the songs, 3 s for lfo_psg, matched as
+(register, value) sequences; the cycle offsets of the matched writes are
+the CgbSound entry's: lfo_psg -830 / -960 on its LFO frames, -3673 on
+frame 3, sq1 unchanged at -472 .. -2667.)
+
+**Which predictions held.**
+
+1. *Song input byte-identical*: held.
+2. *Rows without MOD and the PCM LFO rows byte-identical*: held (all four
+   PCM lfo rows, credits, every SE and PSG row without MOD, both pairs),
+   and also vs_wild and vs_trainer (byte-identical, so no PSG track of
+   theirs changes modM in the window).
+3. *lfo_psg's writes the `--song` log's, offset by the entry only*:
+   **held exactly** (265 / 265, every write on its frame); null -17.8 /
+   worst -16.1, inside -15 .. -37, not passing.  Its first difference
+   from its `--song` render moved from frame 3 to frame 5, 78766 samples
+   (102743 before).
+4. *The songs*: held in kind -- four change (the ones with a modulated
+   PSG track: littleroot, groudon, mt_chimney, rg_vs_trainer), none
+   passes, first differences from `--song` unchanged (frame 3 / 20).
+   On littleroot, groudon and mt_chimney the MIDI path's PSG writes are
+   now the `--song` render's register for register and frame for frame:
+   what is left on their PSG side is the CgbSound entry alone.
+   mt_chimney's null reads 0.4 dB shallower (-3.6 -> -3.2) with every
+   write on its frame and its differing samples against `--song` down
+   (913310 -> 908585): the entry's cycle offsets, not the order.
+   rg_vs_trainer departs on frame 905, the two-tick-frame MOD 0 -> 4 of
+   frame 903 (slice 3b, recorded).  Groudon's drift -0.6 and lag -14.3
+   are its usual uncorrelated readings.
+5. *The aligned pair moves on the same rows*: held (lfo_psg -2.0, the
+   songs' nulls within 0.9 dB; the aligned LFO grid is not the ROM's).
+
+**What is left on the PSG side of the midi path** (against `--song`):
+the CgbSound entry (`cgbEntryCycles` fixed at the one-track no-tick
+value, where the ROM's moves with MPlayMain's work: -464 .. -2667 cycles
+on the micro rows, -830 / -960 on lfo_psg's LFO frames, thousands on the
+songs: mt_chimney's commonest -8942 .. -13055), now the only difference in the PSG writes of every PSG micro
+row and of littleroot, groudon and mt_chimney in their windows; the
+two-tick-frame interleave on rg_vs_trainer (from frame 905) and vs_wild.
+The entry is the next lever (the order makes its measurement clean: the
+write logs differ in cycles only).
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

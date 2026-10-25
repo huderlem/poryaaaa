@@ -2061,6 +2061,30 @@ static void m4a_pwm_tick(M4AEngine *engine)
     engine->pwmActiveFlag = anyActive;
 }
 
+/* MPlayMain's tempo loop and its tail for the MIDI path (no sequencer):
+ * tempoC += tempoI each VBlank, one LFO step per 150 accumulated; then
+ * MPlayProcessPortamento and MPlayProcessPulseWidthMod, which MPlayMain
+ * calls after the VOLCHG / PITCHG pass (ccd2ad2e / 11f0b446). */
+static void mplay_main_tail(M4AEngine *engine)
+{
+    engine->tempoC += engine->tempoI;
+    /* A TEMPO held by m4a_engine_set_tick_tempo: ply_tempo runs inside
+     * the frame's ticks, after _081DD86C's add. */
+    if (engine->tempoINextSet) {
+        engine->tempoI = engine->tempoINext;
+        engine->tempoINextSet = false;
+    }
+    while (engine->tempoC >= 150) {
+        engine->tempoC -= 150;
+        m4a_lfo_tick(engine);
+    }
+
+    /* Portamento after the LFO so a glide overrides the pitch the LFO
+     * wrote this tick, matching MPlayMain's ordering on the GBA. */
+    m4a_portamento_tick(engine);
+    m4a_pwm_tick(engine);
+}
+
 /*
  * Engine tick - called at ~60Hz (VBlank rate)
  * Advances envelopes at VBlank rate and LFO at tempo rate,
@@ -2108,6 +2132,13 @@ void m4a_engine_tick(M4AEngine *engine)
     if (engine->eventQueueCount > 0)
         drain_events(engine);
 
+    /* The rest of MPlayMain without a sequencer: the frame's LFO steps
+     * (tempo loop, VOLCHG / PITCHG folded in), then portamento and PWM, all
+     * before CgbSound as in SoundMain, so a CGB pitch / volume / duty they
+     * set is written by this frame's CgbSound (plan, milestone 5 slice 4). */
+    if (!seq)
+        mplay_main_tail(engine);
+
     /* Process CGB channel envelopes (VBlank rate): CgbSound.  Its register
      * writes are placed on the CPU clock: the entry follows MPlayMain's work
      * (cgbEntryCycles) and each channel advances a cursor through the
@@ -2131,29 +2162,12 @@ void m4a_engine_tick(M4AEngine *engine)
         }
     }
 
-    /* Tempo accumulator drives LFO ticks, matching MPlayMain's tempo loop.
-     * tempoC += tempoI each VBlank; fires one LFO tick per 150 accumulated. */
-    if (!seq) {
-        engine->tempoC += engine->tempoI;
-        /* A TEMPO held by m4a_engine_set_tick_tempo: ply_tempo runs inside
-         * the frame's ticks, after _081DD86C's add. */
-        if (engine->tempoINextSet) {
-            engine->tempoI = engine->tempoINext;
-            engine->tempoINextSet = false;
-        }
-        while (engine->tempoC >= 150) {
-            engine->tempoC -= 150;
-            m4a_lfo_tick(engine);
-        }
+    /* With a sequencer, portamento and PWM keep their place after CgbSound
+     * (the sequencer never starts a glide or a PWM pattern: no-ops there). */
+    if (seq) {
+        m4a_portamento_tick(engine);
+        m4a_pwm_tick(engine);
     }
-
-    /* Advance portamento glides last so they override any pitch the LFO
-     * wrote this tick, matching MPlayMain's ordering on the GBA. */
-    m4a_portamento_tick(engine);
-
-    /* Advance pulse-width modulation duty cycles for square-wave channels,
-     * matching MPlayProcessPulseWidthMod's placement in MPlayMain. */
-    m4a_pwm_tick(engine);
     engine->inTick = false;
 }
 
