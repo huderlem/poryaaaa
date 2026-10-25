@@ -16,8 +16,9 @@ Steps (all idempotent, cached under --build-dir):
      port; with --input midi it plays the MIDI with the mid2agb options from
      the .cfg mapped to flags (-V -> --song-volume, -R -> --reverb,
      -G -> voicegroup); --midi-quantize adds --quantize (the MIDI event
-     latch), --midi-start rom adds --midi-start rom (MIDI time 0 at the
-     ROM's first song tick, frame 3's SoundMain).  A midi-input report (its "input" field says midi) is a
+     latch), and poryaaaa_render always gets --gba-start-delay (MIDI time 0
+     where the ROM starts the song, frame 3's SoundMain; --no-gba-start-delay
+     leaves it out).  A midi-input report (its "input" field says midi) is a
      separate baseline family, never compared against a song-input one.  A sound effect (songs.json "type": "se") is an
      m4aSongNumStart of its song id in the ROM and plays on the music player
      the song table names (sound/song_table.inc, the `ms` field: SE1 / SE2 /
@@ -338,8 +339,8 @@ def render_poryaaaa(args, t, overlay, out_dir):
             cmd.append("--extended-clocks")
         if args.midi_quantize:
             cmd.append("--quantize")         # the MIDI event latch (plan, milestone 5)
-        if args.midi_start != "zero":
-            cmd += ["--midi-start", args.midi_start]   # MIDI time 0 at the ROM's first tick (slice 2a)
+        if args.gba_start_delay:
+            cmd.append("--gba-start-delay")  # MIDI time 0 where the ROM starts the song (slice 2a)
     if t.get("player"):
         cmd += ["--player", t["player"]]
     if t.get("cry") is None and t.get("cry2") is not None:
@@ -375,8 +376,9 @@ def main():
                     help="what poryaaaa_render plays: the compiled .s from the ROM build (default) or the MIDI")
     ap.add_argument("--midi-quantize", action="store_true",
                     help="with --input midi: pass --quantize to poryaaaa_render (events latched to the VBlank tick)")
-    ap.add_argument("--midi-start", choices=("zero", "rom"), default="zero",
-                    help="with --input midi: poryaaaa_render --midi-start (rom: MIDI time 0 at frame 3's SoundMain)")
+    ap.add_argument("--no-gba-start-delay", dest="gba_start_delay", action="store_false",
+                    help="with --input midi: do not pass --gba-start-delay to poryaaaa_render "
+                         "(the first MIDI note at output time 0 instead of where the ROM starts the song)")
     ap.add_argument("--update-refs", action="store_true", help="store micro-test references in test/accuracy/refs/micro")
     ap.add_argument("--committed-refs", action="store_true", help="ignore mgba_render and compare against the committed micro-test references")
     ap.add_argument("--force", action="store_true", help="re-render references even if cached")
@@ -454,7 +456,7 @@ def main():
               "label": args.label, "input": args.input, "results": results}
     if args.input == "midi":
         report["midi_quantize"] = bool(args.midi_quantize)   # the midi baseline families
-        report["midi_start"] = args.midi_start
+        report["gba_start_delay"] = bool(args.gba_start_delay)
     path = args.json or os.path.join(args.build_dir, "report.json")
     with open(path, "w") as f:
         json.dump(report, f, indent=1)

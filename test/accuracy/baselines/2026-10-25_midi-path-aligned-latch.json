@@ -1116,5 +1116,5 @@
   }
  ],
  "midi_quantize": true,
- "midi_start": "rom"
+ "gba_start_delay": true
 }

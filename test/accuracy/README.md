@@ -39,7 +39,7 @@ cmake -B build -DACCURACY_POKEEMERALD_DIR=$HOME/pokeemerald -DACCURACY_MGBA_DIR=
 cmake --build build --target accuracy          # ROM + mgba_render + poryaaaa_render + comparison
 # or by hand:
 make -C test/accuracy/rom POKEEMERALD=$HOME/pokeemerald
-test/accuracy/tools/accuracy.py [--input song|midi] [--midi-quantize] [--midi-start zero|rom] [--tests micro|song|name,...] [--gate -40] [--update-refs] [-- extra poryaaaa_render args]
+test/accuracy/tools/accuracy.py [--input song|midi] [--midi-quantize] [--no-gba-start-delay] [--tests micro|song|name,...] [--gate -40] [--update-refs] [-- extra poryaaaa_render args]
 build/poryaaaa_song_tests build/accuracy/rom        # parser vs ROM, byte for byte
 ```
 
@@ -50,16 +50,18 @@ and output stage (milestones 2 and 3).  `--input midi` keeps the plugin's
 MIDI path measurable (milestone 5 compares the two); `--midi-quantize`
 adds `poryaaaa_render --quantize`, the MIDI event latch (every event
 applied in the next VBlank tick after the gate walk, in arrival order,
-where MPlayMain runs a track's commands); `--midi-start rom` adds
-`poryaaaa_render --midi-start rom`, which puts MIDI time 0 at the ROM's
-first song tick (frame 3's SoundMain, 883882 cycles; the renderer
-dispatches every event 2522 samples later at 48 kHz, the last sample a
-blip frame before that SoundMain), so tick n plays on the frame the
-compiled song's would at the exact MIDI tempo.  The default `zero` keeps
-MIDI time 0 at ROM cycle 0.  A midi-input report (`"input": "midi"`;
-`"midi_quantize"` true / false, absent in reports written before slice
-1; `"midi_start"` zero / rom, absent before slice 2a) is a separate
-baseline family,
+where MPlayMain runs a track's commands).  Every midi run passes
+`poryaaaa_render --gba-start-delay`, which starts the MIDI where the game
+starts a song: MIDI time 0 at frame 3's SoundMain (883882 cycles; the
+renderer dispatches every event 2522 samples later at 48 kHz, the last
+sample a blip frame before that SoundMain), so tick n plays on the frame
+the compiled song's would at the exact MIDI tempo.  The renderer's own
+default is off (the first note at output time 0, which is what a user
+rendering a MIDI wants); `--no-gba-start-delay` runs the harness that way.
+A midi-input report (`"input": "midi"`; `"midi_quantize"` true / false,
+absent in reports written before slice 1; `"gba_start_delay"` true /
+false, absent in the reports written before slice 2a, which all ran
+without it) is a separate baseline family,
 `baselines/<date>_midi-path-*.json`; it is never compared against a
 song-input baseline.
 

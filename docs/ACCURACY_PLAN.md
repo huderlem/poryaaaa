@@ -5169,6 +5169,14 @@ automation reaches the in-order overflow, no longer a correctness issue).
 
 ### Milestone 5 slice 2a: the MIDI start alignment (2026-10-25)
 
+*Naming, after the decision at the end of this section:* the flag below
+was `poryaaaa_render --midi-start zero|rom` / `accuracy.py --midi-start`
+with a report field `"midi_start"`.  It is now `poryaaaa_render
+--gba-start-delay` (off by default), `accuracy.py` passes it on every
+`--input midi` run (`--no-gba-start-delay` to leave it out), and the field
+is `"gba_start_delay"` (true / false).  "rom" in the text below means that
+flag on, "zero" off.
+
 Scope, small on purpose: the start alignment of `poryaaaa_render`'s
 `--midi` path alone, behind a flag (`--midi-start rom|zero`, default
 `zero`, so today's output stays byte-identical).  Plugin, GUI, config and
@@ -5645,6 +5653,27 @@ baselines):
   the usage text, as every other option does.
 - The step-1 prediction text (the LFO direction, bend's range) is kept as
   written; the results say where it was wrong.
+
+**Decision (2026-10-25, the user).**  The renderer's default stays off.
+A user rendering a MIDI gets nothing from 52.5 ms of leading silence, and
+"rom" read as if the renderer loaded a ROM.  So:
+
+- The flag is renamed `--gba-start-delay`: a plain switch, the same
+  offset.
+- The harness passes it on every `--input midi` run, where the alignment
+  is the point; `--no-gba-start-delay` opts out.
+- The report field is `"gba_start_delay"`.  In the two aligned
+  baselines' headers, `"midi_start": "rom"` became `"gba_start_delay":
+  true`; their results are untouched.
+- `test_midi_start_origin` is now `test_gba_start_delay_origin`.
+
+Gate after the rename: `claim_check.sh` 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0, unit 1613/1613, blip 49112/0, songs 561/561.
+The runner's new default equals `2026-10-25_midi-path-aligned.json` and
+with `--midi-quantize` `-aligned-latch.json`; `--no-gba-start-delay`
+equals `-start.json` and with `--midi-quantize` `-latch.json` (0 field
+differences on 44 rows each).  The aligned pair is now the midi baseline
+the next slice compares against.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

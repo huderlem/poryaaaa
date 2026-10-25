@@ -5843,7 +5843,7 @@ static void latch_hook(M4AEngine *e, void *user)
 }
 
 /*
- * poryaaaa_render --midi-start rom puts MIDI time 0 at output sample
+ * poryaaaa_render --gba-start-delay puts MIDI time 0 at output sample
  * O = floor((883882 - GBA_BLIP_FRAME) * rate / 2^24): the last sample a blip
  * frame before frame 3's SoundMain, the ROM's first song tick.  That rests on
  * the dispatch granularity: after the kept boot and O samples the machine
@@ -5851,9 +5851,9 @@ static void latch_hook(M4AEngine *e, void *user)
  * dispatched there is applied by the first tick, latched or not (plan,
  * milestone 5 slice 2a).
  */
-static void test_midi_start_origin(void)
+static void test_gba_start_delay_origin(void)
 {
-    printf("Testing the --midi-start rom origin (dispatch before frame 3's SoundMain)...\n");
+    printf("Testing the --gba-start-delay origin (dispatch before frame 3's SoundMain)...\n");
 
     const int64_t soundMain2 = 124773 + 1 * GBA_CYCLES_PER_FRAME + 160 * GBA_CYCLES_PER_LINE + M4A_CYC_SOUNDMAIN_ENTRY;
     const int64_t soundMain3 = soundMain2 + GBA_CYCLES_PER_FRAME;
@@ -6199,7 +6199,7 @@ int main(void)
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();
     test_event_latch();
-    test_midi_start_origin();
+    test_gba_start_delay_origin();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

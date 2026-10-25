@@ -782,11 +782,11 @@ static void print_usage(const char *prog)
         "                              runs a track's commands, in arrival order; a note shorter\n"
         "                              than a frame plays one tick).  Default: events apply at\n"
         "                              their sample position.  (--song / --cry already run on the tick.)\n"
-        "  --midi-start <zero|rom>     --midi only: where MIDI time 0 sits.  zero (default): output\n"
-        "                              sample 0, the ROM's reset.  rom: the ROM's first song tick,\n"
-        "                              frame 3's SoundMain (52.68 ms), so tick n plays on the frame\n"
-        "                              the compiled song's tick n would at the exact MIDI tempo\n"
-        "                              (the ROM's tempo grid differs: plan, milestone 5 slice 2a)\n"
+        "  --gba-start-delay           --midi only: start the MIDI where the game would, after the\n"
+        "                              engine's start-up frames (frame 3's SoundMain, about 52.5 ms\n"
+        "                              of leading silence), as --song renders already do.  For\n"
+        "                              comparing with an emulator recording; default: the first\n"
+        "                              note plays at the start of the output\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
         "  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates\n"
@@ -1285,7 +1285,7 @@ static int cmp_render_event_pos(const void *a, const void *b)
 }
 
 /*
- * --midi-start rom: the output sample MIDI time 0 is dispatched at.  The
+ * --gba-start-delay: the output sample MIDI time 0 is dispatched at.  The
  * ROM's first song tick is frame 3's SoundMain (MPlayStart runs on frame 2):
  * 124773 + 2 x 280896 + 160 x 1232 + 197 = 883882 cycles, m4a_engine.c's
  * FRAME1_START and SOUNDMAIN_FRAME_OFFSET.  An event dispatched after s
@@ -1298,7 +1298,7 @@ static int cmp_render_event_pos(const void *a, const void *b)
 #define ROM_FIRST_TICK_CYCLE (124773 + 2 * GBA_CYCLES_PER_FRAME \
                               + 160 * GBA_CYCLES_PER_LINE + M4A_CYC_SOUNDMAIN_ENTRY)
 
-static uint64_t midi_rom_start_samples(double sampleRate)
+static uint64_t gba_start_delay_samples(double sampleRate)
 {
     return (uint64_t)((double)(ROM_FIRST_TICK_CYCLE - GBA_BLIP_FRAME) * sampleRate
                       / (double)GBA_CPU_HZ);
@@ -1389,7 +1389,7 @@ int main(int argc, char *argv[])
     bool        portamento    = false;
     bool        pwm           = false;
     bool        quantize      = false;  /* --quantize: the MIDI event latch */
-    bool        midiStartRom  = false;  /* --midi-start rom: MIDI time 0 at the first song tick */
+    bool        gbaStartDelay = false;  /* --gba-start-delay: MIDI time 0 at the first song tick */
     int         maxChannels   = 5;
     int         sampleRateHz  = 44100;
     int         pcmFreqMode   = M4A_PCM_FREQ_MODE_DEFAULT; /* SOUND_MODE_FREQ_13379 */
@@ -1480,16 +1480,8 @@ int main(int argc, char *argv[])
             respectBaseMidiKey = true;
         } else if (strcmp(argv[i], "--quantize") == 0) {
             quantize = true;
-        } else if (strcmp(argv[i], "--midi-start") == 0 && i + 1 < argc) {
-            const char *v = argv[++i];
-            if (strcmp(v, "rom") == 0) {
-                midiStartRom = true;
-            } else if (strcmp(v, "zero") == 0) {
-                midiStartRom = false;
-            } else {
-                fprintf(stderr, "--midi-start takes zero or rom, not %s\n", v);
-                return 1;
-            }
+        } else if (strcmp(argv[i], "--gba-start-delay") == 0) {
+            gbaStartDelay = true;
         } else if (strcmp(argv[i], "--portamento") == 0) {
             portamento = true;
         } else if (strcmp(argv[i], "--pwm") == 0) {
@@ -1580,8 +1572,8 @@ int main(int argc, char *argv[])
     if (songPath || cryId >= 0) {
         if (quantize)
             fprintf(stderr, "Note: --quantize only applies to --midi (the sequencer already runs on the tick)\n");
-        if (midiStartRom)
-            fprintf(stderr, "Note: --midi-start only applies to --midi (the sequencer starts on the ROM's frame)\n");
+        if (gbaStartDelay)
+            fprintf(stderr, "Note: --gba-start-delay only applies to --midi (--song / --cry already start on the game's frame)\n");
         if (songVolumeSet || reverbSet)
             fprintf(stderr, "Note: --song-volume / --reverb are ignored with --song / --cry "
                             "(the song data carries its own volume and reverb)\n");
@@ -1902,13 +1894,13 @@ int main(int argc, char *argv[])
         renderEvtCount = events->count;
     }
 
-    /* --midi-start rom: every event is dispatched O samples later.  The
+    /* --gba-start-delay: every event is dispatched O samples later.  The
      * render length and the fadeout move with it where they are MIDI time
      * (the tail after the last event, the loop-count fade); an explicit
      * --total-duration-seconds is output time and stays.  The loop
      * expansion above works in MIDI time, unchanged. */
-    uint64_t midiOrigin = midiStartRom ? midi_rom_start_samples(sampleRate) : 0;
-    if (midiStartRom) {
+    uint64_t midiOrigin = gbaStartDelay ? gba_start_delay_samples(sampleRate) : 0;
+    if (gbaStartDelay) {
         if (totalDurSeconds < 0.0) {
             totalSamples += midiOrigin;
             if (fadeStartSample != UINT64_MAX) {
@@ -1917,7 +1909,7 @@ int main(int argc, char *argv[])
                        (double)fadeStartSample / sampleRate);
             }
         }
-        printf("  MIDI time 0 at output sample %llu (--midi-start rom)\n",
+        printf("  MIDI time 0 at output sample %llu (--gba-start-delay)\n",
                (unsigned long long)midiOrigin);
     }
 
