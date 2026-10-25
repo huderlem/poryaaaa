@@ -114,7 +114,7 @@ Every symbol's address is in the map, and the ROM is the file mgba plays:
 ```python
 import struct, re
 rom = open('build/accuracy/rom/accuracy_test.gba', 'rb').read()
-mp = open('test/accuracy/rom/build/accuracy_test.map').read()
+mp = open('build/accuracy/rom/accuracy_test.map').read()
 addr = int(re.search(r'0x([0-9a-f]{16})\s+DirectSoundWaveData_sc88pro_flute\b', mp).group(1), 16) - 0x08000000
 typ, status, freq, loopStart, size = struct.unpack_from('<HHIII', rom, addr)
 data = addr + 16
@@ -150,27 +150,34 @@ gcc -O1 -o build/probe/mgba_probe test/accuracy/ref/mgba_probe.c \
 breaks on the local labels inside MPlayMain / ply_note (`_081DD*`) and on
 the `CgbSound_*` addresses appended for the compiled CgbSound:
 ```sh
-arm-none-eabi-nm test/accuracy/rom/build/accuracy_test.elf > build/probe/syms.nm
+arm-none-eabi-nm build/accuracy/rom/accuracy_test.elf > build/probe/syms.nm
 cat >> build/probe/syms.nm <<'EOF2'
-08001020 t CgbSound_loop
-08001036 t CgbSound_active
-080010b0 t CgbSound_step2
-080010c8 t CgbSound_start
-080011a6 t CgbSound_nostart
-080011ca t CgbSound_oscoff
-08001218 t CgbSound_step
-0800122c t CgbSound_modvol
-0800130c t CgbSound_stepdone
-0800131e t CgbSound_envdone
-08001328 t CgbSound_pit
-080013a0 t CgbSound_vol
-0800141c t CgbSound_done
-08001420 t CgbSound_next
+08001050 t CgbSound_loop
+08001066 t CgbSound_active
+080010e0 t CgbSound_step2
+080010f8 t CgbSound_start
+080011d6 t CgbSound_nostart
+080011fa t CgbSound_oscoff
+08001248 t CgbSound_step
+0800125c t CgbSound_modvol
+0800133c t CgbSound_stepdone
+0800134e t CgbSound_envdone
+08001358 t CgbSound_pit
+080013d0 t CgbSound_vol
+0800144c t CgbSound_done
+08001450 t CgbSound_next
 EOF2
 ```
-(addresses of the 2026-10-24 ROM; re-derive from `arm-none-eabi-objdump -d`
-of CgbSound if m4a.c or the toolchain changes -- the header of mgba_probe.c
-names each one).  The map still works for the function entries alone.
+(addresses of the 2026-10-24 ROM with the cry length / release parameters,
+CgbSound at 0x8001020: the slice 4 StartCry grew main.c by 0x30 bytes and
+every ROM symbol after it moved by +0x30 with the bodies unchanged -- the
+earlier ROM had CgbSound at 0x8000ff0 and each label 0x30 lower.
+Re-derive from `arm-none-eabi-objdump -d` of CgbSound if m4a.c, main.c or
+the toolchain changes -- the header of mgba_probe.c names each one.  The
+ELF and map the CMake target writes are `build/accuracy/rom/accuracy_test.elf`
+/ `.map`; `test/accuracy/rom/build/` is only a stale hand build if it
+exists, do not read symbols from it.)  The map still works for the function
+entries alone.
 
 **Run it**: `build/probe/mgba_probe build/accuracy/rom/accuracy_test.gba
 build/probe/<name>.txt <frames> <type> <id> build/probe/syms.nm`.

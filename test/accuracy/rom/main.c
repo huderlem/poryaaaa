@@ -20,7 +20,9 @@ struct AccParams
     s16 pitch;
     s8 pan;
     u8 startFrame;
-    u8 reserved[12];
+    u16 length;        /* cry: SetPokemonCryLength (PlayCryInternal's 140) */
+    u8 release;        /* cry: SetPokemonCryRelease (PlayCryInternal's 0) */
+    u8 reserved[9];
 };
 
 enum
@@ -51,15 +53,17 @@ void VCountIntr(void)
     INTR_CHECK |= INTR_FLAG_VCOUNT;
 }
 
-/* PlayCryInternal with CRY_MODE_NORMAL, indexing the cry table directly. */
-static void StartCry(u16 index, s8 pan, u8 volume, s16 pitch)
+/* PlayCryInternal with the parameter block's volume / pan / pitch / length /
+ * release (CRY_MODE_NORMAL's at the block's defaults: 120, 0, 15360, 140, 0),
+ * indexing the cry table directly.  Progress and chorus stay 0. */
+static void StartCry(u16 index, s8 pan, u8 volume, s16 pitch, u16 length, u8 release)
 {
     SetPokemonCryVolume(volume);
     SetPokemonCryPanpot(pan);
     SetPokemonCryPitch(pitch);
-    SetPokemonCryLength(140);
+    SetPokemonCryLength(length);
     SetPokemonCryProgress(0);
-    SetPokemonCryRelease(0);
+    SetPokemonCryRelease(release);
     SetPokemonCryChorus(0);
     SetPokemonCryPriority(CRY_PRIORITY_NORMAL);
     SetPokemonCryTone(&gCryTable[index]);
@@ -73,7 +77,8 @@ static void StartTest(void)
         m4aSongNumStart(gAccParams.id);
         break;
     case ACC_TYPE_CRY:
-        StartCry(gAccParams.id, gAccParams.pan, gAccParams.volume, gAccParams.pitch);
+        StartCry(gAccParams.id, gAccParams.pan, gAccParams.volume, gAccParams.pitch,
+                 gAccParams.length, gAccParams.release);
         break;
     case ACC_TYPE_MICRO:
         if (gAccParams.id < gAccMicroSongCount)

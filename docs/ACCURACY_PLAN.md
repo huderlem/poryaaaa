@@ -1013,6 +1013,112 @@ with the port's existing constants: the harness needed no new number.
 The release-0 cut at the EOT (the channel's SF_STOP on frame 143, gone on
 144) is the first audible one in the corpus: no sample run differs there.
 
+### SoundMain timing probe, step 7: cry length / release (2026-10-24, milestone 4 slice 4)
+
+**The ROM change.**  `struct AccParams` (test/accuracy/rom/main.c, the
+`PORYACC1` block in crt0.s) gains `u16 length` and `u8 release` from its
+reserved bytes (offsets 16..18 of the block; the earlier fields keep their
+offsets, the block stays 28 bytes before the code that follows it -- the
+"32" in the patchers is only their bounds check), defaulting to 140 / 0 in
+the ROM's data so a block patched by an old renderer plays the old values;
+`StartCry` passes them to `SetPokemonCryLength` / `SetPokemonCryRelease`
+in `PlayCryInternal`'s order.  `mgba_render --length / --release` and
+`mgba_probe`'s twelfth / thirteenth arguments patch them.  The longer
+`StartCry` moved every ROM symbol after main.o by **+0x30** (`CgbSound`
+0x8000ff0 -> 0x8001020, `MPlayMain` 0x80025b4 -> 0x80025e4, `gCryTable`
+0x0802af7c -> 0x0802afac; IWRAM is unchanged, `gPokemonCrySongs` 0x03001f20):
+the compiled `CgbSound` is byte-identical at the new address (537
+instructions compared address-normalised; the one differing word is a
+literal-pool ROM pointer, +0x30), so the `CgbSound_*` labels in the skill
+and the probe header are the old ones +0x30 (loop 0x8001050 .. next
+0x8001450).  The references' directory moved to
+`build/accuracy/refs/e6551cf3bb92-mGBA_0.10.5+m4a_blip/`.  **Neutrality**:
+the full default harness and `claim_check.sh` against
+`2026-10-24_cry-variants.json` with the new ROM and the unchanged engine
+give every one of the 51 rows identical in every field of report.json
+(null, worst, gm, lag, RMS, peak, drift; 32 rows still -inf), 46/51, 44
+diffed with 0 moved writes, unit 1221/1221, blip 0, songs 561/561; the
+cry_jynx_faint probe re-run under the new ROM gives a `.frames` file
+identical to the old ROM's.  (The ELF and map the CMake target writes are
+`build/accuracy/rom/accuracy_test.elf` / `.map`; `test/accuracy/rom/build/`
+was a stale hand build from the morning whose `nm` showed no change --
+the skill now names the CMake paths.)
+
+**The probe's channel-death breakpoint.**  No MPlayMain tick can show
+when a releasing channel dies once `ply_fine` has unlinked it (the track
+is gone, so there is no 1689-type unlink frame), so the probe now also
+breaks on m4a_1.s `_081DCFB0`, SoundMainRAM's `statusFlags = 0` store (a
+release or pseudo-echo tail reaching 0, or SF_START with SF_STOP) -- at
+its **IWRAM** address: SoundMainRAM runs from `SoundMainRAM_Buffer`
+(0x03000770), so the ROM label (0x08001d70) never executes and the probe
+relocates it to 0x03000878.  A sample that runs out of data ends through
+the count path instead and does not hit it (cry_pidgey, cry_pidgey_roar2).
+
+Runs: three cries with `PlayCryInternal`'s whole modes (pitch, length and
+release together; chorus stays 0 where the mode sets it -- none of these
+three does), probe type 1 for 180 frames with `gPokemonCryMusicPlayers`:
+`cry_jynx_faint_full` (123; CRY_MODE_FAINT complete: pitch 14440, length
+140, release 200), `cry_wailord_doubles` (381; CRY_MODE_DOUBLES: pitch
+15360, length 20, release 225), `cry_pidgey_roar2` (15; CRY_MODE_ROAR_2:
+pitch 15616, length 60, release 225).  Cycles from VBlank line 160, as
+before.
+
+**The template bytes**, worked by hand before the first render
+(`SetPokemonCryPitch` as step 6; `SetPokemonCryLength` the xWAIT u16 at
+0x2E..0x2F little-endian; `SetPokemonCryRelease` the xRELE byte at 0x26)
+and confirmed by the probe's track key after the EOT (`_081DD938`'s r3:
+0x38 / 0x3C / 0x3D):
+
+| entry | pitch | b | TIE key (0x2A) | TUNE (0x12) | TUNE2 (0x19) | xWAIT (0x2E,0x2F) | xRELE (0x26) |
+|---|---|---|---|---|---|---|---|
+| cry_jynx_faint_full | 14440 | 0x38E8 | 0x38 (56) | 0x74 | 0x04 | 0x8C 0x00 (140) | 0xC8 (200) |
+| cry_wailord_doubles | 15360 | 0x3C80 | 0x3C (60) | 0x40 | 0x50 | 0x14 0x00 (20) | 0xE1 (225) |
+| cry_pidgey_roar2 | 15616 | 0x3D80 | 0x3D (61) | 0x40 | 0x50 | 0x3C 0x00 (60) | 0xE1 (225) |
+
+PAN 0x40 and VOL 0x78 (the defaults) on all three.  Cry_Pidgey's 1902
+samples at key 61 (10512 * 2^(1/12) = 11137 Hz) run 0.171 s, so the
+sample is long gone at tick 60 and the EOT finds an empty chain, as the
+task's (c) requires; Cry_Wailord's 20846 samples (1.98 s) are cut at tick
+20; Cry_Jynx's 23524 at pitch 14440 (2.75 s) are cut at tick 140 as in
+step 6.
+
+**The sequencer frames** are the known ones: start tick 4077 on frame 3;
+xwait ticks 1596 with the channel alive and 1576 after it dies (the
+unlink tick 1689 on cry_pidgey_roar2's frame 14, as cry_pidgey's); the
+EOT frame **1928** on cry_jynx_faint_full's 143 and cry_wailord_doubles'
+23 (`ply_endtie` -> `_081DD938` **82**, the chained channel holding the
+key, then `ply_fine` -> `_loop` 10 -> `_ok` 14 -> `RealClearChain` 12 ->
+`_done` 50 -> `_081DD994` 28, the live channel unlinked), **1810** on
+cry_pidgey_roar2's 63 (`ply_endtie` -> `_081DD938` **54**, empty chain;
+`ply_fine` -> `_done` 16); 1192 on the frame after, 1007 from then on.
+The xRELE byte changes nothing here: `ply_xrele` costs the same for any
+operand and the release value only reaches SoundMainRAM.  `ply_fine`
+with a releasing channel takes the same path as with the release-0
+channel of step 6 (SF_STOP already set by `ply_endtie`; `ply_fine_ok`
+clears the channel's track pointer, flg F0 = ON | STOP | ... as logged).
+
+**The channel's death** (the `_081DCFB0` stamps, raw `fN` = frame N-1):
+cry_jynx_faint_full **frame 161**, cry_wailord_doubles **frame 53**,
+cry_jynx_faint (release 0, re-probed) frame 143.  This is the GBA's
+release arithmetic exactly: `envelopeVolume = envelopeVolume * release
+>> 8` once per SoundMainRAM pass starting on the EOT frame itself
+(MPlayMain's `ply_endtie` sets SF_STOP before that frame's SoundMainRAM),
+and `_081DCFB6`'s `cmp r5, pseudoEchoVolume; bhi` with echo 0 stops the
+channel on the pass whose product is 0 (that pass mixes nothing).  From
+255 (attack 255 reaches it on the first pass; decay 0 / sustain 255 hold
+it): release 200 gives 199, 155, 121, 94, 73, 57, 44, 34, 26, 20, 15,
+11, 8, 6, 4, 3, 2, 1, 0 -- 18 mixed release passes on frames 143..160
+and the stop on 161; release 225 gives 224, 196, 172, 151, 132, 116,
+101, 88, 77, 67, 58, 50, 43, 37, 32, 28, 24, 21, 18, 15, 13, 11, 9, 7,
+6, 5, 4, 3, 2, 1, 0 -- 30 mixed passes on frames 23..52 and the stop on
+53.  (With masterVolume 12 the per-channel volume is `(13 * env) >> 4`,
+0 at env 1, so the last pass that can move the output is env 2, one frame
+before the stop.)  `_SKIP` 18 stays est.: no run here puts two channels
+on the cry track either.  The scheduler-lateness floor of each run
+(`.events`): cry_jynx_faint_full 4 timer-0 slot crossings (first at
+cycle 28146944), cry_wailord_doubles 6 (first 3428099),
+cry_pidgey_roar2 1 (2304512).
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`

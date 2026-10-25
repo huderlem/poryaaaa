@@ -19,7 +19,8 @@
  *
  *   mgba_render <rom.gba> <out.wav> --frames N [--rate 48000]
  *               [--type song|cry|micro|none] [--id N] [--pitch N] [--pan N]
- *               [--volume N] [--start-frame N] [--native-resampler]
+ *               [--volume N] [--length N] [--release N] [--start-frame N]
+ *               [--native-resampler]
  */
 #include <mgba/core/blip_buf.h>
 #include <mgba/core/config.h>
@@ -47,6 +48,8 @@ struct Params {
 	int pitch;
 	int pan;
 	int volume;
+	int length;   /* cry: SetPokemonCryLength's u16 (PlayCryInternal's 140) */
+	int release;  /* cry: SetPokemonCryRelease's u8 (PlayCryInternal's 0) */
 	int startFrame;
 };
 
@@ -98,7 +101,8 @@ static void captureAudioFrame(struct mAVStream* stream, int16_t left, int16_t ri
 static void usage(const char* prog) {
 	fprintf(stderr,
 	        "Usage: %s <rom.gba> <out.wav> --frames N [--rate HZ] [--type song|cry|micro|none]\n"
-	        "          [--id N] [--pitch N] [--pan N] [--volume N] [--start-frame N]\n"
+	        "          [--id N] [--pitch N] [--pan N] [--volume N] [--length N] [--release N]\n"
+	        "          [--start-frame N]\n"
 	        "          [--native-resampler]\n",
 	        prog);
 }
@@ -135,6 +139,9 @@ static int patchParams(uint8_t* rom, size_t size, const struct Params* p) {
 			b[5] = (uint8_t) ((p->pitch >> 8) & 0xFF);
 			b[6] = (uint8_t) (int8_t) p->pan;
 			b[7] = (uint8_t) p->startFrame;
+			b[8] = (uint8_t) (p->length & 0xFF);
+			b[9] = (uint8_t) ((p->length >> 8) & 0xFF);
+			b[10] = (uint8_t) p->release;
 			return 1;
 		}
 	}
@@ -192,7 +199,7 @@ int main(int argc, char** argv) {
 	const char* outPath = argv[2];
 	long frames = -1;
 	int rate = 48000;
-	struct Params p = { TYPE_NONE, 0, 15360, 0, 120, 1 };
+	struct Params p = { TYPE_NONE, 0, 15360, 0, 120, 140, 0, 1 };
 
 	for (i = 3; i < argc; ++i) {
 		const char* a = argv[i];
@@ -218,6 +225,10 @@ int main(int argc, char** argv) {
 			p.pan = atoi(v); ++i;
 		} else if (!strcmp(a, "--volume") && v) {
 			p.volume = atoi(v); ++i;
+		} else if (!strcmp(a, "--length") && v) {
+			p.length = atoi(v); ++i;
+		} else if (!strcmp(a, "--release") && v) {
+			p.release = atoi(v); ++i;
 		} else if (!strcmp(a, "--start-frame") && v) {
 			p.startFrame = atoi(v); ++i;
 		} else {

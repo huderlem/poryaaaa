@@ -49,7 +49,7 @@ and field values against `m4a_internal.h`, the sample converter
 (`tools/wav2agb/converter.cpp`), the voice macros (`asm/macros/music_voice.inc`)
 and the ROM's placement (`sound/direct_sound_data.inc`), with the test ROM
 and map available for byte checks (`build/accuracy/rom/accuracy_test.gba`,
-`test/accuracy/rom/build/accuracy_test.map`); any option or enum against
+`build/accuracy/rom/accuracy_test.map`); any option or enum against
 its m4a.c origin; plugin state save/load byte order and old-save
 compatibility (`plugin/m4a_plugin.c` state_save / state_load), config keys,
 GUI bounds, CLI messages; and a grep for stale uses of removed fields
