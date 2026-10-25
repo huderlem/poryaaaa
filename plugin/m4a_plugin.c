@@ -363,19 +363,13 @@ static void process_clap_note_event(M4APluginData *data, const clap_event_note_t
 
 /* ---- Audio processing ---- */
 
-static clap_process_status plugin_process(const clap_plugin_t *plugin,
-                                           const clap_process_t *process)
+/* Apply a transport state: the block's (process->transport) or a
+ * sample-accurate CLAP_EVENT_TRANSPORT update inside it. */
+static void apply_transport(M4APluginData *data, const clap_event_transport_t *transport)
 {
-    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
-
-    if (!data->activated)
-        return CLAP_PROCESS_ERROR;
-
     /* Read tempo from host transport (MIDI meta event tempo) */
-    if (process->transport
-        && (process->transport->flags & CLAP_TRANSPORT_HAS_TEMPO)) {
-        m4a_engine_set_tempo_bpm(&data->engine, process->transport->tempo);
-    }
+    if (transport->flags & CLAP_TRANSPORT_HAS_TEMPO)
+        m4a_engine_set_tempo_bpm(&data->engine, transport->tempo);
 
     /* The MIDI event latch follows the transport: events start on the next
      * VBlank tick while it plays (an honest preview of recorded parts) and
@@ -390,13 +384,25 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
      * first note after the playhead moves doesn't glide from a note that was
      * sounding when playback paused.  (Hosts that send All Notes Off / All
      * Sound Off on stop are covered by those handlers too.) */
-    if (process->transport) {
-        bool playing = (process->transport->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
-        m4a_engine_set_quantize_events(&data->engine, playing);
-        if (data->transportWasPlaying && !playing)
-            m4a_engine_reset_portamento(&data->engine);
-        data->transportWasPlaying = playing;
-    }
+    bool playing = (transport->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
+    m4a_engine_set_quantize_events(&data->engine, playing);
+    if (data->transportWasPlaying && !playing)
+        m4a_engine_reset_portamento(&data->engine);
+    data->transportWasPlaying = playing;
+}
+
+static clap_process_status plugin_process(const clap_plugin_t *plugin,
+                                           const clap_process_t *process)
+{
+    M4APluginData *data = (M4APluginData *)plugin->plugin_data;
+
+    if (!data->activated)
+        return CLAP_PROCESS_ERROR;
+
+    /* The transport at the block's sample 0; later changes arrive as
+     * CLAP_EVENT_TRANSPORT events in the loop below. */
+    if (process->transport)
+        apply_transport(data, process->transport);
 
     const uint32_t numFrames = process->frames_count;
     const uint32_t numEvents = process->in_events->size(process->in_events);
@@ -422,6 +428,9 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
                 case CLAP_EVENT_NOTE_OFF:
                 case CLAP_EVENT_NOTE_CHOKE:
                     process_clap_note_event(data, (const clap_event_note_t *)hdr);
+                    break;
+                case CLAP_EVENT_TRANSPORT:
+                    apply_transport(data, (const clap_event_transport_t *)hdr);
                     break;
                 case CLAP_EVENT_MIDI:
                 {

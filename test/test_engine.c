@@ -6184,7 +6184,7 @@ static void test_note_choke(void)
     ASSERT(c->status & CHN_ON, "choke off: the same key on another track untouched");
     m4a_engine_note_off(&engine, 0, 64);
     ASSERT(b->status & CHN_STOP, "choke off: note_off still releases (STOP, not a cut)");
-    ASSERT(b->status & CHN_ON, "choke off: the released channel still sounds");
+    b->status = CHN_STOP;              /* the mixer's release state (STOP, envelope bits 0) */
     m4a_engine_note_choke(&engine, 0, 64);
     ASSERT_EQ(b->status, 0, "choke off: a releasing channel is cut too");
     m4a_engine_note_choke(&engine, 1, 60);
@@ -6251,8 +6251,13 @@ static void test_note_choke(void)
            "choke key -1: track 1's note-on kept first");
     ASSERT_EQ(engine.eventQueue[1].kind, M4A_EV_CC, "choke key -1: the CC kept");
     m4a_engine_note_on(&engine, 0, 48, 127);           /* queued */
+    M4APCMChannel *k49 = &engine.pcmChannels[10];      /* another key sounding on track 1 */
+    k49->status = CHN_ENV_SUSTAIN;
+    k49->trackIndex = 1;
+    k49->midiKey = 49;
     m4a_engine_note_choke(&engine, -1, 48);
     ASSERT(find_pcm_note(&engine, 1, 48) == NULL, "choke track -1: key 48 on track 1 cut");
+    ASSERT(find_pcm_note(&engine, 1, 49) == k49, "choke track -1: key 49 on track 1 untouched");
     ASSERT_EQ(engine.eventQueueCount, 2, "choke track -1: key 48's queued note-on removed");
     m4a_engine_note_choke(&engine, -1, -1);
     ASSERT_EQ(engine.eventQueueCount, 1, "choke -1 / -1: every queued note removed, the CC kept");
@@ -6260,15 +6265,20 @@ static void test_note_choke(void)
     int on = 0;
     for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
         on += (engine.pcmChannels[i].status & CHN_ON) != 0;
-    ASSERT_EQ(on, 0, "choke -1 / -1: nothing sounding");
+    ASSERT_EQ(on, 0, "choke -1 / -1: nothing sounding (key 49 on track 1 cut too)");
 
     /* --- out-of-range arguments are ignored --- */
     m4a_engine_note_on(&engine, 0, 60, 127);           /* queued */
+    M4APCMChannel *k60 = &engine.pcmChannels[10];      /* key 60 sounding on track 0 */
+    k60->status = CHN_ENV_SUSTAIN;
+    k60->trackIndex = 0;
+    k60->midiKey = 60;
     m4a_engine_note_choke(&engine, MAX_TRACKS, 60);
     m4a_engine_note_choke(&engine, 0, 128);
     ASSERT_EQ(engine.eventQueueCount, 2, "choke: track 16 / key 128 leave the queue alone");
+    ASSERT_EQ(k60->status, CHN_ENV_SUSTAIN, "choke: track 16 / key 128 cut nothing");
+    k60->status = 0;
     m4a_engine_flush_events(&engine);
-    ASSERT(find_pcm_note(&engine, 0, 60) != NULL, "choke: track 16 / key 128 cut nothing");
     m4a_engine_set_quantize_events(&engine, false);
 
     /* --- the shadow pool (poly debug's lost sounds) is cut too --- */
@@ -6287,8 +6297,14 @@ static void test_note_choke(void)
     m4a_engine_tick(&engine);
     M4ACGBChannel *sq = &engine.cgbChannels[0];
     ASSERT(sq->status & CHN_ON, "choke CGB: the square note sounding");
+    WriteLog log = { .n = 0, .engine = &engine };
+    engine.psg[0].writeLog = write_log_cb;
+    engine.psg[0].writeLogUser = &log;
     m4a_engine_note_choke(&engine, 0, 60);
     ASSERT_EQ(sq->status, 0, "choke CGB: the channel cut at once with the latch on");
+    EXPECT_LOG(&log, "choke CGB: CgbOscOff on square 1 (NR12 = 8, NR14 = 0x80)",
+               PSG_REG_NR12, 0x08, PSG_REG_NR14, 0x80);
+    engine.psg[0].writeLog = NULL;
 
     m4a_engine_destroy(&engine);
     free(wd);
@@ -6332,6 +6348,27 @@ static void test_transport_stop_edge(void)
     ASSERT(n50->status & CHN_STOP, "stop edge: the queued note-off reached its note at the flush (no hang)");
     m4a_engine_reset_portamento(&engine);
 
+    /* A note-on and its note-off both queued in the last playing frame: the
+     * flush runs with the latch still on, so the note gets the one-tick
+     * gate and the next tick stops it -- it does not hang.  (Track 1: no
+     * CC 5, so the note is not a legato inherit.) */
+    m4a_engine_program_change(&engine, 1, 0);
+    m4a_engine_set_quantize_events(&engine, true);
+    m4a_engine_note_on(&engine, 1, 72, 127);
+    m4a_engine_note_off(&engine, 1, 72);
+    m4a_engine_set_quantize_events(&engine, false);
+    M4APCMChannel *n72 = find_pcm_note(&engine, 1, 72);
+    ASSERT(n72 != NULL, "stop edge: a same-frame note started at the flush");
+    if (n72) {
+        ASSERT_EQ(n72->status & (CHN_START | CHN_STOP), CHN_START, "stop edge: same-frame note START without STOP");
+        ASSERT_EQ(n72->gateTime, 1, "stop edge: same-frame note gets the one-tick gate");
+        n72->status = CHN_ENV_SUSTAIN;
+        m4a_engine_tick(&engine);
+        ASSERT(n72->status & CHN_STOP, "stop edge: the next tick's gate walk stops it with the latch off");
+        n72->status = 0;
+    }
+    m4a_engine_reset_portamento(&engine);
+
     /* Playing again (key 50 is the history): a note-on queued, then the
      * stop edge in the plugin's order. */
     m4a_engine_set_quantize_events(&engine, true);
@@ -6347,6 +6384,15 @@ static void test_transport_stop_edge(void)
     m4a_engine_reset_portamento(&engine);
     ASSERT_EQ(engine.tracks[0].portamentoPrevKey, 0, "stop edge: the reset after the flush forgets the history");
     ASSERT(!engine.tracks[0].portamentoGliding, "stop edge: the reset ends the glide");
+    {
+        /* The glide the flush started is not left frozen at its start key:
+         * the reset ends it at its target, the note's own pitch. */
+        M4APCMChannel *n48 = find_pcm_note(&engine, 0, 48);
+        ASSERT(n48 != NULL, "stop edge: the flushed key 48 sounding");
+        if (n48)
+            ASSERT_EQ(n48->frequency, m4a_midi_key_to_freq(n48->wav, 48, 0),
+                      "stop edge: the reset leaves the flushed note at key 48's pitch, not key 50's");
+    }
 
     /* Stopped: the first live note does not glide, and applies at once. */
     int h = m4a_engine_note_on(&engine, 0, 60, 127);
@@ -6375,8 +6421,9 @@ static void test_transport_stop_edge(void)
     m4a_engine_init(&engine, 48000.0f);
     m4a_engine_set_voicegroup(&engine, voices);
     m4a_engine_program_change(&engine, 0, 0);
+    ASSERT(m4a_engine_note_on(&engine, 0, 64, 127) >= 0, "start edge: stopped, a note applies at once");
     m4a_engine_set_quantize_events(&engine, true);
-    ASSERT_EQ(engine.eventQueueCount, 0, "start edge: nothing queued at the flip");
+    ASSERT_EQ(engine.eventQueueCount, 0, "start edge: the flip queues nothing from the stopped block");
     ASSERT_EQ(m4a_engine_note_on(&engine, 0, 60, 127), M4A_CHANNEL_QUEUED, "start edge: the next event queues");
     m4a_engine_set_quantize_events(&engine, true);
     ASSERT_EQ(engine.eventQueueCount, 1, "start edge: a repeated 'playing' block keeps the queue");

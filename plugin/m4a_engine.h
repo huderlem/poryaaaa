@@ -840,7 +840,8 @@ void m4a_engine_kill_channel(M4AEngine *engine, int handle);
 /* Forget every track's portamento note history (the "previous note" a glide
  * would start from).  Called automatically by all_notes_off/all_sound_off;
  * also call on DAW transport stop so the first note after the playhead moves
- * doesn't glide from a note that was sounding before playback paused. */
+ * doesn't glide from a note that was sounding before playback paused.  A
+ * glide in progress ends at its target pitch on the track's live channels. */
 void m4a_engine_reset_portamento(M4AEngine *engine);
 
 /* Toggle the opt-in effect features at runtime.  Disabling portamento or

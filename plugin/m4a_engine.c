@@ -1702,8 +1702,15 @@ void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend)
  * was sounding before the interruption.  portamentoDuration is kept: it's a
  * parameter (CC 5), not note state.
  */
-static void reset_portamento_note_state(M4ATrack *track)
+static void reset_portamento_note_state(M4AEngine *engine, int trackIndex)
 {
+    M4ATrack *track = &engine->tracks[trackIndex];
+    /* A glide in progress ends at its target: its note keeps sounding (the
+     * transport-stop edge flushes the latch's queued note-ons first) and
+     * must not stay at the interpolated pitch once the glide is forgotten. */
+    if (track->portamentoGliding)
+        apply_portamento_pitch(engine, track, trackIndex,
+                               (int32_t)track->portamentoTargetKey << 8);
     track->portamentoPrevKey = 0;
     track->portamentoTargetKey = 0;
     track->portamentoGliding = false;
@@ -1727,7 +1734,7 @@ void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex)
         if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex)
             ch->status |= CHN_STOP;
     }
-    reset_portamento_note_state(&engine->tracks[trackIndex]);
+    reset_portamento_note_state(engine, trackIndex);
 }
 
 /*
@@ -1769,7 +1776,7 @@ void m4a_engine_kill_channel(M4AEngine *engine, int handle)
 void m4a_engine_reset_portamento(M4AEngine *engine)
 {
     for (int i = 0; i < MAX_TRACKS; i++)
-        reset_portamento_note_state(&engine->tracks[i]);
+        reset_portamento_note_state(engine, i);
 }
 
 void m4a_engine_set_portamento_enabled(M4AEngine *engine, bool enabled)

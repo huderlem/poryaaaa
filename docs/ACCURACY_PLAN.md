@@ -5725,8 +5725,10 @@ unchanged harness numbers and unit tests of the engine pieces.
   ... which then stops the sound on every track"; NOTE_OFF is a key
   release.  A choke is a cut, not a release.  Note addresses use -1 as a
   wildcard (`events.h`: "(-1, 0, 60, -1) will match all channel 0 key 60
-  voices"), so the stop-button choke may carry key -1 and / or
-  channel -1.
+  voices"), and for a note event "key and channel are used to match
+  active notes; note_id is optionally provided".  The SDK does not say
+  what address a stop-button choke carries; key -1 and / or channel -1 is
+  the assumption here.
 - *The latch* (`m4a_engine.c`): `queue_event` queues when `quantizeEvents
   && !inTick`, a full queue drained in order first; `drain_events` sets
   `inTick` for its duration and applies the `n` events present at entry;
@@ -5787,8 +5789,14 @@ unchanged harness numbers and unit tests of the engine pieces.
   events apply up to a frame early (at the stop's block boundary instead
   of the next SoundMain) -- immaterial once the transport has stopped.
   The host's own stop handling (NOTE_OFFs, CC 123 / 120, a choke, or
-  `stop_processing` / `reset`, whose all-sound-off drops the queue) then
-  arrives unlatched.
+  `stop_processing` / `reset`, whose all-sound-off drops the queue)
+  arrives unlatched when it comes in a block whose transport reads
+  stopped; sent in the last block still flagged playing it is latched and
+  then flushed at the edge (a latched CC 120 applies inside the drain and
+  so does not drop the events after it -- slice 1's call-time note).  A
+  note-on and its note-off both queued in the last playing frame meet at
+  the flush with the latch still on: the note gets the one-tick gate and
+  sounds one frame more, stopped by the next tick's gate walk.
 - *NOTE_CHOKE bypasses the latch*: a new engine entry point
   `m4a_engine_note_choke(engine, trackIndex, key)` that, at once and with
   the latch on or off, removes the matching queued note-ons and note-offs
@@ -5796,16 +5804,20 @@ unchanged harness numbers and unit tests of the engine pieces.
   releasing or not, shadow pools included) with `m4a_engine_kill_channel`
   (PCM status 0; CGB CgbOscOff then status 0).  A negative track or key is
   a CLAP wildcard (all tracks / all keys), so the stop-button choke works;
-  the plugin passes -1 through for the choke only.  The portamento
-  history is untouched (a choke is not a transport event; the note it
-  removed from the queue never recorded any).  `m4a_engine_note_off` is
+  the plugin maps a negative channel to -1 and passes the key as is, for
+  the choke only.  `note_id` and `port_index` are ignored (one note port,
+  no voice ids tracked).  The portamento history is untouched (a choke is
+  not a transport event; the note it removed from the queue never
+  recorded any): a note after a choked one can still glide from the
+  choked key.  `m4a_engine_note_off` is
   unchanged.
 
 **Step 2, the code.**  `plugin_process`: after the tempo, with a
 transport, `m4a_engine_set_quantize_events(&engine, playing)` and then,
 on the playing -> stopped edge, `m4a_engine_reset_portamento` (the
 existing reset, now after the flip's flush); nothing without a
-transport.  `plugin_activate` sets `transportWasPlaying = false`.
+transport.  (Since the review, this is `apply_transport`, called for
+`process->transport` and for each in-block `CLAP_EVENT_TRANSPORT`.)  `plugin_activate` sets `transportWasPlaying = false`.
 `process_clap_note_event`: NOTE_CHOKE -> `m4a_engine_note_choke(track,
 key)`, a channel of -1 passed as -1 (other out-of-range channels still
 map to track 0, as for NOTE_ON / NOTE_OFF), the key passed as is (-1 a
@@ -5858,6 +5870,81 @@ of this slice only the choke reaches it, and RtMidi sends no choke).
 README: one paragraph under "CLAP plugin in a DAW" on the transport-driven
 latch and the choke.
 
+**Code review of slice 2b-i (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: `plugin_process` and `m4a_engine_note_choke` against
+the CLAP SDK headers and the latch code; reviewer 2: the unit tests
+assertion by assertion, the plan text, and every caller that cuts notes
+or touches the queue).  Neither found a fault in the choke or in the
+flush-then-reset order.  Acted on, each alone, each gated by
+`claim_check.sh`, the two aligned midi runs and the unit tests:
+
+- *The reset froze a flushed glide at its start key* (reviewer 1).  The
+  stop edge's flush starts a queued note-on that begins a glide (pitched
+  at once to the previous key by `portamento_note_started`), and
+  `reset_portamento_note_state` cleared `portamentoGliding` without
+  moving the pitch: the note kept the previous key's pitch until a bend or
+  an LFO refreshed it.  Measured first with a new assertion in
+  `test_transport_stop_edge` (the flushed key 48 at frequency 9195, key
+  50's, where key 48's is 8192), then fixed: the reset ends a glide in
+  progress at its target on the track's live channels
+  (`apply_portamento_pitch(target << 8)`, which skips STOP channels, so
+  `all_notes_off`'s releasing notes keep their old behaviour).  Gate:
+  claim_check 59 diffed, 0 moved, 57/66, 0 regressions, every row 0.0,
+  unit 1675/1675, blip 49112/0, songs 561/561; both midi runs 0 field
+  differences on 44 rows.  Harness-neutral by construction (portamento
+  is off on every harness path).
+- *In-block transport events were ignored* (reviewer 1): the SDK lets a
+  host send sample-accurate `CLAP_EVENT_TRANSPORT` updates inside a block
+  (`events.h`, `clap_event_transport`), and the plugin read only the
+  block-start transport, so a mid-block stop flipped the latch, flushed
+  and reset one block late.  The transport handling is now
+  `apply_transport`, called at the top of the block and for each such
+  event in the sample-accurate loop (the tempo with it).  Gate: as above,
+  unit 1675/1675, 0 field differences on both midi runs; `poryaaaa` and
+  `poryaaaa-standalone` build.
+- *Test assertions that could not fail* (reviewer 2), fixed in the tests
+  only: "the released channel still sounds" (implied by the STOP assertion;
+  removed) and the releasing channel now hand-set to the mixer's release
+  state (`CHN_STOP`) before the choke; the track -1 choke now has another
+  key sounding on track 1 that must survive, and the -1 / -1 choke cuts
+  it; the out-of-range chokes now face a sounding key 60 that must stay;
+  the CGB choke checks CgbOscOff's writes (NR12 = 8, NR14 = 0x80); the
+  start edge's "nothing queued" now follows a note applied at once while
+  stopped; and a new case, a note-on and its note-off queued in the last
+  playing frame, gets the one-tick gate at the flush and STOP at the next
+  tick (on track 1: on track 0 the CC 5 legato inherit takes the note out
+  of START).  Unit **1681/1681**.  Gate after all of it: claim_check 59
+  diffed, 0 moved, 57/66, 0 regressions, every row 0.0, blip 49112/0,
+  songs 561/561; both aligned midi runs 0 field differences on 44 rows;
+  `poryaaaa` and `poryaaaa-standalone` build.
+- *Plan wording* (reviewer 2): the stop-button choke's address is an
+  assumption, `note_id` / `port_index` ignored; the host's stop events
+  are unlatched only in a stopped block; the flush's one-tick note; any
+  negative channel or key is a wildcard; a choke leaves the glide
+  history at the choked key.  Edited in place above.
+
+Recorded, not acted on: `transportWasPlaying`'s reset in
+`plugin_activate` matters less than step 1 says (the latch is set from
+`playing` on every block regardless; the stale value could only cause one
+redundant reset); a choke addressed by `note_id` alone (channel and key
+-1) cuts every note, since no voice ids are tracked -- the SDK names key
+and channel as a choke's matching fields; any negative value, not only
+-1, is a wildcard; a CGB channel with only SPECIAL / LOOP bits set would
+survive a choke (no path produces it); a CLAP NOTE_OFF with key or
+channel -1 is still no wildcard (key 255 rejected, channel -1 -> track 0;
+`note_off` is not this slice's to change); a channel >= 16 maps to track
+0 for every note event; a velocity above 1.0 overflows the `uint8_t`
+cast (pre-existing); the main-thread timer and `state_load` write engine
+state while `plugin_process` may run (pre-existing; neither touches the
+queue); the tests drive the engine calls in the plugin's order but
+nothing exercises `plugin_process` itself (no plugin-level harness);
+untested promises: CGB shadow and wildcard chokes, queued PROGRAM / BEND
+/ XCMD surviving a choke, a NULL transport keeping the state.  For 2b-ii
+(reviewer 1): the latch keys on `CLAP_TRANSPORT_IS_PLAYING` alone, so
+live keys played while the transport runs are latched too
+(`CLAP_EVENT_IS_LIVE` marks them), and pre-roll / recording are not
+considered.
+
 **What slice 2b-ii needs.**  The override as designed (transport / on /
 off; a GUI Options item, a `poryaaaa.cfg` key, an appended CLAP state
 byte, an old state loading as "transport") fits what 2b-i built: "on" and
@@ -5876,7 +5963,11 @@ that: a flip to off drains the queue -- note-ons, channel allocation --
 and would race the audio thread's own queueing and tick.  Store the mode
 in `M4APluginData` and let `plugin_process` apply it at the top of the
 next block, where 2b-i's flip already sits.  (3) With no transport (the standalone),
-"transport" means off; the option's tooltip should say so.
+"transport" means off; the option's tooltip should say so.  (4) In
+"transport" mode live input during playback is latched as well; whether
+events flagged `CLAP_EVENT_IS_LIVE` should bypass the latch while the
+transport plays (the milestone's "rubbery keyboard" concern, now while
+recording) is a decision for 2b-ii, not something this slice settled.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
