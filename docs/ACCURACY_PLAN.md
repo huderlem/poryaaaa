@@ -1371,6 +1371,100 @@ Scheduler-lateness floor (`.events`, `L timer0` lines): cry_bulbasaur_encounter
 cry_pidgey_echo_start_chorus 3 (1748994, 2872578, 3428096 = 0.1042,
 0.1712, 0.2043 s).
 
+### SoundMain timing probe, step 10: the two-channel release, CRY_MODE_HIGH_PITCH (2026-10-25, milestone 4 slice 7)
+
+The one branch slice 6 left unexercised: `ply_endtie` and `ply_fine` with
+a live channel on **each** of the cry player's two chains, i.e. the EOT
+releasing two chained channels at once and their two release tails.  No
+ROM, CLI or runner change: every parameter is patchable since slice 6.
+
+**The mode** (src/sound.c `PlayCryInternal`, whole): CRY_MODE_HIGH_PITCH
+= length 50, release 200, pitch 15800, chorus 20, volume 90 (no reverse).
+On two samples that are still sounding at tick 50: Cry_Jynx (gCryTable 123,
+23524 samples) and Cry_Wailord (381, 20846 samples).
+
+**The template bytes**, worked by hand before the first render
+(`SetPokemonCryPitch`: b = 15800 + 0x80 = 0x3E38, TIE key = b >> 8 = 0x3E
+(62), TUNE = (b >> 1) & 0x7F = 0x1F1C & 0x7F = 0x1C (28), the pitch
+setter's TUNE2 (16 + 28) & 0x7F = 0x2C -- cry_bulbasaur_howl's bytes --
+then `SetPokemonCryChorus(20)` sets trackCount 2 and overwrites TUNE2 with
+(20 + 28) & 0x7F = 0x30 (48); VOL 90 = 0x5A; xWAIT 50 = 0x32 0x00; xRELE
+200 = 0xC8; PAN 0x40):
+
+| entry | id | trackCount (0x00) | TIE key (0x2A) | TUNE (0x12) | TUNE2 (0x19) | VOL (0x1D) | xWAIT (0x2E,0x2F) | xRELE (0x26) |
+|---|---|---|---|---|---|---|---|---|
+| cry_jynx_high_pitch | 123 | 2 | 0x3E (62) | 0x1C (28) | 0x30 (48) | 0x5A (90) | 0x32 0x00 (50) | 0xC8 (200) |
+| cry_wailord_high_pitch | 381 | 2 | 0x3E (62) | 0x1C (28) | 0x30 (48) | 0x5A (90) | 0x32 0x00 (50) | 0xC8 (200) |
+
+**Length against pitch** (as slices 4-6): key 62 with TUNE 28 is 2 - 36/64
+semitones above the 10512 Hz base, 11422 Hz; TUNE2 48 is 2 - 16/64, 11630
+Hz.  Cry_Jynx's 23524 samples run 2.06 / 2.02 s (about 123 / 121 frames
+from the start tick on frame 3, i.e. the count path would end them around
+frames 126 / 124); Cry_Wailord's 20846 run 1.83 / 1.79 s (about 109 / 107
+frames, ending around 112 / 110).  The EOT at tick 50 is on frame **53**,
+0.84 s after the start tick, so **both channels of both entries are alive
+on the EOT frame** and the branch is exercised on each: two `ply_endtie`
+walks each finding its chain's one channel holding the key, two `ply_fine`
+unlinks of a live channel.  Release 200 from 255 (attack 255, sustain 255)
+gives 199, 155, 121, 94, 73, 57, 44, 34, 26, 20, 15, 11, 8, 6, 4, 3, 2, 1
+on the 18 passes of frames 53..70 and the stop (product 0) on frame **71**
+= EOT + 18 for both channels, unless the two chains differ -- the sample
+data outlives the tail on both (the release ends at 1.14 s of a 1.8-2.1 s
+sample), so neither channel can end through the count path first.
+
+**Expected from the engine's model before the probe** (the existing
+constants composed, not a prediction fitted to anything): the EOT frame
+with one live chained channel measured 1928 against the empty chain's
+1810 (step 7: `ply_endtie` -> `_081DD938` 82 instead of 54, `ply_fine`
+-> `_loop` 10 -> `_ok` 14 -> `RealClearChain` 12 -> `_done` 50 instead
+of `_done` 16); the two-empty-chain EOT measured 2360 (step 9).  If the
+per-track terms simply add, two live chains give 2360 + 2 * (1928 - 1810)
+= **2596**.  The probe decides; measured values are recorded below before
+they are used.
+
+**The probe runs** (type 1, 180 frames, `gPokemonCryMusicPlayers`, the
+six parameters 15800 0 90 50 200 20 as the ninth to fourteenth arguments;
+cycles from VBlank line 160; `build/probe/cry_jynx_high_pitch.txt` and
+`cry_wailord_high_pitch.txt`).  The two `.frames` files are identical in
+every sequencer column: the start tick **6792** on frame 3 (`ply_note` 2,
+the setup commands of both tracks as step 9), **1932** on frames 4..52
+with both channels alive (no unlink tick ever: neither sample runs out),
+the EOT on frame **53**: **2596** -- `ply_endtie` 2, `ply_fine` 2,
+`ply_fine_loop` 2, `ply_fine_ok` 2, `ply_fine_done` 2 -- then 1192 on 54
+and 1007 from 55 (both tracks gone).  The raw walk on frame 53 (raw f54),
+per track and identical for the two: `ply_endtie` -> `_081DD938` **82**
+(the chain's one channel holding the key 0x3E -- `_081DD938`'s r3 = 0x3E
+on both tracks, r5 = 0x03002258 then 0x030022A8), `ply_fine` -> `_loop`
+10 -> `_ok` 14 (flg F0) -> `RealClearChain` 12 (r0 = 0x03000FC0 for
+track 0, 0x03001000 for track 1; prev 0, next 0) -> `_done` 50 -> `_081DD994`
+28: the same per-track costs step 7 measured with one live chain (1928
+against the empty chain's 1810), so the two-chain EOT is **2360 + 2 * 118
+= 2596**, the sum written above before the probe.  `cmd_diff.py` and
+`track_diff.py` 0 divergences on both entries, `entry_diff.py` 0 on every
+complete frame (its one listed line is the probe's unfinished frame 179,
+mgba -999999, as on every 180-frame cry probe), all **before any engine
+edit and with no new constant** -- nothing to derive.
+
+**`_SKIP` 18 stays est.**  This run does **not** produce a `ply_endtie`
+pass-over: each track's chain holds exactly one channel (`RealClearChain`'s
+prev 0 / next 0 on both), and each walk ends at its first channel with the
+match.  Two channels on one track's chain would need a second cry while
+one plays, a later slice.
+
+**The death stamps** (`_081DCFB0` at its IWRAM copy 0x03000878): two per
+entry, both on raw **f72 = frame 71**, 69 cycles apart in the same
+SoundMainRAM pass (cycles 19986289 and 19986358 on both entries; r4 =
+0x03000FC0 then 0x03001000, the two channels in order), i.e. the EOT
+frame + 18 for both channels of both entries, as the hand sequence above
+says: the 18 mixed release passes on frames 53..70 and the stop on 71.
+The chains do not differ.
+
+Scheduler-lateness floor (`.events` `L timer0` lines; 8 crossings on
+each entry, at the same cycles since the two share every frame's work):
+1180928, 2317059, 6798848, 7922434, 10182147, 15232005, 18034688,
+19158272 = 0.0704, 0.1381, 0.4052, 0.4722, 0.6069, 0.9079, 1.0750,
+1.1419 s.
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`

@@ -303,13 +303,15 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   TUNE = (chorus + TUNE) & 0x7F, the game's u32 192 is the s8 -64 -- and
   the frame skeleton is the two-track one of plan step 9: start 6792,
   1932 with both channels alive, +93 on each unlink tick and -20 per dead
-  track, the EOT 2360 on two empty chains) go to both renderers
+  track, the EOT 2360 on two empty chains and 2596 with a live channel on
+  each chain, step 10) go to both renderers
   (`mgba_render --pitch/--pan/--volume/--length/--release/--chorus`,
   `poryaaaa_render --cry-pitch/--cry-pan/--cry-volume/--cry-length/
   --cry-release/--cry-chorus`) and to the probe as its ninth to fourteenth
   arguments after the player symbol.  A releasing channel's death frame is the
   probe's `_081DCFB0` stamp in the raw log (SoundMainRAM's `statusFlags =
-  0`, broken at its IWRAM copy; raw `fN` = engine frame N-1); the envelope
+  0`, broken at its IWRAM copy; raw `fN` = engine frame N-1; one stamp per
+  channel, so a two-chain release gives two on one frame); the envelope
   is `env = env * release >> 8` per pass from the EOT frame, the stop on
   the pass whose product is 0.  A sample that runs out of data ends through
   the count path and gives no stamp: its death is the tick's unlink frame

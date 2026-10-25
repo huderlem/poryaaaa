@@ -4412,7 +4412,7 @@ static void test_cry_song(void)
     static const struct {
         const char *name; int16_t pitch; int8_t pan; uint8_t volume; uint16_t length; uint8_t release; int8_t chorus;
         uint8_t trackCount, key, tune, tune2, panByte, volByte, waitLo, waitHi, releaseByte;
-    } variants[12] = {
+    } variants[14] = {
         /* Cry_Jynx at CRY_MODE_FAINT's 14440: b = 0x38E8 -> key 0x38, tune 0x74, tune2 (16 + 0x74) & 0x7F */
         { "cry_jynx_faint", 14440, 0, 120, 140, 0, 0, 1, 0x38, 0x74, 0x04, 0x40, 0x78, 0x8C, 0x00, 0x00 },
         /* Cry_Bulbasaur at CRY_MODE_HIGH_PITCH's 15800, pan 63: b = 0x3E38 -> key 0x3E, tune 0x1C, tune2 0x2C; PAN (63 + 64) & 0x7F */
@@ -4445,8 +4445,13 @@ static void test_cry_song(void)
         /* CRY_MODE_ECHO_START complete on cry_reverse Cry_Pidgey: cry_pidgey_echo_start's bytes plus chorus 192
          * -> trackCount 2, TUNE2 (192 + 56) & 0x7F = 0x78 */
         { "cry_pidgey_echo_start_chorus", 15600, 0, 90, 25, 100, (int8_t)192, 2, 0x3D, 0x38, 0x78, 0x40, 0x5A, 0x19, 0x00, 0x64 },
+        /* Milestone 4 slice 7, CRY_MODE_HIGH_PITCH whole (length 50, release 200, pitch 15800, chorus 20, volume 90):
+         * b = 0x3E38 -> key 0x3E, tune 0x1C (cry_bulbasaur_howl's), the chorus overwriting TUNE2 with (20 + 28) & 0x7F = 0x30;
+         * xWAIT 0x32 0x00, xRELE 0xC8, VOL 0x5A; the same bytes on Cry_Jynx and Cry_Wailord (the sample is the tone word) */
+        { "cry_jynx_high_pitch", 15800, 0, 90, 50, 200, 20, 2, 0x3E, 0x1C, 0x30, 0x40, 0x5A, 0x32, 0x00, 0xC8 },
+        { "cry_wailord_high_pitch", 15800, 0, 90, 50, 200, 20, 2, 0x3E, 0x1C, 0x30, 0x40, 0x5A, 0x32, 0x00, 0xC8 },
     };
-    for (int k = 0; k < 12; k++) {
+    for (int k = 0; k < 14; k++) {
         M4ACryParams v = d;
         v.pitch = variants[k].pitch; v.pan = variants[k].pan; v.volume = variants[k].volume;
         v.length = variants[k].length; v.release = variants[k].release; v.chorus = variants[k].chorus;
@@ -5320,6 +5325,98 @@ static void test_sequencer_cycles_cry_encounter_chorus(void)
     free(wd);
 }
 
+/* cry_jynx_high_pitch's probe (plan, "SoundMain timing probe, step 10"):
+ * CRY_MODE_HIGH_PITCH whole (length 50, release 200, pitch 15800, chorus
+ * 20, volume 90) on Cry_Jynx, the first EOT that finds a live channel on
+ * each of the cry player's two chains.  CgbSound entry (cycles from VBlank
+ * line 160): 6792 on frame 3, 1932 with both channels alive, 2596 on frame
+ * 53 (the EOT: two ply_endtie -> _081DD938 walks of 82, each chain's one
+ * channel holding the key, then two ply_fine -> _loop 10 -> _ok 14 ->
+ * RealClearChain 12 -> _done 50 unlinks of a live channel; the empty-chain
+ * value was 2360), 1192 on 54, 1007 from 55.  Both channels carry xRELE's
+ * 200 and run the same tail from the EOT frame, 255 * 200 >> 8 per pass
+ * (199 .. 1 on frames 53..70), and both die on frame 71, the probe's two
+ * _081DCFB0 stamps on raw f72 (channels 0x03000FC0 and 0x03001000). */
+static void test_sequencer_cycles_cry_high_pitch_two_chain(void)
+{
+    printf("Testing sequencer CgbSound entry and the two-channel release on a two-track cry (cry_jynx_high_pitch probe)...\n");
+    static int8_t decoded[23524 + 2 * M4A_DPCM_BLOCK_SAMPLES];
+    WaveData *wd = make_dpcm_wave(23524, 0, 0, decoded);
+    wd->freq = 10512u << 10;
+    static ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_CRY;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF; voices[0].decay = 0; voices[0].sustain = 0xFF; voices[0].release = 0;
+
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    p.pitch = 15800; p.volume = 90; p.length = 50; p.release = 200; p.chorus = 20;      /* CRY_MODE_HIGH_PITCH */
+    M4ASong *song = m4a_cry_song_new(&p);
+    ASSERT(song != NULL, "cry high pitch cycles: song built");
+    if (!song) { free(wd); return; }
+    ASSERT(song->data[0x00] == 2 && song->data[0x2A] == 0x3E && song->data[0x12] == 0x1C && song->data[0x19] == 0x30
+           && song->data[0x1D] == 0x5A && song->data[0x2E] == 0x32 && song->data[0x2F] == 0x00 && song->data[0x26] == 0xC8,
+           "cry high pitch cycles: trackCount 2, TIE key 62, TUNE 28, TUNE2 48, VOL 90, xWAIT 50, xRELE 200");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&seq, M4A_PLAYER_CRY0), 0, "cry high pitch cycles: cry player 0");
+    m4a_engine_boot(&engine, false);
+    m4a_sequencer_start(&seq, song);
+
+    static float outL[4096], outR[4096];
+    static const uint8_t seq200[18] = { 199, 155, 121, 94, 73, 57, 44, 34, 26, 20, 15, 11, 8, 6, 4, 3, 2, 1 };
+    int mismatches = 0, envBad = -1;
+    int chan[2] = { -1, -1 }, death[2] = { -1, -1 };
+    bool liveAtEot[2] = { false, false }, releaseAtEot[2] = { false, false };
+    for (int k = 3; k <= 80; k++) {
+        int expected = k == 3 ? 6792 : k < 53 ? 1932 : k == 53 ? 2596 : k == 54 ? 1192 : 1007;
+        if (k == 53)
+            for (int t = 0; t < 2; t++)
+                if (chan[t] >= 0) liveAtEot[t] = (engine.pcmChannels[chan[t]].status & CHN_ON) != 0;
+        advance_frames(&engine, 1, outL, outR);
+        if (seq.frameCycles != expected) {
+            if (mismatches++ < 5)
+                printf("  frame %d: engine %d, mgba %d\n", k, seq.frameCycles, expected);
+        }
+        if (k == 3) {
+            for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+                if ((engine.pcmChannels[i].status & CHN_ON) && engine.pcmChannels[i].trackIndex >= 0 && engine.pcmChannels[i].trackIndex < 2)
+                    chan[engine.pcmChannels[i].trackIndex] = i;
+        }
+        for (int t = 0; t < 2; t++) {
+            if (chan[t] < 0) continue;
+            const M4APCMChannel *ch = &engine.pcmChannels[chan[t]];
+            if (k == 53)
+                releaseAtEot[t] = ch->release == 200;
+            if (k >= 53 && k <= 70 && (!(ch->status & CHN_ON) || ch->envelopeVolume != seq200[k - 53]) && envBad < 0) {
+                envBad = k;
+                printf("  frame %d: track %d env %d status %02X, GBA %d\n", k, t, ch->envelopeVolume, ch->status, seq200[k - 53]);
+            }
+            if (death[t] < 0 && k >= 53 && !(ch->status & CHN_ON))
+                death[t] = k;
+        }
+    }
+    ASSERT(chan[0] >= 0 && chan[1] >= 0, "cry high pitch cycles: both tracks keyed a channel on the start tick (frame 3)");
+    ASSERT(liveAtEot[0] && liveAtEot[1], "cry high pitch cycles: both channels are still sounding when the EOT tick runs (frame 53)");
+    ASSERT(releaseAtEot[0] && releaseAtEot[1], "cry high pitch cycles: both channels carry xRELE's 200");
+    ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the cry_jynx_high_pitch probe on frames 3..80 (cry 0, two live chains at the EOT: 2596)");
+    ASSERT_EQ(envBad, -1, "cry high pitch cycles: both release envelopes on frames 53..70 are 255 * 200 >> 8 per pass (199 .. 1)");
+    ASSERT_EQ(death[0], 71, "cry high pitch cycles: track 0's channel dies on frame 71, the probe's first _081DCFB0 stamp (f72, 0x03000FC0)");
+    ASSERT_EQ(death[1], 71, "cry high pitch cycles: track 1's channel dies on frame 71, the probe's second _081DCFB0 stamp (f72, 0x03001000)");
+    ASSERT(m4a_sequencer_finished(&seq), "sequencer: the cry finished (both tracks gone at the EOT on 53, the channels outliving them)");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -5382,6 +5479,7 @@ int main(void)
     test_sequencer_cycles_cry_growl1_reverse();
     test_sequencer_cry_two_tracks();
     test_sequencer_cycles_cry_encounter_chorus();
+    test_sequencer_cycles_cry_high_pitch_two_chain();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

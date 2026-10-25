@@ -214,5 +214,29 @@
     "chorus": 192,
     "seconds": 2.0,
     "note": "cry_reverse Cry_Pidgey (gCryTable[403]) with CRY_MODE_ECHO_START complete (reverse, length 25, release 100, pitch 15600 = TIE key 61 + TUNE 56, chorus 192, volume 90): cry_pidgey_echo_start with its chorus restored, two reversed tracks with the second's TUNE (192 + 56) & 0x7F = 120; both 0.17 s samples are gone long before the EOT on frame 28"
+  },
+  {
+    "name": "cry_jynx_high_pitch",
+    "type": "cry",
+    "id": 123,
+    "pitch": 15800,
+    "volume": 90,
+    "length": 50,
+    "release": 200,
+    "chorus": 20,
+    "seconds": 3.0,
+    "note": "Cry_Jynx (gCryTable[123]) with CRY_MODE_HIGH_PITCH (length 50, release 200, pitch 15800 = TIE key 62 + TUNE 28, chorus 20 -> the second track's TUNE (20 + 28) & 0x7F = 48, volume 90): the longest sample on two tracks (about 11.4 / 11.6 kHz, 2.06 / 2.02 s) cut by the EOT at tick 50 (frame 53) with both channels still sounding -- the first EOT that releases a live channel on each of the cry player's two chains (two ply_endtie walks finding their key, two ply_fine unlinks of a live channel, the frame 2596) and two release tails together, 255 * 200 >> 8 per pass on both, both channels stopped on frame 71"
+  },
+  {
+    "name": "cry_wailord_high_pitch",
+    "type": "cry",
+    "id": 381,
+    "pitch": 15800,
+    "volume": 90,
+    "length": 50,
+    "release": 200,
+    "chorus": 20,
+    "seconds": 3.0,
+    "note": "Cry_Wailord (gCryTable[381]) with CRY_MODE_HIGH_PITCH (the same template bytes as cry_jynx_high_pitch: TIE key 62, TUNE 28 / 48, VOL 90, xWAIT 50, xRELE 200): the 20846-sample cry (1.83 / 1.79 s on the two tracks) still sounding on both chains at the EOT on frame 53, the same two-channel release to the stop on frame 71 on a second sample"
   }
 ]
