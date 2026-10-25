@@ -29,14 +29,24 @@ static void m4a_pcm_synth_pulse_update(M4APCMChannel *ch)
 
 void m4a_pcm_channel_start(M4APCMChannel *ch, WaveData *wav, uint8_t type)
 {
+    m4a_pcm_channel_start_at(ch, wav, type, 0);
+}
+
+void m4a_pcm_channel_start_at(M4APCMChannel *ch, WaveData *wav, uint8_t type,
+                              uint32_t startOffset)
+{
     ch->wav = wav;
     ch->type = type;
-    /* ply_note leaves count = the start offset (0) for SoundMainRAM's
-     * SF_START pass to turn into currentPointer = data + offset and
-     * count = size - offset.  Reverse and compressed voices are set up by
-     * SoundMainRAM_Unk1 on their first mix (CHN_SPECIAL). */
-    ch->currentPointer = wav->data;
-    ch->count = wav->size;
+    /* ply_note stores track->unk_3C (XCMD 0x0D's word, 0 unless set) as the
+     * channel's count (m4a_1.s _081DDCCE); SoundMainRAM's SF_START pass
+     * (_081DCF6A) turns it into currentPointer = data + count and
+     * count = size - count.  Nothing reads either field between the two,
+     * so the port applies the pass here.  Reverse and compressed voices
+     * are set up by SoundMainRAM_Unk1 on their first mix (CHN_SPECIAL):
+     * a compressed voice reads the pointer back as the sample index, so an
+     * offset inside a DPCM block decodes that block and starts mid-way. */
+    ch->currentPointer = wav->data + startOffset;
+    ch->count = (int32_t)(wav->size - startOffset);
     ch->fw = 0;
     ch->envelopeVolume = 0;
     ch->xpi = 0xFF000000u;

@@ -223,6 +223,7 @@ static void track_start(M4ASequencer *s, int i)
     et->pitX = 0;
     et->pseudoEchoVolume = 0;
     et->pseudoEchoLength = 0;
+    et->sampleStart = 0;            /* unk_3C is inside Clear64byte's 64 bytes */
     et->currentProgram = 0;
     memset(&et->currentVoice, 0, sizeof(et->currentVoice));
     et->currentVoice.type = 1;
@@ -482,7 +483,15 @@ static void ply_xcmd(M4ASequencer *s, int i)
         }
         break;
     }
-    case 0x0D: t->cmdPtr += 4; break;             /* unk_3C */
+    case 0x0D: {                                  /* ply_xcmd_0D (m4a.c): track->unk_3C, the
+                                                   * sample offset ply_note starts the next
+                                                   * DirectSound channel at (SetPokemonCryProgress) */
+        uint32_t v = rd8(s, t->cmdPtr) | ((uint32_t)rd8(s, t->cmdPtr + 1) << 8)
+                   | ((uint32_t)rd8(s, t->cmdPtr + 2) << 16) | ((uint32_t)rd8(s, t->cmdPtr + 3) << 24);
+        s->engine->tracks[i].sampleStart = v;
+        t->cmdPtr += 4;
+        break;
+    }
     default:                                      /* ply_xxx: gMPlayJumpTable[0] = ply_fine */
         ply_fine(s, i);
         break;

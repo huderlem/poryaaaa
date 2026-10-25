@@ -737,6 +737,13 @@ static void print_usage(const char *prog)
         "                              played as the game does (PlayCryInternal's\n"
         "                              CRY_MODE_NORMAL defaults: volume 120, pan 0, pitch\n"
         "                              15360, length 140, priority 10) on cry player 0\n"
+        "  --cry-pitch <-32768..32767> SetPokemonCryPitch's value (15360 = key 60; the game's\n"
+        "                              modes use 14440..15800)\n"
+        "  --cry-pan <-128..127>       SetPokemonCryPanpot's value (0 = centre; -64 left, 63 right)\n"
+        "  --cry-volume <0..255>       SetPokemonCryVolume's value (masked to 0..127; the game\n"
+        "                              uses 120, 90, 70)\n"
+        "  --cry-progress <0..2^32-1>  SetPokemonCryProgress: the sample offset the cry starts\n"
+        "                              at (XCMD 0x0D; every game mode passes 0)\n"
         "\n"
         "Output (at least one required):\n"
         "  --output <file.wav>         Write rendered audio to WAV file\n"
@@ -788,6 +795,7 @@ typedef struct {
     const char *voicegroup;      /* NULL: use the song header's */
     const char *songPath;        /* --song, or NULL with --cry */
     int cry;                     /* --cry: gCryTable index, or -1 */
+    M4ACryParams cryParams;      /* --cry-pitch / --cry-pan / --cry-volume / --cry-progress over PlayCryInternal's defaults */
     bool respectBaseMidiKey, portamento, pwm;
     int maxChannels;
     double sampleRate;
@@ -1017,15 +1025,14 @@ static int render_cry(const SongRenderOpts *o, float **outL, float **outR,
     printf("  %s: %u samples at %u Hz, %s%s\n", symbol, wd->size, wd->freq >> 10,
            (vg->voices[0].type & VOICE_TYPE_CMP) ? "DPCM" : "uncompressed (no built .bin: plays as DirectSound)",
            (wd->status & 0x4000) ? ", loops" : "");
-    M4ACryParams cp;
-    m4a_cry_params_default(&cp);
+    M4ACryParams cp = o->cryParams;
     M4ASong *song = m4a_cry_song_new(&cp);
     if (!song) {
         voicegroup_free(vg);
         return -1;
     }
-    printf("  %s: volume %u, pan %d, pitch %d, length %u, priority %u, %u track%s\n",
-           song->name, cp.volume, cp.pan, cp.pitch, cp.length, cp.priority,
+    printf("  %s: volume %u, pan %d, pitch %d, length %u, progress %u, priority %u, %u track%s\n",
+           song->name, cp.volume, cp.pan, cp.pitch, cp.length, cp.progress, cp.priority,
            song->trackCount, song->trackCount == 1 ? "" : "s");
     return render_sequenced(o, song, vg, outL, outR, outTotal, outFadeStart);
 }
@@ -1127,6 +1134,8 @@ int main(int argc, char *argv[])
     const char *midiPath      = NULL;
     const char *songPath      = NULL;
     int         cryId         = -1;
+    M4ACryParams cryParams;
+    m4a_cry_params_default(&cryParams);
     bool        songVolumeSet = false;
     bool        reverbSet     = false;
     const char *outputPath    = NULL;
@@ -1162,6 +1171,26 @@ int main(int argc, char *argv[])
                 return 1;
             }
             cryId = (int)v;
+        } else if ((strcmp(argv[i], "--cry-pitch") == 0 || strcmp(argv[i], "--cry-pan") == 0
+                    || strcmp(argv[i], "--cry-volume") == 0 || strcmp(argv[i], "--cry-progress") == 0)
+                   && i + 1 < argc) {
+            /* The setters' argument types: s16, s8, u8, u32. */
+            const char *flag = argv[i];
+            char *end = NULL;
+            long long v = strtoll(argv[++i], &end, 10);
+            long long lo = 0, hi = 0;
+            if (strcmp(flag, "--cry-pitch") == 0)         { lo = -32768; hi = 32767; }
+            else if (strcmp(flag, "--cry-pan") == 0)      { lo = -128; hi = 127; }
+            else if (strcmp(flag, "--cry-volume") == 0)   { lo = 0; hi = 255; }
+            else                                          { lo = 0; hi = 4294967295LL; }
+            if (end == argv[i] || *end != '\0' || v < lo || v > hi) {
+                fprintf(stderr, "Error: %s takes %lld..%lld (got '%s')\n", flag, lo, hi, argv[i]);
+                return 1;
+            }
+            if (strcmp(flag, "--cry-pitch") == 0)         cryParams.pitch = (int16_t)v;
+            else if (strcmp(flag, "--cry-pan") == 0)      cryParams.pan = (int8_t)v;
+            else if (strcmp(flag, "--cry-volume") == 0)   cryParams.volume = (uint8_t)v;
+            else                                          cryParams.progress = (uint32_t)v;
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
             outputPath = argv[++i];
         } else if (strcmp(argv[i], "--play") == 0) {
@@ -1258,6 +1287,7 @@ int main(int argc, char *argv[])
             player = M4A_PLAYER_CRY0;      /* SetPokemonCryTone from silence */
         SongRenderOpts o = {
             .projectRoot = projectRoot, .voicegroup = vgName, .songPath = songPath, .cry = cryId,
+            .cryParams = cryParams,
             .respectBaseMidiKey = respectBaseMidiKey,
             .portamento = portamento, .pwm = pwm, .maxChannels = maxChannels,
             .sampleRate = sampleRate, .pcmFreqMode = pcmFreqMode,

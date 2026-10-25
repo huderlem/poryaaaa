@@ -164,6 +164,10 @@ typedef struct {
     uint8_t volML;          /* computed left volume */
     uint8_t pseudoEchoVolume;
     uint8_t pseudoEchoLength;
+    uint32_t sampleStart;        /* MusicPlayerTrack.unk_3C: XCMD 0x0D's word, the sample
+                                  * offset ply_note hands the next DirectSound channel as
+                                  * its count (SetPokemonCryProgress; 0 everywhere in
+                                  * vanilla Emerald) */
     uint8_t xcmdSelect;          /* extended command chosen by CC 0x1E, fired by CC 0x1D/0x1F */
     uint8_t portamentoDuration;  /* PORTAMENTO (CC 5) glide duration in song ticks; 0 = off */
     uint8_t portamentoPrevKey;   /* channel key of the last note played (glide start key);

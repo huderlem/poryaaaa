@@ -1191,7 +1191,7 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
          * voices, which play one source sample per mixed sample). */
         ch->frequency = m4a_midi_key_to_freq(voice->wav, (uint8_t)pcmFinalKey, track->pitM);
 
-        m4a_pcm_channel_start(ch, voice->wav, voice->type);
+        m4a_pcm_channel_start_at(ch, voice->wav, voice->type, track->sampleStart);
 
         /* Portamento legato (opt-in): if the previous note on this track is
          * still in any envelope phase (zero gap between notes), the new note

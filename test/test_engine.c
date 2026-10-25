@@ -4246,6 +4246,47 @@ static void test_cry_song(void)
     ASSERT_EQ(song->data[0x20], 0x44, "cry: progress word (little-endian)");
     ASSERT_EQ(song->data[0x23], 0x11, "cry: progress word high byte");
     m4a_song_free(song);
+
+    /* The corpus variants (milestone 4 slice 3), the setters hand-applied
+     * to the ROM template with the test ROM's StartCry (length 140,
+     * progress 0, release 0, chorus 0, priority 10): every byte but the
+     * named ones equals the default song's. */
+    M4ACryParams d;
+    m4a_cry_params_default(&d);
+    M4ASong *base = m4a_cry_song_new(&d);
+    ASSERT(base != NULL, "cry: default song built (variants)");
+    if (!base) return;
+    static const struct {
+        const char *name; int16_t pitch; int8_t pan; uint8_t volume;
+        uint8_t key, tune, tune2, panByte, volByte;
+    } variants[3] = {
+        /* Cry_Jynx at CRY_MODE_FAINT's 14440: b = 0x38E8 -> key 0x38, tune 0x74, tune2 (16 + 0x74) & 0x7F */
+        { "cry_jynx_faint", 14440, 0, 120, 0x38, 0x74, 0x04, 0x40, 0x78 },
+        /* Cry_Bulbasaur at CRY_MODE_HIGH_PITCH's 15800, pan 63: b = 0x3E38 -> key 0x3E, tune 0x1C, tune2 0x2C; PAN (63 + 64) & 0x7F */
+        { "cry_bulbasaur_howl", 15800, 63, 120, 0x3E, 0x1C, 0x2C, 0x7F, 0x78 },
+        /* Cry_Pidgey at volume 90 (CRY_MODE_ENCOUNTER's): VOL 0x5A */
+        { "cry_pidgey_quiet", 15360, 0, 90, 0x3C, 0x40, 0x50, 0x40, 0x5A },
+    };
+    for (int k = 0; k < 3; k++) {
+        M4ACryParams v = d;
+        v.pitch = variants[k].pitch; v.pan = variants[k].pan; v.volume = variants[k].volume;
+        M4ASong *vs = m4a_cry_song_new(&v);
+        ASSERT(vs != NULL, "cry: variant song built");
+        if (!vs) continue;
+        char msg[96];
+        snprintf(msg, sizeof(msg), "cry: %s TIE key / TUNE / TUNE2 / PAN / VOL bytes", variants[k].name);
+        ASSERT(vs->data[0x2A] == variants[k].key && vs->data[0x12] == variants[k].tune
+               && vs->data[0x19] == variants[k].tune2 && vs->data[0x28] == variants[k].panByte
+               && vs->data[0x1D] == variants[k].volByte, msg);
+        int same = 1;
+        for (int i = 0; i < M4A_CRY_SONG_SIZE; i++)
+            if (i != 0x2A && i != 0x12 && i != 0x19 && i != 0x28 && i != 0x1D && vs->data[i] != base->data[i])
+                same = 0;
+        snprintf(msg, sizeof(msg), "cry: %s differs from the default song in those bytes only", variants[k].name);
+        ASSERT(same, msg);
+        m4a_song_free(vs);
+    }
+    m4a_song_free(base);
 }
 
 /* XCMD xRELE (ply_xrele, m4a.c): the byte becomes the track tone's release,
@@ -4341,6 +4382,265 @@ static void test_sequencer_cycles_cry(void)
     free(wd);
 }
 
+/* XCMD 0x0D (ply_xcmd_0D, m4a.c): the word becomes track->unk_3C, which
+ * ply_note stores as the new DirectSound channel's count (m4a_1.s
+ * _081DDCCE) and SoundMainRAM's SF_START pass turns into
+ * currentPointer = data + count, count = size - count: the sample starts
+ * that many samples in.  The cry song carries SetPokemonCryProgress's
+ * value this way (0 in every PlayCryInternal mode), so the harness never
+ * exercises it; these are its gate.  First the mixer on hand-built
+ * channels, then the sequencer's entry point. */
+static void test_pcm_start_offset(void)
+{
+    printf("Testing the sample start offset (XCMD 0x0D / SoundChannel.count at SF_START)...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    e.pcmDivFreq = 1;
+    static int8_t frame[GBA_PCM_DMA_BUF_SIZE * 2];
+    const int spv = e.pcmSamplesPerVBlank;
+
+    /* Uncompressed, looped 8-sample ramp, FIX: the frame starts at sample
+     * 3 (40, 50, ...) and wraps as usual. */
+    {
+        WaveData *wd = ramp_wave(8, 1, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start_at(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX, 3);
+        ASSERT(ch.currentPointer == wd->data + 3, "offset: SF_START's currentPointer = data + count");
+        ASSERT_EQ(ch.count, 8 - 3, "offset: SF_START's count = size - count");
+        ch.status = CHN_ENV_SUSTAIN | CHN_LOOP;
+        ch.envelopeVolumeRight = ch.envelopeVolumeLeft = 128;
+        mix_frame(&e, &ch, frame);
+        int ok = 1;
+        for (int i = 0; i < spv; i++)
+            if (frame[i] != PCM_OUT(10 * ((3 + i) % 8 + 1))) ok = 0;
+        ASSERT(ok, "offset: the fix loop plays from sample 3 and wraps");
+        free(wd);
+    }
+    /* m4a_pcm_channel_start is the offset-0 case. */
+    {
+        WaveData *wd = ramp_wave(8, 1, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        ASSERT(ch.currentPointer == wd->data && ch.count == 8, "offset: start without an offset is offset 0");
+        free(wd);
+    }
+
+    /* DPCM (the cry samples' type): Unk1 reads the pointer back as a
+     * sample index, so a block-aligned offset (64) starts at block 1's
+     * first sample and an offset inside a block (37) decodes block 0 and
+     * starts at its 38th; the channel stops after size - offset samples
+     * and leaves the rest of the frame alone. */
+    {
+        enum { SIZE = 200 };
+        static int8_t decoded[SIZE + 2 * M4A_DPCM_BLOCK_SAMPLES];
+        WaveData *wd = make_dpcm_wave(SIZE, 0, 0, decoded);
+        static const int offsets[2] = { 64, 37 };
+        for (int k = 0; k < 2; k++) {
+            int off = offsets[k];
+            M4APCMChannel ch;
+            memset(&ch, 0, sizeof(ch));
+            m4a_pcm_channel_start_at(&ch, wd, VOICE_CRY, (uint32_t)off);
+            ch.status = CHN_ENV_SUSTAIN;
+            ch.frequency = 0x800000;
+            ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 128;
+            mix_frame(&e, &ch, frame);
+            int n = SIZE - off, ok = 1, rest = 1;
+            for (int i = 0; i < n; i++)
+                if (frame[i] != PCM_OUT(decoded[off + i])) ok = 0;
+            for (int i = n; i < spv; i++)
+                if (frame[i] != 0) rest = 0;
+            char msg[96];
+            snprintf(msg, sizeof(msg), "offset: dpcm at offset %d plays decoded[%d..%d]", off, off, SIZE - 1);
+            ASSERT(ok, msg);
+            snprintf(msg, sizeof(msg), "offset: dpcm at offset %d stops after size - offset samples", off);
+            ASSERT(rest && ch.status == 0, msg);
+        }
+        free(wd);
+    }
+}
+
+static void test_sequencer_xcmd_0D(void)
+{
+    printf("Testing XCMD 0x0D through the sequencer...\n");
+    static ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    WaveData *wd = ramp_wave(64, 1, 0);
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF; voices[0].decay = 0; voices[0].sustain = 0xFF; voices[0].release = 0;
+    /* XCMD 0x0D 0x00000025 (little-endian 37), then a TIE; the second
+     * start of the song must come up with unk_3C cleared (Clear64byte). */
+    M4ASong *song = parse_song_text(
+        "\t.equ\tt_grp, voicegroup_test\n\t.equ\tt_pri, 0\n\t.equ\tt_rev, 0\n\t.equ\tt_mvl, 127\n"
+        "\t.equ\tt_key, 0\n\t.equ\tt_tbs, 1\n\t.section .rodata\n\t.global\tt\n\t.align\t2\n"
+        "t_1:\n\t.byte\tVOICE , 0\n\t.byte\tXCMD , 13 , 37 , 0 , 0 , 0\n\t.byte\tTIE , Cn3 , v127\n"
+        "\t.byte\tW24\n\t.byte\tFINE\n\t.align\t2\nt:\n\t.byte\t1, 0, t_pri, t_rev\n\t.word\tt_grp\n\t.word\tt_1\n");
+    ASSERT(song != NULL, "xcmd_0D: song parses");
+    if (!song) { free(wd); return; }
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+    m4a_sequencer_frame(&seq);         /* the start tick: VOICE, XCMD 0D, the TIE */
+    ASSERT_EQ(engine.tracks[0].sampleStart, 37u, "xcmd_0D: the word lands in the track's unk_3C");
+    ASSERT_EQ(seq.tracks[0].cmdPtr, song->trackOffsets[0] + 2 + 6 + 3 + 1, "xcmd_0D: four operand bytes consumed");
+    M4APCMChannel *ch = &engine.pcmChannels[0];
+    ASSERT((ch->status & CHN_ON) != 0, "xcmd_0D: the TIE took a DirectSound channel");
+    ASSERT(ch->currentPointer == wd->data + 37, "xcmd_0D: ply_note's channel starts 37 samples in");
+    ASSERT_EQ(ch->count, 64 - 37, "xcmd_0D: its count is size - 37");
+    ASSERT_EQ(engine.tracks[0].sampleStart, 37u, "xcmd_0D: unk_3C persists for the next note (ply_note copies, never clears)");
+    m4a_sequencer_start(&seq, song);   /* MPlayStart again: Clear64byte at the track's start tick */
+    ASSERT_EQ(engine.tracks[0].sampleStart, 37u, "xcmd_0D: untouched until the track's start tick runs");
+    m4a_sequencer_frame(&seq);
+    ASSERT_EQ(engine.tracks[0].sampleStart, 37u, "xcmd_0D: the restarted track read the XCMD again");
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+    free(wd);
+
+    /* The reset itself: a song without the XCMD after one with it. */
+    wd = ramp_wave(64, 1, 0);
+    voices[0].wav = wd;
+    M4ASong *plain = parse_song_text(
+        "\t.equ\tt_grp, voicegroup_test\n\t.equ\tt_pri, 0\n\t.equ\tt_rev, 0\n\t.equ\tt_mvl, 127\n"
+        "\t.equ\tt_key, 0\n\t.equ\tt_tbs, 1\n\t.section .rodata\n\t.global\tt\n\t.align\t2\n"
+        "t_1:\n\t.byte\tVOICE , 0\n\t.byte\tTIE , Cn3 , v127\n\t.byte\tW24\n\t.byte\tFINE\n"
+        "\t.align\t2\nt:\n\t.byte\t1, 0, t_pri, t_rev\n\t.word\tt_grp\n\t.word\tt_1\n");
+    ASSERT(plain != NULL, "xcmd_0D: plain song parses");
+    if (!plain) { free(wd); return; }
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_sequencer_init(&seq, &engine);
+    engine.tracks[0].sampleStart = 99;  /* left over from an earlier song */
+    m4a_sequencer_start(&seq, plain);
+    m4a_sequencer_frame(&seq);
+    ASSERT_EQ(engine.tracks[0].sampleStart, 0u, "xcmd_0D: the track's start tick clears unk_3C (Clear64byte)");
+    ASSERT(engine.pcmChannels[0].currentPointer == wd->data, "xcmd_0D: the note starts at sample 0");
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(plain);
+    free(wd);
+}
+
+/* ply_endtie's walk cost by chain state (plan, probe step 6): +28 when the
+ * first chained channel holds the key (measured on cry_jynx_faint's EOT
+ * frame: 82 against the empty chain's 54), +18 est. per channel passed
+ * over.  Three songs that differ only in the EOT's key, two live channels
+ * on the track (newest first: Dn3, Cn3). */
+static void test_sequencer_endtie_walk(void)
+{
+    printf("Testing ply_endtie's walk cost...\n");
+    static ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    WaveData *wd = ramp_wave(64, 1, 0);
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF; voices[0].decay = 0; voices[0].sustain = 0xFF; voices[0].release = 0;
+    static const char *keys[3] = { "Dn3", "Cn3", "En3" };   /* match first; skip then match; skip twice */
+    int32_t eotFrame[3] = { 0, 0, 0 };
+    bool live[3] = { false, false, false };
+    for (int k = 0; k < 3; k++) {
+        char text[1024];
+        snprintf(text, sizeof(text),
+            "\t.equ\tt_grp, voicegroup_test\n\t.equ\tt_pri, 0\n\t.equ\tt_rev, 0\n\t.equ\tt_mvl, 127\n"
+            "\t.equ\tt_key, 0\n\t.equ\tt_tbs, 1\n\t.section .rodata\n\t.global\tt\n\t.align\t2\n"
+            "t_1:\n\t.byte\tVOICE , 0\n\t.byte\tTIE , Cn3 , v127\n\t.byte\tTIE , Dn3\n\t.byte\tW01\n"
+            "\t.byte\tEOT , %s\n\t.byte\tW01\n\t.byte\tFINE\n"
+            "\t.align\t2\nt:\n\t.byte\t1, 0, t_pri, t_rev\n\t.word\tt_grp\n\t.word\tt_1\n", keys[k]);
+        M4ASong *song = parse_song_text(text);
+        ASSERT(song != NULL, "endtie walk: song parses");
+        if (!song) continue;
+        M4AEngine engine;
+        m4a_engine_init(&engine, 48000.0f);
+        m4a_engine_set_voicegroup(&engine, voices);
+        M4ASequencer seq;
+        m4a_sequencer_init(&seq, &engine);
+        m4a_engine_boot(&engine, false);
+        m4a_sequencer_start(&seq, song);
+        static float outL[4096], outR[4096];
+        advance_frames(&engine, 1, outL, outR);     /* frame 3 (the start tick): VOICE, the two TIEs, W01 */
+        live[k] = (engine.pcmChannels[0].status & CHN_ON) && (engine.pcmChannels[1].status & CHN_ON);
+        advance_frames(&engine, 1, outL, outR);     /* frame 4: EOT key, W01 */
+        eotFrame[k] = seq.frameCycles;
+        m4a_sequencer_detach(&seq);
+        m4a_engine_destroy(&engine);
+        m4a_song_free(song);
+    }
+    ASSERT(live[0] && live[1] && live[2], "endtie walk: both channels were live at the EOT (the walk saw two)");
+    ASSERT_EQ(eotFrame[1] - eotFrame[0], M4A_CYC_ENDTIE_SKIP, "endtie walk: a channel passed over before the match costs the skip");
+    ASSERT_EQ(eotFrame[2] - eotFrame[0], 2 * M4A_CYC_ENDTIE_SKIP - M4A_CYC_ENDTIE_MATCH, "endtie walk: no match walks the whole chain and skips the match cost");
+    ASSERT_EQ(M4A_CYC_ENDTIE_MATCH, 28, "endtie walk: the match cost is the probe's 82 - 54 (cry_jynx_faint frame 143)");
+    free(wd);
+}
+
+/* Variant (a) of the cry corpus, frame by frame against its probe:
+ * Cry_Jynx (23524 DPCM samples at 10512 Hz) at CRY_MODE_FAINT's pitch
+ * 14440, build/probe/cry_jynx_faint.txt.  The sample outlives the 140-tick
+ * EOT, so frame 143 is the first measured EOT with a chained channel
+ * holding the key (ply_endtie +28) and ply_fine then unlinks a live
+ * channel (+70); the xwait ticks keep the live-channel walk (1596) to the
+ * end. */
+static void test_sequencer_cycles_cry_faint(void)
+{
+    printf("Testing sequencer CgbSound entry on a cry variant (cry_jynx_faint probe)...\n");
+    static int8_t decoded[23524 + 2 * M4A_DPCM_BLOCK_SAMPLES];
+    WaveData *wd = make_dpcm_wave(23524, 0, 0, decoded);
+    wd->freq = 10512u << 10;
+    static ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_CRY;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF; voices[0].decay = 0; voices[0].sustain = 0xFF; voices[0].release = 0;
+
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    p.pitch = 14440;                    /* CRY_MODE_FAINT */
+    M4ASong *song = m4a_cry_song_new(&p);
+    ASSERT(song != NULL, "cry faint cycles: song built");
+    if (!song) { free(wd); return; }
+    ASSERT_EQ(song->data[0x2A], 0x38, "cry faint cycles: TIE key 56");
+    ASSERT_EQ(song->data[0x12], 0x74, "cry faint cycles: TUNE 116");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&seq, M4A_PLAYER_CRY0), 0, "cry faint cycles: cry player 0");
+    m4a_engine_boot(&engine, false);
+    m4a_sequencer_start(&seq, song);
+
+    static float outL[4096], outR[4096];
+    int mismatches = 0;
+    bool liveAtEot = false;
+    for (int k = 3; k <= 145; k++) {
+        int expected = k == 3 ? 4077 : k < 143 ? 1596 : k == 143 ? 1928 : k == 144 ? 1192 : 1007;
+        if (k == 143)
+            liveAtEot = (engine.pcmChannels[0].status & CHN_ON) != 0;
+        advance_frames(&engine, 1, outL, outR);
+        if (seq.frameCycles != expected) {
+            if (mismatches++ < 5)
+                printf("  frame %d: engine %d, mgba %d\n", k, seq.frameCycles, expected);
+        }
+    }
+    ASSERT(liveAtEot, "cry faint cycles: the channel is still sounding when the EOT tick runs");
+    ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the cry_jynx_faint probe on frames 3..145 (cry 0)");
+    ASSERT(m4a_sequencer_finished(&seq), "sequencer: the cry finished");
+    ASSERT((engine.pcmChannels[0].status & CHN_ON) == 0, "cry faint cycles: the release-0 cut at EOT ended the channel");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -4391,6 +4691,10 @@ int main(void)
     test_cry_song();
     test_sequencer_xrele();
     test_sequencer_cycles_cry();
+    test_pcm_start_offset();
+    test_sequencer_xcmd_0D();
+    test_sequencer_endtie_walk();
+    test_sequencer_cycles_cry_faint();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

@@ -5,6 +5,10 @@
 
 /* PCM channel operations */
 void m4a_pcm_channel_start(M4APCMChannel *ch, WaveData *wav, uint8_t type);
+/* ply_note with track->unk_3C = startOffset (XCMD 0x0D): the channel starts
+ * `startOffset` samples into the wave. */
+void m4a_pcm_channel_start_at(M4APCMChannel *ch, WaveData *wav, uint8_t type,
+                              uint32_t startOffset);
 void m4a_pcm_channel_stop(M4APCMChannel *ch);
 void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume);
 
