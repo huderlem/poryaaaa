@@ -4646,6 +4646,42 @@ comment line in `mgba_render.c` the only code-file change): 59 diffed, 0
 moved, 57/66, 0 regressions, every row 0.0; unit 1521/1521, blip 49112/0,
 songs 561/561.
 
+### Milestone 4 closed (2026-10-25)
+
+Three consecutive ground-truth probes -- 8a (a second cry while one plays),
+9a (a cry over a sound effect and over music) and 10a (a third cry while
+both cry players are busy) -- were predicted from the source before the
+run and matched mgba to the cycle with no new constant (the chain rule
+1007 + sum (79 + body), the steal, the player choice).  The engine ports
+of 8b and 9b then reproduced their frames and the renders null at the
+one-cry rows' floor.  The remaining slices are therefore **deferred as a
+decision, not an oversight**:
+
+- **10b, the third cry while both cry players are busy**: poryaaaa refuses
+  it today (`--cry2` while both are busy, `m4a_cry_choose_player` -1 with
+  neither free); the game replaces the longer-playing player
+  (`SetPokemonCryTone`'s strictly-larger `clock`, a tie -> player 0) and
+  `MPlayStart`'s `TrackStop` cuts its channels outright.  Everything
+  needed is in step 13's structural statement (the chooser's fallback,
+  `m4a_sequencer_start` on the busy sequencer, `--cry3` /
+  `--cry3-start-frame`, the gates, the corpus row) and the reference WAV is
+  `build/scratch/cry_third_jynx_wailord_bulbasaur.wav`.
+- **The SE-over-music probe**: BGM and SE1 PSG writes on one frame (the SE's
+  after the BGM's in the MPlayMain chain); the `StartTest` block needs a
+  second song id, so a ROM change under the boot-path rule (`AgbMain`
+  instruction-identical, pcm / pcm_cmp / cry_bulbasaur byte-identical
+  before the harness).
+- **A note to carry**: `m4a_engine_kill_channel` leaves the engine
+  channel's track field where the GBA's `TrackStop_2` zeroes it
+  (`channel->track = 0`).  Harmless today -- `m4a_sequencer_player_free`
+  reads that field only for a channel the chain still holds -- but any new
+  test that consults a killed channel's track field would differ from the
+  GBA.
+
+Milestone 5 (MIDI quantization: the design in "Engine milestones" item 5)
+follows; its first slice measures the MIDI path against the same references
+before changing it.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
