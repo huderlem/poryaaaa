@@ -152,5 +152,33 @@
     "release": 225,
     "seconds": 2.0,
     "note": "Cry_Pidgey with CRY_MODE_ROAR_2 (length 60, release 225, pitch 15616 = TIE key 61; the mode sets no chorus): the 0.17 s sample has ended long before tick 60 (the unlink tick on frame 14), so the EOT on frame 63 finds an empty chain and only the xWAIT length changes against cry_pidgey; the xRELE byte reaches no channel"
+  },
+  {
+    "name": "cry_bulbasaur_reverse",
+    "type": "cry",
+    "id": 388,
+    "seconds": 2.0,
+    "note": "gCryTable_Reverse[0] = gCryTable[388] (cry_reverse Cry_Bulbasaur, ToneData type 0x30 = CMP | REV, the same 8183-sample DPCM data as cry_bulbasaur) at CRY_MODE_NORMAL's defaults: SoundMainRAM_Unk1's reversed DPCM walk in isolation, the sample played from its last block to its first and running out through the count path (the unlink tick on frame 50)"
+  },
+  {
+    "name": "cry_jynx_growl1",
+    "type": "cry",
+    "id": 511,
+    "pitch": 15200,
+    "length": 15,
+    "release": 125,
+    "seconds": 2.0,
+    "note": "cry_reverse Cry_Jynx (gCryTable[511]) with CRY_MODE_GROWL_1 (reverse, length 15, release 125, pitch 15200 = TIE key 59 + TUNE 112; the mode sets no chorus): the longest sample played backwards from its end and cut by the EOT at tick 15 (frame 18) with a release tail on a reversed DPCM channel, envelope 124, 60, 29, 14, 6, 2 on frames 18..23 and the channel stopped on frame 24"
+  },
+  {
+    "name": "cry_pidgey_echo_start",
+    "type": "cry",
+    "id": 403,
+    "pitch": 15600,
+    "volume": 90,
+    "length": 25,
+    "release": 100,
+    "seconds": 2.0,
+    "note": "cry_reverse Cry_Pidgey (gCryTable[403]) with CRY_MODE_ECHO_START (reverse, length 25, release 100, pitch 15600 = TIE key 61 + TUNE 56, volume 90; the mode's chorus 192 is not patchable, so it stays 0 and this is one track): the 0.17 s sample is gone by frame 14, so the EOT on frame 28 finds an empty chain and the xRELE byte reaches no channel"
   }
 ]

@@ -2778,6 +2778,103 @@ static void test_pcm_dpcm(void)
     m4a_engine_destroy(&e);
 }
 
+/* The reversed DPCM walk (SoundMainRAM_Unk1 _081DD3C0, cry_reverse /
+ * voice_directsound_compressed_reverse, type 0x30 = CMP | REV) against
+ * make_dpcm_wave's decoded array played backwards: the first frame starts
+ * at the last sample (Unk1's CHN_SPECIAL setup flips currentPointer to
+ * data + size and reads it back as the index), a frame boundary that
+ * falls on a DPCM block boundary resumes in the block below, the
+ * interpolation at half speed looks behind (toward the earlier sample,
+ * across the block boundary), and the walk ends through the count path
+ * at sample 0 whose look-behind is "block -1" (the port decodes a zero
+ * block there; the GBA's address wraps out of the cartridge space -- see
+ * docs/ACCURACY_PLAN.md, probe step 8). */
+static void test_pcm_dpcm_reverse_walk(void)
+{
+    printf("Testing the reversed DPCM walk (REV | CMP)...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    e.pcmDivFreq = 1;
+    static int8_t frame[GBA_PCM_DMA_BUF_SIZE * 2];
+
+    /* 288 = 224 + 64 samples at one sample per output: the first frame
+     * plays decoded[287 .. 64] and the second frame starts exactly at the
+     * block-1 / block-0 boundary, decoded[63 .. 0], then stops. */
+    {
+        enum { SIZE = 288 };
+        static int8_t decoded[SIZE + 1 + M4A_DPCM_BLOCK_SAMPLES];
+        WaveData *wd = make_dpcm_wave(SIZE, 0, 0, decoded);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_CRY_REVERSE);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = 128;
+        ch.envelopeVolumeRight = 128;
+        ASSERT_EQ((int)(ch.currentPointer - wd->data), 0, "dpcm reverse walk: ply_note leaves the pointer at the data start");
+        ASSERT_EQ(ch.count, SIZE, "dpcm reverse walk: count = size");
+        mix_frame(&e, &ch, frame);
+        int ok = 1, first = -1;
+        const int spv = e.pcmSamplesPerVBlank;   /* 224 at the GBA's 13379 Hz */
+        ASSERT_EQ(spv, 224, "dpcm reverse walk: 224 samples per frame");
+        for (int i = 0; i < spv; i++)
+            if (frame[i] != PCM_OUT(decoded[SIZE - 1 - i]) || frame[GBA_PCM_DMA_BUF_SIZE + i] != frame[i]) { ok = 0; if (first < 0) first = i; }
+        if (!ok) printf("  frame 1 first mismatch at output %d: %d, expected %d\n", first, frame[first], PCM_OUT(decoded[SIZE - 1 - first]));
+        ASSERT(ok, "dpcm reverse walk: frame 1 plays decoded[287 .. 64], the last block first");
+        ASSERT((ch.status & CHN_SPECIAL) != 0, "dpcm reverse walk: Unk1 flagged the channel");
+        ASSERT_EQ(ch.count, SIZE - spv, "dpcm reverse walk: 64 samples left after frame 1");
+        ASSERT_EQ((int)(ch.currentPointer - wd->data), 64, "dpcm reverse walk: the stored index after frame 1 is 64 (i3 + 2 of the walk's 62: the next frame re-reads 63 and 62)");
+        ASSERT_EQ((int)ch.xpi, 0, "dpcm reverse walk: block 0 is the decoded one after frame 1 (the look-behind of sample 64 is 63)");
+        mix_frame(&e, &ch, frame);
+        ok = 1; first = -1;
+        for (int i = 0; i < 64; i++)
+            if (frame[i] != PCM_OUT(decoded[63 - i])) { ok = 0; if (first < 0) first = i; }
+        if (!ok) printf("  frame 2 first mismatch at output %d: %d, expected %d\n", first, frame[first], PCM_OUT(decoded[63 - first]));
+        ASSERT(ok, "dpcm reverse walk: frame 2 resumes at decoded[63] across the frame / block boundary and reaches decoded[0]");
+        ASSERT_EQ(ch.status, 0, "dpcm reverse walk: the count path stops the channel after sample 0");
+        ASSERT_EQ(frame[64], 0, "dpcm reverse walk: nothing mixed past the stop");
+        ASSERT_EQ(frame[GBA_PCM_DMA_BUF_SIZE + 64], 0, "dpcm reverse walk: nothing mixed past the stop (left)");
+        free(wd);
+    }
+
+    /* Half speed on 100 samples: even outputs are decoded[99 - i/2], odd
+     * ones interpolate toward the earlier sample (r1 = earlier - current,
+     * (r9 * r1) >> 23 with r9 = 0x400000), the pairs crossing the block
+     * boundary at 64 / 63 like any other; output 199 interpolates from
+     * decoded[0] toward the look-behind of sample 0, which the port reads
+     * as 0 (a zero block for index -1).  The channel stops on the next
+     * crossing. */
+    {
+        enum { SIZE = 100 };
+        static int8_t decoded[SIZE + 1 + M4A_DPCM_BLOCK_SAMPLES];
+        WaveData *wd = make_dpcm_wave(SIZE, 0, 0, decoded);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_CRY_REVERSE);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = 128;
+        ch.envelopeVolumeRight = 128;
+        mix_frame(&e, &ch, frame);
+        int ok = 1, first = -1, boundaryOk = 1;
+        for (int i = 0; i < 2 * SIZE - 2; i++) {
+            int32_t s0 = decoded[SIZE - 1 - i / 2], s1 = decoded[SIZE - 2 - i / 2];
+            int32_t expect = (i % 2 == 0) ? s0 : s0 + (((s1 - s0) * 0x400000) >> 23);
+            if (frame[i] != PCM_OUT(expect)) { ok = 0; if (first < 0) first = i; if (i / 2 == SIZE - 1 - 64 || i / 2 == SIZE - 1 - 63) boundaryOk = 0; }
+        }
+        if (!ok) printf("  half speed first mismatch at output %d\n", first);
+        ASSERT(ok, "dpcm reverse walk: half speed interpolates toward the earlier decoded sample");
+        ASSERT(boundaryOk, "dpcm reverse walk: the pair across the block boundary (64 -> 63) interpolates like any other");
+        ASSERT_EQ(frame[2 * SIZE - 2], PCM_OUT(decoded[0]), "dpcm reverse walk: output 198 is decoded[0]");
+        ASSERT_EQ(frame[2 * SIZE - 1], PCM_OUT(decoded[0] + (((0 - decoded[0]) * 0x400000) >> 23)),
+                  "dpcm reverse walk: output 199 interpolates from decoded[0] toward the zero look-behind of block -1");
+        ASSERT_EQ(ch.status, 0, "dpcm reverse walk: stops on the crossing after sample 0");
+        ASSERT_EQ(frame[2 * SIZE], 0, "dpcm reverse walk: silent after the stop");
+        free(wd);
+    }
+    m4a_engine_destroy(&e);
+}
+
 /* ------------------------------------------------------------------------
  * The SoundMainRAM mixer against hand-computed arithmetic (m4a_mixer.c)
  * ------------------------------------------------------------------------ */
@@ -4315,7 +4412,7 @@ static void test_cry_song(void)
     static const struct {
         const char *name; int16_t pitch; int8_t pan; uint8_t volume; uint16_t length; uint8_t release;
         uint8_t key, tune, tune2, panByte, volByte, waitLo, waitHi, releaseByte;
-    } variants[6] = {
+    } variants[9] = {
         /* Cry_Jynx at CRY_MODE_FAINT's 14440: b = 0x38E8 -> key 0x38, tune 0x74, tune2 (16 + 0x74) & 0x7F */
         { "cry_jynx_faint", 14440, 0, 120, 140, 0, 0x38, 0x74, 0x04, 0x40, 0x78, 0x8C, 0x00, 0x00 },
         /* Cry_Bulbasaur at CRY_MODE_HIGH_PITCH's 15800, pan 63: b = 0x3E38 -> key 0x3E, tune 0x1C, tune2 0x2C; PAN (63 + 64) & 0x7F */
@@ -4329,8 +4426,17 @@ static void test_cry_song(void)
         { "cry_wailord_doubles", 15360, 0, 120, 20, 225, 0x3C, 0x40, 0x50, 0x40, 0x78, 0x14, 0x00, 0xE1 },
         /* CRY_MODE_ROAR_2 on Cry_Pidgey: pitch 15616 (b = 0x3D80 -> key 0x3D, tune 0x40, tune2 0x50), length 60 (0x3C 0x00), release 225 */
         { "cry_pidgey_roar2", 15616, 0, 120, 60, 225, 0x3D, 0x40, 0x50, 0x40, 0x78, 0x3C, 0x00, 0xE1 },
+        /* Milestone 4 slice 5, the reverse cries (gCryTable_Reverse's entries; the type byte is the
+         * voice's, the template does not change): cry_reverse Cry_Bulbasaur at CRY_MODE_NORMAL's defaults */
+        { "cry_bulbasaur_reverse", 15360, 0, 120, 140, 0, 0x3C, 0x40, 0x50, 0x40, 0x78, 0x8C, 0x00, 0x00 },
+        /* CRY_MODE_GROWL_1 on cry_reverse Cry_Jynx: pitch 15200 (b = 0x3BE0 -> key 0x3B, tune 0x70, tune2 (16 + 0x70) & 0x7F = 0x00),
+         * length 15 (0x0F 0x00), release 125 (0x7D) */
+        { "cry_jynx_growl1", 15200, 0, 120, 15, 125, 0x3B, 0x70, 0x00, 0x40, 0x78, 0x0F, 0x00, 0x7D },
+        /* CRY_MODE_ECHO_START on cry_reverse Cry_Pidgey: pitch 15600 (b = 0x3D70 -> key 0x3D, tune 0x38, tune2 0x48),
+         * volume 90 (VOL 0x5A), length 25 (0x19 0x00), release 100 (0x64); the mode's chorus 192 is not patchable (0, one track) */
+        { "cry_pidgey_echo_start", 15600, 0, 90, 25, 100, 0x3D, 0x38, 0x48, 0x40, 0x5A, 0x19, 0x00, 0x64 },
     };
-    for (int k = 0; k < 6; k++) {
+    for (int k = 0; k < 9; k++) {
         M4ACryParams v = d;
         v.pitch = variants[k].pitch; v.pan = variants[k].pan; v.volume = variants[k].volume;
         v.length = variants[k].length; v.release = variants[k].release;
@@ -4966,6 +5072,91 @@ static void test_sequencer_cycles_cry_faint_full(void)
     free(wd);
 }
 
+/* cry_jynx_growl1 (milestone 4 slice 5): cry_reverse Cry_Jynx with
+ * CRY_MODE_GROWL_1 (pitch 15200, length 15, release 125) against its probe:
+ * the start tick 4077 on frame 3, 1596 to the EOT on frame 18 (1928, the
+ * reversed channel still sounding and holding the key), 1192 on 19, 1007
+ * after; the release envelope 255 * 125 >> 8 per pass from the EOT frame
+ * (124, 60, 29, 14, 6, 2 on frames 18..23) and the channel's death on
+ * frame 24, the probe's _081DCFB0 stamp (raw f25).  The channel walks the
+ * sample backwards from its end: its index goes down from 23524. */
+static void test_sequencer_cycles_cry_growl1_reverse(void)
+{
+    printf("Testing sequencer CgbSound entry and the release tail on a reversed cry (cry_jynx_growl1 probe)...\n");
+    static int8_t decoded[23524 + 2 * M4A_DPCM_BLOCK_SAMPLES];
+    WaveData *wd = make_dpcm_wave(23524, 0, 0, decoded);
+    wd->freq = 10512u << 10;
+    static ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_CRY_REVERSE;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF; voices[0].decay = 0; voices[0].sustain = 0xFF; voices[0].release = 0;
+
+    M4ACryParams p;
+    m4a_cry_params_default(&p);
+    p.pitch = 15200; p.length = 15; p.release = 125;      /* CRY_MODE_GROWL_1 (its reverse flag is the table entry's type) */
+    M4ASong *song = m4a_cry_song_new(&p);
+    ASSERT(song != NULL, "cry growl1 cycles: song built");
+    if (!song) { free(wd); return; }
+    ASSERT(song->data[0x2A] == 0x3B && song->data[0x12] == 0x70 && song->data[0x19] == 0x00 && song->data[0x2E] == 0x0F
+           && song->data[0x2F] == 0x00 && song->data[0x26] == 0x7D, "cry growl1 cycles: TIE key 59, TUNE 112, TUNE2 0, xWAIT 15, xRELE 125");
+
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    ASSERT_EQ(m4a_sequencer_set_player(&seq, M4A_PLAYER_CRY0), 0, "cry growl1 cycles: cry player 0");
+    m4a_engine_boot(&engine, false);
+    m4a_sequencer_start(&seq, song);
+
+    static float outL[4096], outR[4096];
+    static const uint8_t seq125[7] = { 124, 60, 29, 14, 6, 2, 0 };
+    int mismatches = 0, envBad = -1, deathFrame = -1;
+    bool liveAtEot = false, releaseAtEot = false, reversed = false, walkingDown = false;
+    int idxAfter4 = -1, idxAfter10 = -1;
+    for (int k = 3; k <= 30; k++) {
+        int expected = k == 3 ? 4077 : k < 18 ? 1596 : k == 18 ? 1928 : k == 19 ? 1192 : 1007;
+        if (k == 18)
+            liveAtEot = (engine.pcmChannels[0].status & CHN_ON) != 0;
+        advance_frames(&engine, 1, outL, outR);
+        if (seq.frameCycles != expected) {
+            if (mismatches++ < 5)
+                printf("  frame %d: engine %d, mgba %d\n", k, seq.frameCycles, expected);
+        }
+        if (k == 4) {
+            reversed = engine.pcmChannels[0].type == VOICE_CRY_REVERSE && (engine.pcmChannels[0].status & CHN_SPECIAL) != 0;
+            idxAfter4 = (int)(engine.pcmChannels[0].currentPointer - wd->data);
+        }
+        if (k == 10)
+            idxAfter10 = (int)(engine.pcmChannels[0].currentPointer - wd->data);
+        if (k == 18)
+            releaseAtEot = engine.pcmChannels[0].release == 125;
+        if (k >= 18 && k <= 23) {
+            if (!(engine.pcmChannels[0].status & CHN_ON) || engine.pcmChannels[0].envelopeVolume != seq125[k - 18]) {
+                if (envBad < 0) { envBad = k; printf("  frame %d: env %d status %02X, GBA %d\n", k, engine.pcmChannels[0].envelopeVolume, engine.pcmChannels[0].status, seq125[k - 18]); }
+            }
+        }
+        if (deathFrame < 0 && k >= 18 && !(engine.pcmChannels[0].status & CHN_ON))
+            deathFrame = k;
+    }
+    walkingDown = idxAfter4 > 0 && idxAfter4 < 23524 && idxAfter10 > 0 && idxAfter10 < idxAfter4;
+    ASSERT(reversed, "cry growl1 cycles: the channel carries type 0x30 (CMP | REV) and went through Unk1");
+    ASSERT(walkingDown, "cry growl1 cycles: the sample index walks down from the end (frame 10 below frame 4, both inside the data)");
+    ASSERT(liveAtEot, "cry growl1 cycles: the reversed channel is still sounding when the EOT tick runs (frame 18)");
+    ASSERT(releaseAtEot, "cry growl1 cycles: the channel carries xRELE's 125");
+    ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the cry_jynx_growl1 probe on frames 3..30 (cry 0)");
+    ASSERT_EQ(envBad, -1, "cry growl1 cycles: the release envelope on frames 18..23 is 255 * 125 >> 8 per pass (124 .. 2)");
+    ASSERT_EQ(deathFrame, 24, "cry growl1 cycles: the channel dies on frame 24, the probe's _081DCFB0 stamp (f25)");
+    ASSERT(m4a_sequencer_finished(&seq), "sequencer: the cry finished (the track gone at 18, the channel outliving it)");
+
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -4998,6 +5189,7 @@ int main(void)
     test_pcm_reverse();
     test_pcm_reverse_legato_inherit();
     test_pcm_dpcm();
+    test_pcm_dpcm_reverse_walk();
     test_mixer_arithmetic();
     test_song_parser();
     test_sequencer_tempo();
@@ -5024,6 +5216,7 @@ int main(void)
     test_sequencer_cycles_cry_faint();
     test_pcm_release_envelope();
     test_sequencer_cycles_cry_faint_full();
+    test_sequencer_cycles_cry_growl1_reverse();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();
     test_midi_path_modt_tune_lfodl();

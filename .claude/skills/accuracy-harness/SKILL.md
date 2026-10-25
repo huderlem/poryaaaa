@@ -280,7 +280,11 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   write diff.
 - Cry: `{"name": "cry_<species>", "type": "cry", "id": N, "seconds": S}`,
   N the gCryTable index (the `cry` lines of `sound/cry_tables.inc` from
-  0).  The ROM's `StartCry` plays `gCryTable[N]` with `PlayCryInternal`'s
+  0, then the `cry_reverse` lines after `gCryTable_Reverse::` continuing
+  the count: 388 + species is the reversed cry, type 0x30 = CMP | REV,
+  the same sample played backwards; the ROM's one block holds both
+  labels, `voicegroup_cry_table_entry` reads it the same way and
+  `poryaaaa_render --cry N` prints "reversed").  The ROM's `StartCry` plays `gCryTable[N]` with `PlayCryInternal`'s
   CRY_MODE_NORMAL defaults (`mgba_render --type cry --id N`); the runner
   passes `--cry N` to poryaaaa_render, which plays the cry song template
   (`plugin/m4a_cry.c`: gPokemonCrySongTemplate with the SetPokemonCry*
@@ -308,7 +312,12 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   Cry samples are 10512 Hz DPCM, none loops, the longest (Jynx) ends
   before the 140-tick EOT; the residual of a cry is the PCM
   scheduler-lateness floor (one-sample runs at the `.events` slot
-  crossings), large per sample because DPCM cry waveforms jump.
+  crossings), large per sample because DPCM cry waveforms jump.  A
+  reversed cry that runs out of data ends on the forward sample's first
+  sample, whose look-behind is "block -1": the GBA reads open bus there
+  (mgba: the IWRAM Unk2 prefetch word, decoding to 38) and the port a
+  zero block, so a one-sample run at a reversed cry's end is that
+  look-behind, not the decode (plan, probe step 8).
 
 ## Debugging a single test
 
