@@ -2169,17 +2169,10 @@ oom:
         sPsgLog.engine = &engine;
         engine.psg[0].writeLog = psg_log_cb;
     }
-    /* Keep the boot's output so MIDI and compiled-song renders of the same
-     * material line up with each other and with an emulator recording. */
-    m4a_engine_boot(&engine, true);
-    /* The frame latch (plan, milestone 5): events wait for the next tick. */
-    m4a_engine_set_quantize_events(&engine, quantize);
-    if (quantize)
-        printf("MIDI events latched to the VBlank tick (--quantize)\n");
-
     /* --gba-tempo-grid: the CgbSound entry of the song mid2agb makes of the
      * MIDI, from a timing-only sequencer on the chosen player (load_timing_song),
-     * attached after the boot as the --song path's sequencer is. */
+     * attached before the boot as the --song path's sequencer is, so frame 2's
+     * SoundMain charges the paused player (1007) as the ROM's does. */
     static M4ASequencer timingSeq;
     M4ASong *timingSong = gbaTempoGrid ? load_timing_song(midiPath, extendedClocks, songVolume) : NULL;
     FILE *seqLog = NULL;
@@ -2202,6 +2195,17 @@ oom:
         printf("  CgbSound entry: MPlayMain over mid2agb's song of the MIDI (%u tracks), player %d\n",
                timingSong->trackCount, player);
     }
+    else if (gbaTempoGrid && seqLogPath)
+        fprintf(stderr, "Note: --seq-log writes nothing without mid2agb's song\n");
+
+    /* Keep the boot's output so MIDI and compiled-song renders of the same
+     * material line up with each other and with an emulator recording. */
+    m4a_engine_boot(&engine, true);
+    /* The frame latch (plan, milestone 5): events wait for the next tick. */
+    m4a_engine_set_quantize_events(&engine, quantize);
+    if (quantize)
+        printf("MIDI events latched to the VBlank tick (--quantize)\n");
+
 
     /* ---- Allocate output buffers ---- */
     float *outL = calloc(totalSamples, sizeof(float));

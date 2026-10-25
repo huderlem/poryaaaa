@@ -1318,9 +1318,9 @@ void m4a_sequencer_init_timing(M4ASequencer *s, M4AEngine *engine)
     for (int h = 0; h < CHAN_COUNT; h++)
         s->tmTrack[h] = M4A_NO_TRACK;
     m4a_sequencer_set_player(s, M4A_PLAYER_BGM);
-    /* The trace numbers frames as the ROM's engine frames: the boot already
-     * ran frame 2's SoundMain, whose MPlayMain a sequencer attached before
-     * it counts. */
+    /* The trace numbers frames as the ROM's engine frames: attached after
+     * the boot, frame 2's SoundMain (whose MPlayMain a sequencer attached
+     * before it counts) has already run. */
     s->frameCount = engine->booted ? 1 : 0;
     engine->frameHook = frame_hook;
     engine->frameHookUser = s;

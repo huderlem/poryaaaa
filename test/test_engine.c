@@ -6731,14 +6731,76 @@ static void test_cgb_entry_midi_path(void)
         ASSERT(bad == 0 && writes > 100 && tick > 50 && tick < ticks, msg);
     }
 
+    /* DirectSound: ply_note's channel scan, channel by channel -- a note
+     * under running status, then a three-note chord in one tick while the
+     * earlier notes release (ON + STOP candidates, equal-priority compares,
+     * the unlinks). */
+    WaveData *wd = seq_test_wave();
+    voices[2].type = VOICE_DIRECTSOUND;
+    voices[2].key = 60;
+    voices[2].wav = wd;
+    voices[2].attack = 0xFF;
+    voices[2].sustain = 0xFF;
+    voices[2].release = 0xE0;
+    snprintf(text, sizeof(text), "%s%s%s", seq_song_header,
+             "\t.byte\tKEYSH , t_key+0\n"
+             "\t.byte\tTEMPO , 120*t_tbs/2\n"
+             "\t.byte\t\tVOICE , 2\n"
+             "\t.byte\t\tVOL   , 127*t_mvl/mxv\n"
+             "\t.byte\t\tN12   , Cn3 , v127\n"
+             "\t.byte\tW12\n"
+             "\t.byte\t\t        Dn3 \n"
+             "\t.byte\tW12\n"
+             "\t.byte\t\tN24   , Cn3 \n"
+             "\t.byte\t\tN24   , En3 \n"     /* mid2agb repeats the op inside a tick */
+             "\t.byte\t\tN24   , Gn3 \n"
+             "\t.byte\tW24\n"
+             "\t.byte\t\tN12   , An3 \n"
+             "\t.byte\tW24\n"
+             "\t.byte\tFINE\n", seq_song_footer);
+    static const CgbEntryEvent pcm[] = {
+        { 0, 'p', 1, 2, 0 }, { 0, 'c', 1, 7, 127 }, { 0, 'n', 1, 60, 127 },
+        { 12, 'n', 1, 60, 0 }, { 12, 'n', 1, 62, 127 },
+        { 24, 'n', 1, 62, 0 }, { 24, 'n', 1, 60, 127 }, { 24, 'n', 1, 64, 127 }, { 24, 'n', 1, 67, 127 },
+        { 48, 'n', 1, 60, 0 }, { 48, 'n', 1, 64, 0 }, { 48, 'n', 1, 67, 0 }, { 48, 'n', 1, 69, 127 },
+        { 60, 'n', 1, 69, 0 },
+    };
+    for (int q = 0; q < 2; q++) {
+        int bad = cgb_entry_pair(text, voices, pcm, (int)(sizeof(pcm) / sizeof(pcm[0])), 120, q == 1, 100,
+                                 entry, &writes, &firstBad);
+        /* tick 12 (frame 18) one note, tick 24 (frame 33) the chord: three
+         * notes, each a scan past the channels before it */
+        int one = entry[18 - 3] - entry[17 - 3], chord = entry[33 - 3] - entry[32 - 3];
+        snprintf(msg, sizeof(msg), "DirectSound chord%s: the entry is the sequencer's, frames 3 .. 102"
+                 " (%d differ, first %d; one note +%d, the chord +%d)", q ? " latched" : "", bad, firstBad, one, chord);
+        ASSERT(bad == 0 && one > 800 && chord > 3 * one, msg);
+    }
+    free(wd);
+
     /* A timing-only sequencer drives nothing: with no MIDI events its engine's
      * channels never start, its tracks keep their state, the song header's
      * reverb is not applied -- and its entries are still the song's. */
     {
+        /* every command that sets track state on the --song path */
         M4ASong *song = seq_song(
+            "\t.byte\tKEYSH , t_key+2\n"
             "\t.byte\tTEMPO , 120*t_tbs/2\n"
-            "\t.byte\t\tVOICE , 0\n"
+            "\t.byte\t\tVOICE , 1\n"
+            "\t.byte\t\tVOL   , 90*t_mvl/mxv\n"
+            "\t.byte\t\tPAN   , c_v+20\n"
+            "\t.byte\t\tBENDR , 12\n"
+            "\t.byte\t\tBEND  , c_v+30\n"
+            "\t.byte\t\tTUNE  , c_v+5\n"
+            "\t.byte\t\tLFOS  , 40\n"
+            "\t.byte\t\tLFODL , 2\n"
+            "\t.byte\t\tMODT  , 1\n"
+            "\t.byte\t\tMOD   , 24\n"
+            "\t.byte\t\tXCMD  , xIECV , 9\n"
+            "\t.byte\t\tXCMD  , xIECL , 8\n"
+            "\t.byte\t\tPRIO  , 5\n"
             "\t.byte\t\tN24   , Cn3 , v127\n"
+            "\t.byte\tW24\n"
+            "\t.byte\t\tN24   , Dn3 , v100\n"
             "\t.byte\tW24\n"
             "\t.byte\tFINE\n");
         ASSERT(song != NULL, "timing song parses");
@@ -6755,7 +6817,7 @@ static void test_cgb_entry_midi_path(void)
             ASSERT(!e.externalSequencer, "timing-only: the engine keeps its own per-tick work");
             float outL[1024], outR[1024];
             int on = 0, first = 0;
-            for (int f = 0; f < 40; f++) {
+            for (int f = 0; f < 70; f++) {
                 lfo_order_frame(&e, outL, outR);
                 if (f == 0) first = e.cgbEntryCycles + M4A_CYC_SOUNDMAIN_ENTRY;
                 for (int c = 0; c < TOTAL_PCM_CHANNELS; c++) on += (e.pcmChannels[c].status & CHN_ON) != 0;

@@ -74,7 +74,8 @@ the ROM's on every frame of all 44 rows (slice 5); `--player` and
 Without the grid (the aligned pair, the plugin, by decision) the entry
 stays the fixed one-track no-tick value.  What is left, each against
 the row's own `--song` render: every PSG write of every row is on its
-`--song` cycle, register and value (all PSG micro rows, groudon,
+`--song` cycle, register and value but rg_vs_trainer's frames 904 .. 944
+(the interleave below; all PSG micro rows, groudon,
 se_exp, se_faint, se_truck_unload, se_low_health -inf or at their
 `--song` value); the PCM micro rows are bit-identical to it but vol and
 lfo_delay (ply_fine, below); per-tick command batching (a VOL before a note reaches every

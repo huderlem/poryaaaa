@@ -7450,13 +7450,13 @@ their note-off: its gates are exact by construction), `-X` with
 `--extended-clocks`, `-V` with `--song-volume`; `-P` / `-R` / `-G` do not
 enter the cost (one player's notes compare equal priorities; reverb and
 the voicegroup name are not read).  That song runs on **the sequencer
-in a shadow mode** (`m4a_sequencer_init_shadow`): MPlayMain's whole
+in a timing mode** (`m4a_sequencer_init_timing`): MPlayMain's whole
 control flow and every `M4A_CYC_*` charge exactly as on the `--song`
 path -- one cost model, no copy -- but its channel and track accesses go
 to its own arrays, it never starts, stops or changes an engine channel
 or track, and the channel *liveness* its branches test comes from the
 MIDI engine: at the end of each SoundMain (after SoundMainRAM, where the
-ROM's channels die) the shadow takes the engine's real channel statuses;
+ROM's channels die) the timing copy takes the engine's real channel statuses;
 within the next frame it applies its own note starts, gate expiries and
 EOTs to that copy as MPlayMain does; ownership, priority, keys, chains
 and gates are its own.  It runs as the engine's frame hook (MPlayMain's
@@ -7466,7 +7466,7 @@ MIDI path's own tick is untouched) and publishes the frame's sum as
 costs are the ROM's frames, which the events only reach on the grid
 (without it the MIDI path's ticks are its own and a ROM entry for them
 does not exist); the plugin never sets it.  With the grid, `--player`
-and `--seq-log` also apply on the MIDI path (the shadow's player and its
+and `--seq-log` also apply on the MIDI path (the timing-only sequencer's player and its
 trace).  A MIDI mid2agb rejects keeps the fixed entry, with a warning.
 
 *Why it is the ROM's.*  The cost is MPlayMain's over the very bytes the
@@ -7480,10 +7480,10 @@ ROM's, the entry is the ROM's by construction; where they do not
 *Predictions* (grid form; latched and unlatched alike):
 
 1. **Song input byte-identical**: claim_check 59 / 0 moved / 57/66 / 0
-   regressions / every row 0.0 (the shadow mode is new code beside the
+   regressions / every row 0.0 (the timing mode is new code beside the
    sequencer's; with it off every access is the old one).
 2. **The aligned pair byte-identical** to `-lfo-order-aligned(-latch)`
-   (no shadow without the grid).
+   (no timing-only sequencer without the grid).
 3. **PCM-only rows byte-identical** to their lfo-order WAVs: the 18
    PCM micro rows (vol and lfo_delay at -47.2 / -20.3 included) and
    se_rain_stop -- nothing reads the entry without a CGB channel.
@@ -7639,8 +7639,8 @@ PCM or LFO state, below).
 1. *Song input byte-identical*: held.
 2. *The aligned pair byte-identical*: held (fields and WAVs, both latch
    forms).
-3. *PCM-only rows byte-identical*: held (18 micro rows and se_rain_stop).
-4. *Every PSG write on its `--song` cycle*: held, 25 rows, every write
+3. *PCM-only rows byte-identical*: held (17 micro rows and se_rain_stop).
+4. *Every PSG write on its `--song` cycle*: held, 26 rows, every write
    of every equal frame.
 5. *The PSG micro rows -inf, pcm_psg at its `--song` -55.0 / -49.2*:
    held, all 13.
@@ -7657,7 +7657,8 @@ PCM or LFO state, below).
 render): with every PSG write on its `--song` cycle and register / value
 list, the PSG half of every row is the song path's, except
 rg_vs_trainer's frames 904 .. 944 (the two-tick-frame LFO interleave).
-What the seven failing rows still differ in is their DirectSound side --
+What the seven failing mixed rows still differ in (lfo_delay and
+se_rain_stop, PCM only, fail on the same items) is their DirectSound side --
 the per-tick command batching and ply_fine's unlink of slice 1 / 3b
 (vol -47.2, lfo_delay -20.3, se_rain_stop and se_contest_place named
 there; the songs' PCM tracks the same mechanisms, not taken apart here)
@@ -7671,6 +7672,108 @@ value, by decision.
 default; `-cgb-entry-aligned` / `-aligned-latch` for
 `--no-gba-tempo-grid`, identical to the lfo-order-aligned pair); the
 lfo-order set is history.
+
+**Code review of slice 5 (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: the timing mode against MPlayMain / ply_note /
+ply_endtie / ply_fine / TrackStop / RealClearChain in m4a_1.s and the
+probe sections' costs, the sequencer and plugin paths, the renderer, the
+vendored mid2agb; reviewer 2: every number of this section recomputed
+from the reports, WAVs, PSG logs and `--seq-log` traces with its own
+per-frame matching and two fresh renders, the unit test assertion by
+assertion, the docs).
+
+Confirmed: the `--song` / `--cry` path statement for statement (every
+accessor's engine branch the old access, the reverb gated only in
+timing mode, the hooks NULL unless set) and the plugin untouched; every
+engine-side state change the sequencer's costs read later reproduced on
+the timing copies (TrkVolPitSet, the LFO-delay restart, the channel's
+status / priority / owner / keys / gate, the voice); the snapshot point
+(MPlayMain sees the channels as CgbSound and SoundMainRAM left them;
+latched events drained after the frame hook; the shadow pool excluded);
+MPlayStart between frame 2's and frame 3's SoundMain with and without
+the start delay; `--player`; the omitted mid2agb options cost-neutral
+(header `.equ` lines only, -P cancelling in every comparison); the
+vendored mid2agb behaviour-preserving with every file-scope static
+reset; the per-row table, the pass counts, latch identity, the aligned
+pair's identity, the 34 WAVs equal to `--song`, every offset of the
+offset table, the FIFO-stall frames (mt_chimney 120 / 236 / 352 / 584,
+rg_vs_trainer 87 .. 338, each two offsets 18 apart), wave's frame 139,
+the unit test's 15 assertions and its events against the song texts.
+
+*Acted on* (each alone; gate after each: claim_check 59 diffed, 0
+moved, 57/66, 0 regressions, no row moved; the four midi runs 0 field
+differences on 44 rows against the cgb-entry set and every WAV
+byte-identical; unit as below):
+
+- *Frame 2's entry* (both reviewers): the timing-only sequencer was
+  attached after the boot, so frame 2's SoundMain kept the fixed 1402
+  where the ROM's (and `--song`'s) charges the paused player, 1007 --
+  unobservable (no PSG write before frame 3) but not "every frame".  The
+  renderer now attaches it before the boot, as the `--song` path does
+  (its comment had said the opposite); the `--seq-log` of every probed
+  row is now byte-identical to the `--song` render's, frame 2 included.
+  Harness-neutral.
+- *The unit test's drives-nothing song* (reviewer 2): TEMPO / VOICE /
+  N24 only, so a timing mode writing VOL, PAN, BEND, the LFO, the xcmd
+  or PRIO into the engine's tracks would have passed; it now carries
+  every track-setting command and two notes (70 frames).  With a mutant
+  that writes VOL into the engine's track, it and the two-track pair
+  fail; without, pass.  And a DirectSound case (reviewer 2: no PCM
+  scan covered): one note under running status, a three-note chord in
+  one tick while the earlier notes release, latched and not -- the
+  entry equal on frames 3 .. 102, one note +1019, the chord +3197 (three
+  scans).  Writing it, the chord first read as one note: `N24 Cn3` then
+  data bytes `En3`, `Gn3` is one note with a velocity and a gate byte;
+  mid2agb repeats the op inside a tick (`s_keepLastOpName` false
+  without a wait), as the test now does.  Unit **1875/1875**.
+- *`--seq-log` without mid2agb's song* (reviewer 1): says so on stderr.
+- *Docs* (reviewer 2): "shadow mode" / `m4a_sequencer_init_shadow` in
+  the design text renamed to the code's timing mode; "the seven failing
+  rows" are the seven mixed ones (lfo_delay and se_rain_stop fail too,
+  PCM only).  Left as written, with the corrections here: the gap
+  paragraph's and prediction 4's "25 rows" are **26** (14 PSG micro rows
+  with pcm_psg, 5 SEs -- se_rain_stop has only the boot's writes -- and 7
+  songs; 25 is the count of rows whose WAV moved); prediction 3's "18
+  PCM micro rows" are **17**; the slice commit's "(before: 2 of
+  ~23000)" is **4 of 17605** (2 each on wave / wave_alt, non-boot writes
+  in equal frames); the gap paragraph's offsets leave out lfo_psg's
+  frames 63 (-968), 123 (-925), 153 (-649) and psg_mix's off-tick
+  frames (49 at -18, 63 at -778, others -558 .. -1210); several
+  "commonest" offsets in the offset table are ties (sq1 / sq2 rows
+  -2667 / -1388 / -1394, pcm_psg, se_contest_place, se_truck_unload,
+  se_low_health); the lfo-order column gives a lag only for groudon
+  (se_low_health 7.9 ms, sq1_env / wave / se_exp / wave_alt 0.1 .. 0.2
+  had one too); "every frame" in the slice commit's message held from
+  frame 3 (frame 2 now too, above).
+
+*Recorded, not acted on* (no corpus row reaches them: the entry is the
+ROM's on every frame of all 44; each changes only `cgbEntryCycles` on
+the MIDI path, never what the engine plays):
+the snapshot refreshes only the channel status, so where the MIDI
+engine places a note on another channel than the ROM's walk (event
+order within a tick, the engine's missing PRIO handler, an MTrk with
+notes on two channels -- one engine track, two mid2agb tracks -- a song
+with more tracks than the player, whose extra tracks the engine plays)
+the timing copy's owners / priorities mix the two until those notes
+die (reviewer 1); STOP marks the copy sets inside MPlayMain (gate
+expiry, EOT, FINE) are overwritten by the next snapshot if the MIDI
+engine's note-off comes a tick later -- possible when the MIDI's ticks
+are not whole mid2agb clocks (mid2agb floors on-time and duration, the
+renderer the off-time); loop markers: mid2agb takes `[` / `]` / `][` /
+`:` only from the first MTrk, untrimmed, the renderer the first `[` /
+`]` of any track, trimmed -- a MIDI where they differ gets a GOTO
+structure other than the expansion; a DirectSound voice without a
+sample (`wav == NULL`) is taken and charged in timing mode where the
+`--song` engine returns no channel (the timing mode is the ROM's
+there); a project song built without -E would be costed with -E's
+encoding; a chained player on a timing sequencer would drive the engine
+(no caller); `std::tmpfile` failing on some Windows CRTs falls back to
+the fixed entry with a warning; the unit test's coverage (the song text
+stands in for mid2agb's output; the renderer's mapping and
+`load_timing_song` are covered by the harness, not by a unit test; the
+two-track case's tick count is a sanity bound); TrkVolPitSet on every
+resolved note in both engines where the ROM runs it after the channel
+is taken (pre-existing, no cost reads keyM in between).
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
