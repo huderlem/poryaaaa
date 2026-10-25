@@ -2568,6 +2568,95 @@ partial, see above).  No code changed after the baseline, so
 `2026-10-25_cry-reverse.json` stands as saved (its own `claim_check.sh`
 run: 50/57, 50 diffed, 0 moved writes, 1328/1328, blip 0, songs 561/561).
 
+### Done: milestone 4 slice 6, cry chorus, the two-track modes (2026-10-25)
+
+`PlayCryInternal`'s chorus modes join the corpus: `SetPokemonCryChorus`
+with a nonzero value makes the cry song **two tracks** (part0: TUNE, GOTO
+cont; part1: TUNE2 = (chorus + TUNE) & 0x7F, falling into cont), and the
+cry player's MPlayMain runs two tracks with `ply_note` twice on the start
+tick for the first time.  A second cry while one plays and cries over
+music stay for later slices.  **ROM change** (probe step 9 above): `struct
+AccParams` gains `s8 chorus` at block offset 19, `StartCry` passes it to
+`SetPokemonCryChorus` in `PlayCryInternal`'s order, both patchers write
+byte 11 of the block, every ROM symbol after main.o moved +0x1c, the
+CgbSound body unchanged, the 57 previous rows identical under the new ROM
+before any engine change.  **No engine change**: the port's `m4a_cry.c`
+already built the two-track song and the sequencer's per-track model
+already reproduced the two-track frames; the slice plumbs the value
+(`poryaaaa_render --cry-chorus`, `M4ACryParams.chorus`; songs.json
+`"chorus"` through accuracy.py and claim_check.sh) and gates it against
+the ROM.  Baseline `baselines/2026-10-25_cry-chorus.json` / `.txt`:
+**52/60 pass at -40 dB**; the 57 previous rows are unchanged in every
+report field but the ref path (`compare_reports.py 2026-10-25_cry-reverse.json
+2026-10-25_cry-chorus.json`: 0 regressions, 0 improvements, every -inf
+still -inf, every row 0.0; the seven documented FAILs as before).
+`poryaaaa_unit_tests` 1373/1373 (45 new), `poryaaaa_blip_tests` 49112/0,
+`poryaaaa_song_tests` 561/561.  `claim_check.sh`: 53 probed tests (the
+three new ones added), 0 moved writes.
+
+| test | gCryTable | mode | tracks / samples | null | worst 1 s | ref dBFS | |
+|---|---|---|---|---|---|---|---|
+| cry_bulbasaur_encounter | 0 | CRY_MODE_ENCOUNTER: pitch 15600, chorus 20, volume 90, release 225 (length 140) | two channels on Cry_Bulbasaur's 8183 samples at TUNE 56 / 76 (about 11.0 / 11.1 kHz): both run out through the count path (unlink ticks on 47 / 48), the EOT at 143 finds two empty chains | -46.5 | -43.6 | -28.8 | PASS |
+| cry_jynx_echo_end | 123 | CRY_MODE_ECHO_END: pitch 15555, chorus 192, volume 70, release 220 (length 140) | two channels on Cry_Jynx's 23524 samples at TUNE 33 / 97 (the wrap: (192 + 33) & 0x7F; about 10.8 / 11.5 kHz, 2.2 / 2.0 s): both run out through the count path (unlinks on 126 / 133) before the EOT at 143 | -43.9 | -40.9 | -28.4 | PASS |
+| cry_pidgey_echo_start_chorus | 403 (= gCryTable_Reverse[15]) | CRY_MODE_ECHO_START complete: reverse, length 25, release 100, pitch 15600, chorus 192, volume 90 | two reversed channels on Cry_Pidgey's 1902 samples at TUNE 56 / 120: gone on 13 / 14, the EOT at 28 finds two empty chains | -31.3 | -28.9 | -33.2 | FAIL |
+
+**The template bytes** (probe step 9's table, worked by hand before the
+first render and pinned by `test_cry_song`'s variants rows 10-12): trackCount
+2 on all three; TIE key 0x3D, TUNE 0x38, TUNE2 0x4C, VOL 0x5A, xWAIT 0x8C
+0x00, xRELE 0xE1 for (a); 0x3D / 0x21 / 0x61 / 0x46 / 0x8C 0x00 / 0xDC for
+(b); 0x3D / 0x38 / 0x78 / 0x5A / 0x19 0x00 / 0x64 for (c).  The probe
+confirms the TIE key on both tracks at each EOT (`_081DD938` r3 = 0x3D
+after each of the two `ply_endtie`s, tracks 0x03002258 and 0x030022A8).
+
+**Death frames, probe against engine.**  None of the three produces a
+`_081DCFB0` stamp: every channel ends through the count path before its
+track's EOT (Cry_Bulbasaur at 11 kHz lasts 0.74 s, Cry_Jynx at pitch 15555
+2.0-2.2 s against the 2.33 s to tick 140, Cry_Pidgey 0.17 s), so the modes'
+release values 225 / 220 / 100 reach no channel and there is no two-channel
+release tail to compare -- the task's expectation for (a) and (b) does not
+hold for these samples at these pitches, and the modes were kept whole
+rather than altered.  The deaths are the unlink ticks: probe frames 47 / 48
+(a), 126 / 133 (b), 13 / 14 (c), the faster (TUNE2) track first; the
+engine's channels lose CHN_ON on the frame before each unlink (46 / 47 on
+(a), asserted by `test_sequencer_cycles_cry_encounter_chorus`) and its
+unlink ticks fall on the probe's frames (the 2025 / 2005 entries).  The
+last non-zero output sample agrees with the reference's on all three
+(0.8719 / 2.2991 / 0.3187 s against 0.8719 / 2.2991 / 0.3189 s; (c)'s 0.2
+ms is the end run below).
+
+**Per-test sequencer residual**: `entry_diff.py` 0 on all 177 complete
+frames of each of the three, `cmd_diff.py` 0, `track_diff.py` 0, with no
+engine edit and no new constant; the two-track skeleton (6792, 1932, 2025
+/ 2005 / 1892, 2360, 1192, 1007) is what the existing per-track model
+gives.  `_SKIP` 18 stays est. (each track owns a one-channel chain).
+
+**Residual attribution** (skill, "Attributing a residual below -40 dB";
+runs of output samples differing by more than 20 int16 LSB; the crossing
+times from the probes' `L timer0` lines): cry_bulbasaur_encounter (5
+crossings) has four runs, at 0.1714 / 0.2045 / 0.5394 / 0.6733 s, each
+0.3-1.1 PCM samples long, 0.2 ms after the crossings at 0.1712 / 0.2043 /
+0.5392 / 0.6731 s (the 0.6400 one produces nothing above the threshold) --
+the floor.  cry_jynx_echo_end (10 crossings) has seven runs at 0.0706 /
+0.2715 / 0.4724 / 0.9412 / 1.0751 / 1.2091 / 1.2761 s; the two that read
+as 11 PCM samples long are each **two** single-sample runs 0.75 ms apart
+merged by the run grouping (the crossing pairs 7922432 / 7934976 and
+15787520 / 15800064, 12544 cycles apart: diff samples at 0.47242, 0.47244
+and then 0.47317-0.47323 s) -- the floor; the 1.8786 crossing produces
+nothing.  cry_pidgey_echo_start_chorus (3 crossings) has the three
+crossing runs (0.1045 / 0.1714 / 0.2045 s, the first 2875 LSB because two
+DPCM channels sum there) and **two end runs at 0.2327 s and 0.2424 s**, 1.4
+PCM samples each (192 / 1534 LSB): the ends of the two reversed plays --
+track 1 at TUNE 120 reaches sample 0 first, track 0 at TUNE 56 at the same
+0.2424 s as slice 5's one-track entry -- i.e. the open-bus look-behind of
+sample 0 decided not wanted in slice 5's review, now once per track.  It
+is why (c) FAILs, as cry_pidgey_echo_start does; it stays documented, no
+mixer change.
+
+The work, in order (commits on `accuracy-harness` after 385f4c7): the
+ROM / probe / mgba_render change with the symbol shift and neutrality; the
+CLI, runner, corpus, unit tests, README, skill and probe step 9; the
+baseline and this section; then the review paragraph below.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
