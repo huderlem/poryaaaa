@@ -48,37 +48,41 @@ note on frame 4.  It also passes `poryaaaa_render --gba-tempo-grid`
 out): each MIDI tick on the frame MPlayMain's tempoC / 150 plays it.
 **The midi-input reports are their own baseline family**
 (`baselines/<date>_midi-path-*.json`, the report's `"input"` field says
-`midi`, `"midi_quantize"` and `"gba_start_delay"` say which form; the two
-2026-10-25 baselines without the delay are `midi-path-start` / `-latch`,
-with it `midi-path-aligned` / `-aligned-latch`, with it and
-`--gba-tempo-grid` `midi-path-tempo-grid` / `-tempo-grid-latch`, the
-report's `"gba_tempo_grid"` true -- the runner's default since slice 3a's
-decision, so the tempo-grid pair is the midi baseline): never
-compare one against a song-input baseline with `compare_reports.py`, and
-never save a midi run as the song-input baseline.  What separates the two
-paths today is not the mix grid (both paths mix the same SoundMainRAM
-frame, bit-identical when a note lands on the same frame) but the MIDI
-path's time origin (with `--no-gba-start-delay`, ROM cycle 0
-where the song's tick 0 is frame 3's SoundMain: an event after the first
-frame 3 frames early on ticks that are multiples of 4, 4 frames on
-n = 1 mod 4 from 21, 2 mod 4 from 66, 3 mod 4 from 110; the delay
-removes it) and its tempo grid (exact BPM where the ROM ticks on tempoC /
-150: with the delay, tick n on frame 3 + ceil(1.2443 n)
-against the ROM's 3 + ceil(1.25 n), one frame early on bend, the lfo
-rows, psg_mix and vol's ramp ticks 110, 114, ..., 130, and the engine's
-LFO one frame late on one tick in four, n = 0 mod 4; `--gba-tempo-grid`
-puts every tick on the ROM's frame: bend -inf, vol -47.2 (the VOL on its
-FINE tick, which ply_fine's unlink keeps from the releasing note), six
-songs' drift 0.0 (groudon, uncorrelated, -0.5), the LFO grid left to
-slice 3b).  Aligned, the eleven PCM rows without such an
-event are bit-identical to their `--song` renders (-inf, pcm_cmp /
-pcm_chord at their -55 floor); the PSG rows keep the fixed CgbSound entry
-(same writes, -2667 on frame 3, -464 .. -472 on tick frames, -1388 ..
--1444 on note frames), and two SEs show the per-tick
-command batching (a VOL before a note in one tick reaches only the new
-note on the GBA, every channel on the MIDI path).  To take a midi row
-apart, diff it against its own `--song` render, not the reference; plan,
-"Milestone 5 slice 1", "slice 2a" and "slice 3a".
+`midi`; `"midi_quantize"`, `"gba_start_delay"` and `"gba_tempo_grid"` say
+which form).  **The midi baseline is the lfo-order set** (slice 4):
+`2026-10-25_midi-path-lfo-order.json` / `-lfo-order-latch.json` for the
+runner's default, `-lfo-order-aligned` / `-lfo-order-aligned-latch` for
+`--no-gba-tempo-grid`; the earlier `midi-path-start`, `-aligned`,
+`-tempo-grid` and `-lfo-grid` pairs are history.  Never compare a midi
+report against a song-input baseline with `compare_reports.py`, and
+never save a midi run as the song-input baseline.  What the MIDI path's
+flags remove: the time origin (`--gba-start-delay`; without it an event
+lands 3 .. 4 frames early) and the tempo grid (`--gba-tempo-grid`:
+every tick on the ROM's tempoC / 150 frame, drift 0.0 on the songs but
+groudon, which does not correlate; slice 3b also puts the engine's own
+LFO clock on that grid -- a TEMPO counts from the next frame's add, as
+ply_tempo's -- which needs the start delay too).  Without a sequencer the
+engine runs the frame's LFO steps, portamento and PWM before CgbSound,
+as SoundMain does (slice 4, the plugin included).  What is left, each
+against the row's own `--song` render: the PCM micro rows are
+bit-identical to it but vol and lfo_delay (ply_fine, below) -- bend and
+lfo_vib / lfo_trem / lfo_pan -inf too, pcm_cmp / pcm_chord at their -55
+floor; the PSG writes match `--song`'s register,
+value and frame on every row logged so far (sq1, lfo_psg, littleroot,
+groudon, mt_chimney), offset only by the **fixed CgbSound entry**
+(`cgbEntryCycles`, the one-track no-tick value, where the ROM's moves
+with MPlayMain's work: -2667 on frame 3, -464 .. -472 on tick frames,
+-830 / -960 on LFO frames, up to -24157 on a song's frame 3) -- the next
+lever; per-tick command batching (a VOL before a note reaches every
+channel on the MIDI path, only the new note on the GBA; ply_fine's unlink
+keeps a FINE tick's VOL and the LFO from the releasing note: vol -47.2,
+lfo_delay -20.3, se_rain_stop, se_contest_place); and in a frame with two
+ticks the ROM steps tick n's LFO before tick n + 1's commands
+(rg_vs_trainer frames 904 .. 944).  `--psg-log` works with `--midi`:
+log both renders and compare them **frame by frame** (each frame's
+ordered (register, value) list); a whole-log sequence match pairs
+repetitive vibrato writes frames apart.  Plan, "Milestone 5 slice 1"
+through "slice 4".
 
 Output: a table on stdout and `build/accuracy/report.json`. poryaaaa WAVs and
 logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-mgba>/`.
