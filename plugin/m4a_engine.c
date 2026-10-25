@@ -756,6 +756,37 @@ void m4a_engine_set_quantize_events(M4AEngine *engine, bool enabled)
     engine->quantizeEvents = enabled;
 }
 
+void m4a_engine_apply_latch_mode(M4AEngine *engine, M4ALatchMode mode,
+                                 bool wasPlaying, bool playing)
+{
+    bool latch = mode == M4A_LATCH_ON  ? true
+               : mode == M4A_LATCH_OFF ? false
+               : playing;               /* transport (and any other value) */
+    m4a_engine_set_quantize_events(engine, latch);
+    if (wasPlaying && !playing) {
+        /* With the latch still on (ON) the flip did not flush: do it here,
+         * so the reset below sees every queued note-on already applied. */
+        drain_events(engine);
+        m4a_engine_reset_portamento(engine);
+    }
+}
+
+M4ALatchMode m4a_latch_mode_from_name(const char *name)
+{
+    if (name && (strcmp(name, "on") == 0 || strcmp(name, "1") == 0))
+        return M4A_LATCH_ON;
+    if (name && (strcmp(name, "off") == 0 || strcmp(name, "0") == 0))
+        return M4A_LATCH_OFF;
+    return M4A_LATCH_TRANSPORT;
+}
+
+M4ALatchMode m4a_latch_mode_from_byte(uint8_t value)
+{
+    return value == M4A_LATCH_ON  ? M4A_LATCH_ON
+         : value == M4A_LATCH_OFF ? M4A_LATCH_OFF
+         : M4A_LATCH_TRANSPORT;
+}
+
 static bool choke_matches(int trackIndex, int key, int chTrack, int chKey)
 {
     return (trackIndex < 0 || chTrack == trackIndex) && (key < 0 || chKey == key);

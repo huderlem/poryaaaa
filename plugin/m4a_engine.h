@@ -826,6 +826,27 @@ void m4a_engine_all_sound_off(M4AEngine *engine);
 void m4a_engine_set_quantize_events(M4AEngine *engine, bool enabled);
 /* Apply every queued event now, in arrival order (what the tick does). */
 void m4a_engine_flush_events(M4AEngine *engine);
+/* The host-side policy for the latch (the plugin's override, slice 2b-ii):
+ * follow the host transport (latched while it plays), always on, or always
+ * off.  0 is "transport" so a zeroed or absent setting means the default. */
+typedef enum {
+    M4A_LATCH_TRANSPORT = 0,
+    M4A_LATCH_ON        = 1,
+    M4A_LATCH_OFF       = 2
+} M4ALatchMode;
+/* Apply `mode` given the transport's last state and its new one (pass the
+ * same value twice when the host gives no transport): the latch is set on
+ * for ON, off for OFF, `playing` for TRANSPORT (turning it off applies what
+ * it holds, in order), and on the playing -> stopped edge, in every mode,
+ * whatever is still queued is applied before the portamento history is
+ * forgotten -- so no note queued before the stop leaves a glide behind. */
+void m4a_engine_apply_latch_mode(M4AEngine *engine, M4ALatchMode mode,
+                                 bool wasPlaying, bool playing);
+/* "transport" / "on" / "off" (also "1" / "0" for on / off); anything else
+ * is transport.  For the config file. */
+M4ALatchMode m4a_latch_mode_from_name(const char *name);
+/* The CLAP state byte: 0 / 1 / 2; anything else is transport. */
+M4ALatchMode m4a_latch_mode_from_byte(uint8_t value);
 /* A CLAP NOTE_CHOKE: cut `key` on `trackIndex` at once, latch or no latch
  * -- every matching channel killed (releasing or not, shadow pools
  * included) and the matching note-ons / note-offs removed from the queue,

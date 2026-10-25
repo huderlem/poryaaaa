@@ -30,6 +30,8 @@ typedef struct {
     bool respectBaseMidiKey;
     bool portamentoEnabled;
     bool pwmEnabled;
+    /* MIDI event latch override (M4ALatchMode; Options menu) */
+    uint8_t eventLatchMode;
     /* Polyphony debug: mute normal audio, play only overflow-lost sounds.
      * Session-only -- deliberately not persisted in config or CLAP state. */
     bool polyDebugInvert;

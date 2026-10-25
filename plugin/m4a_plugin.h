@@ -23,6 +23,10 @@ typedef struct {
     bool respectBaseMidiKey;
     bool portamentoEnabled;
     bool pwmEnabled;
+    /* MIDI event latch override (M4ALatchMode: transport / on / off;
+     * persisted).  Written by the main thread (GUI, state load), read and
+     * applied by plugin_process at the top of each block. */
+    uint8_t eventLatchMode;
     /* Polyphony-overflow debug: solo the sounds lost to the polyphony limit.
      * Session-only -- deliberately NOT saved to config or CLAP state, so a
      * project never reopens silently stuck in the debug listening mode. */

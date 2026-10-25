@@ -660,8 +660,22 @@ static void toggle_menu_item(M4AGuiState *gui, const char *label,
         ImGui::SetItemTooltip("%s", help);
 }
 
+/* One choice of a radio group inside a menu: checkmarked when selected,
+ * sets *value and flags the settings dirty when clicked. */
+static void radio_menu_item(M4AGuiState *gui, const char *label, uint8_t *value,
+                            uint8_t choice, const char *help)
+{
+    if (ImGui::MenuItem(label, nullptr, *value == choice) && *value != choice) {
+        *value = choice;
+        gui->settingsChanged = true;
+    }
+    if (help && help[0])
+        ImGui::SetItemTooltip("%s", help);
+}
+
 /* Top menu bar.  "Options" holds the opt-in effect features as toggleable
- * (checkmarked) items, each with hover help describing what it does. */
+ * (checkmarked) items, each with hover help describing what it does, and the
+ * MIDI event latch override as a three-way choice. */
 static void render_menu_bar(M4AGuiState *gui)
 {
     if (!ImGui::BeginMenuBar())
@@ -678,6 +692,21 @@ static void render_menu_bar(M4AGuiState *gui)
         toggle_menu_item(gui, "Pulse-Width Modulation", &gui->settings.pwmEnabled,
             "Enable pulse-width modulation on the CGB square channels\n"
             "(CC 0x17 = duty-cycle pattern, CC 0x19 = modulation speed).");
+        ImGui::Separator();
+        if (ImGui::BeginMenu("Quantize to GBA Frames")) {
+            uint8_t *mode = &gui->settings.eventLatchMode;
+            radio_menu_item(gui, "Follow Transport", mode, M4A_LATCH_TRANSPORT,
+                "Hold notes, CCs, program changes and pitch bends to the next GBA\n"
+                "frame (one VBlank, about 16.7 ms) while the DAW transport plays, as\n"
+                "the game's sound engine would; apply them at once while it is\n"
+                "stopped, so live playing stays responsive.  With no transport\n"
+                "(the standalone) this means Never.  The default.");
+            radio_menu_item(gui, "Always", mode, M4A_LATCH_ON,
+                "Always hold events to the next GBA frame, playing or not.");
+            radio_menu_item(gui, "Never", mode, M4A_LATCH_OFF,
+                "Never hold events: every event applies at once, playing or not.");
+            ImGui::EndMenu();
+        }
         ImGui::EndMenu();
     }
 

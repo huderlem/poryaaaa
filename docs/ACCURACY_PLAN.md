@@ -5969,6 +5969,144 @@ events flagged `CLAP_EVENT_IS_LIVE` should bypass the latch while the
 transport plays (the milestone's "rubbery keyboard" concern, now while
 recording) is a decision for 2b-ii, not something this slice settled.
 
+### Milestone 5 slice 2b-ii: the manual override (2026-10-25)
+
+Scope: the latch's tri-state override -- transport / on / off -- in the
+plugin, with a GUI Options item, a `poryaaaa.cfg` key and an appended CLAP
+state byte (an old state loads as "transport").  No change to the
+sequencer path, the renderer or the latch itself; the harness cannot see
+the plugin, so the gates are the unchanged harness numbers and unit tests.
+Baselines before any change: `claim_check.sh` against
+`2026-10-25_cry-over-song-rows.json` 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0, unit 1681/1681, blip 49112/0, songs 561/561;
+both aligned midi runs 0 field differences on 44 rows.
+
+**Decision (2026-10-25, the user):** in "transport" mode, events the host
+flags `CLAP_EVENT_IS_LIVE` are latched like the rest while the transport
+plays (what is heard while recording is what the recorded part plays back
+as); "off" is the escape for anyone who wants otherwise.
+
+**Step 1, the reading.**
+
+- *Where each setting lives.*  `M4APluginData` (`m4a_plugin.h`) holds the
+  persisted settings; `M4AGuiSettings` (`m4a_gui.h`) is the copy the GUI
+  edits.  Five places build an `M4AGuiSettings` from the plugin data
+  (`plugin_activate`, `state_load`, the timer's poll, `gui_create`) or copy
+  it back (the timer's `m4a_gui_poll_changes` block).  The Options menu
+  (`m4a_gui.cpp` `render_menu_bar`) holds three checkmark toggles with
+  hover help (`toggle_menu_item`); a three-way choice has no helper yet.
+- *Config.*  `load_config_file` reads `key=value` lines at `plugin_init`;
+  the opt-in toggles take `atoi(value) != 0`, the mix rate a number snapped
+  to the table.  `poryaaaa.cfg.example` documents each key.
+- *State.*  `state_save` writes, in order: root length + bytes, name length
+  + bytes, reverb, master volume, song volume, a zero byte (the former
+  analog filter), max channels, the three toggle bytes, the PCM mix rate as
+  a float in Hz.  `state_load` reads the same; everything from the analog
+  byte on is optional (a short read keeps the default), so appended bytes
+  are back-compatible by construction.  An old save stops after the float
+  (or earlier); a new byte after the float reads short there.
+- *Threads.*  `state_load` and the GUI timer run on the main thread
+  (`plugin.h`: `[main-thread]` for the state and timer extensions) and today
+  write the engine directly (`m4a_engine_set_portamento_enabled` etc.)
+  while `plugin_process` may run; `plugin_process` is the audio thread.
+- *The latch in the plugin today* (2b-i): `apply_transport` sets the latch
+  from `CLAP_TRANSPORT_IS_PLAYING` and on the playing -> stopped edge
+  resets the portamento after the flip's flush; no transport keeps the
+  state, off from activation.
+
+**Decisions.**
+
+- *The mode* is `M4ALatchMode` in `m4a_engine.h` (`M4A_LATCH_TRANSPORT` 0,
+  `M4A_LATCH_ON` 1, `M4A_LATCH_OFF` 2): the value 0 is "transport" so a
+  zeroed or absent byte means the default.  It lives in the engine header
+  because both the plugin and the GUI include it and the unit tests can
+  then drive the plugin's policy (2b-i's review: nothing exercised the
+  plugin's order).
+- *The policy is one engine call*, `m4a_engine_apply_latch_mode(engine,
+  mode, wasPlaying, playing)`, made by the plugin at the top of every
+  block and for every in-block transport event (`playing` = the last
+  known transport state when the block has none).  It sets the latch to
+  on for ON, off for OFF, `playing` for TRANSPORT -- turning it off
+  flushes in order, as before -- and on the playing -> stopped edge, in
+  every mode, flushes whatever is still queued (ON keeps the latch on, so
+  the flip does not flush) and then resets the portamento.  The 2b-i
+  plugin code is this call with TRANSPORT.
+- *Applied on the audio thread only.*  The GUI timer and `state_load`
+  write the byte `data->eventLatchMode` and nothing else; `plugin_process`
+  reads it at the top of the next block and calls the policy.  A change
+  of mode thus takes effect at a block boundary, and the flush it may
+  cause (ON -> OFF, or ON -> TRANSPORT while stopped) runs on the audio
+  thread, never racing the queue.  The other toggles keep their existing
+  main-thread writes (not this slice's to change).
+- *No transport*: TRANSPORT means off (the last known state is "not
+  playing" from activation); the tooltip and the config comment say so.
+- *Config key* `quantize_events=transport|on|off` (also `1` / `0` for on /
+  off; anything else is transport), parsed by
+  `m4a_latch_mode_from_name`.
+- *State byte* appended after the PCM mix-rate float: 0 transport, 1 on,
+  2 off.  A short read or a value above 2 loads as transport
+  (`m4a_latch_mode_from_byte`).
+- *GUI*: an Options submenu "Quantize to GBA Frames" with three radio
+  items -- "Follow Transport" (default), "Always", "Never" -- each with
+  hover help.
+
+**Step 2, the code.**  `m4a_engine.h` / `.c`: `M4ALatchMode`,
+`m4a_engine_apply_latch_mode` (the latch per mode; on `wasPlaying &&
+!playing` a drain -- a no-op unless the mode kept the latch on -- then
+`m4a_engine_reset_portamento`), `m4a_latch_mode_from_name` /
+`_from_byte`.  `m4a_plugin.h`: `eventLatchMode` in `M4APluginData`;
+`m4a_gui.h`: the same in `M4AGuiSettings`.  `m4a_plugin.c`:
+`plugin_init` sets transport; `load_config_file` reads
+`quantize_events`; `apply_transport` calls the policy with the data's
+mode; `plugin_process` calls `apply_transport` with the block's transport
+or, without one, the policy with `transportWasPlaying` twice (so a mode
+changed from the GUI applies at the next block in every host); the GUI
+timer and `state_load` copy the byte only; `state_save` appends it after
+the mix-rate float and `state_load` reads it optionally; the four
+`M4AGuiSettings` builders carry it.  `m4a_gui.cpp`: `radio_menu_item`
+and the "Quantize to GBA Frames" submenu.  `poryaaaa.cfg.example` and the
+README (the DAW paragraph, the config table, the GUI list) document it.
+As with the other options, a project's saved state wins over
+`poryaaaa.cfg`: an old project loads as "transport" whatever the config
+says.
+
+**Step 3, the tests.**  `test_latch_mode` (`test/test_engine.c`): the two
+parsers (names, `1` / `0`, empty, unknown, NULL; bytes 0 / 1 / 2 / 3 /
+255); the latch each mode gives playing and stopped (an out-of-range mode
+behaves as transport); the stop edge through the policy call in
+transport and in on mode -- a queued note-on on another track and a
+queued note-on that glides both applied, the gliding note at its own
+pitch, the history forgotten, the latch off / still on after it, and the
+first note after the stop not gliding (at once / at the next tick); a
+mode change without an edge (on -> transport while stopped flushes and
+keeps the history; on -> off while playing flushes without a reset), and
+off still resetting on the stop edge.  Unit **1733/1733** (1681 + 52).
+
+Beyond the unit tests, a scratch CLAP host (not committed; it `dlopen`s
+`build/poryaaaa.clap` and reads `plugin_data` through `m4a_plugin.h`)
+drove the real `plugin_process`, `state_save` / `state_load` and
+`load_config_file`, 27 checks plus 4 config runs, all passing: activation
+latch off; transport playing / stopped; no transport keeping the last
+state (off after a stop, on after a play); an in-block
+`CLAP_EVENT_TRANSPORT` stop and play taking effect inside the block; the
+override set as the GUI timer sets it (the byte only) taking effect at
+the next block -- on while stopped and without a transport, off while
+playing; NOTE_CHOKE through `process_clap_note_event` (a -1 / -1 choke
+and a same-key choke removing a queued note-on, another key's choke
+leaving it); on mode's stop edge flushing with the latch kept on; the
+state byte last in the save, off and on round-tripping, a save without
+the byte or without the float loading as transport with the mix rate
+intact, an unknown byte loading as transport; `quantize_events=off / on /
+transport / bogus` and no config file giving 2 / 1 / 0 / 0 / 0.  The GUI
+was built but not looked at: this environment has no way to open the
+menu (no input synthesis or screenshot tool).
+
+**Step 4, the gates.**  `claim_check.sh` against
+`2026-10-25_cry-over-song-rows.json`: 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0; unit 1733/1733, blip 49112/0, songs 561/561.
+Both aligned midi runs 0 field differences on 44 rows.  `poryaaaa` and
+`poryaaaa-standalone` build.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

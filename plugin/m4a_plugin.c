@@ -125,6 +125,8 @@ static void load_config_file(M4APluginData *data)
             data->portamentoEnabled = (atoi(value) != 0);
         } else if (strcmp(key, "pwm") == 0) {
             data->pwmEnabled = (atoi(value) != 0);
+        } else if (strcmp(key, "quantize_events") == 0) {
+            data->eventLatchMode = (uint8_t)m4a_latch_mode_from_name(value);
         } else if (strcmp(key, "pcm_mix_rate") == 0) {
             /* DirectSound mix rate in Hz, snapped to the nearest of the
              * twelve sound-mode rates; 0 or absent = the game's 13379. */
@@ -189,6 +191,7 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->respectBaseMidiKey = false;
     data->portamentoEnabled = false;
     data->pwmEnabled = false;
+    data->eventLatchMode = M4A_LATCH_TRANSPORT;
     data->polyDebugInvert = false;
     data->pcmFreqMode = M4A_PCM_FREQ_MODE_DEFAULT; /* SOUND_MODE_FREQ_13379 */
     data->transportWasPlaying = false;
@@ -275,6 +278,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
         gs.respectBaseMidiKey = data->respectBaseMidiKey;
         gs.portamentoEnabled = data->portamentoEnabled;
         gs.pwmEnabled        = data->pwmEnabled;
+        gs.eventLatchMode    = data->eventLatchMode;
         gs.polyDebugInvert   = data->polyDebugInvert;
         gs.voicegroupLoaded  = (data->loadedVg != NULL);
         m4a_gui_update_settings(data->gui, &gs);
@@ -371,23 +375,18 @@ static void apply_transport(M4APluginData *data, const clap_event_transport_t *t
     if (transport->flags & CLAP_TRANSPORT_HAS_TEMPO)
         m4a_engine_set_tempo_bpm(&data->engine, transport->tempo);
 
-    /* The MIDI event latch follows the transport: events start on the next
-     * VBlank tick while it plays (an honest preview of recorded parts) and
-     * at once while it is stopped (live playing).  No transport (a free
-     * running host such as the standalone) keeps the current state, off
-     * from activation.  Turning the latch off applies what it still holds,
-     * in order -- so on the stop edge the queued note-ons have already
-     * recorded their glide history when the portamento reset below
-     * forgets it, and no queued note-off is lost.
-     *
-     * When the host transport stops, forget portamento note history so the
-     * first note after the playhead moves doesn't glide from a note that was
-     * sounding when playback paused.  (Hosts that send All Notes Off / All
-     * Sound Off on stop are covered by those handlers too.) */
+    /* The MIDI event latch follows the override: with "transport" (the
+     * default) events start on the next VBlank tick while the transport
+     * plays (an honest preview of recorded parts) and at once while it is
+     * stopped (live playing); "on" / "off" fix it.  On the stop edge, in
+     * every mode, the queue is applied before the portamento note history
+     * is forgotten, so the first note after the playhead moves doesn't
+     * glide from a note that was sounding (or queued) when playback paused.
+     * (Hosts that send All Notes Off / All Sound Off on stop are covered by
+     * those handlers too.) */
     bool playing = (transport->flags & CLAP_TRANSPORT_IS_PLAYING) != 0;
-    m4a_engine_set_quantize_events(&data->engine, playing);
-    if (data->transportWasPlaying && !playing)
-        m4a_engine_reset_portamento(&data->engine);
+    m4a_engine_apply_latch_mode(&data->engine, (M4ALatchMode)data->eventLatchMode,
+                                data->transportWasPlaying, playing);
     data->transportWasPlaying = playing;
 }
 
@@ -400,9 +399,16 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         return CLAP_PROCESS_ERROR;
 
     /* The transport at the block's sample 0; later changes arrive as
-     * CLAP_EVENT_TRANSPORT events in the loop below. */
+     * CLAP_EVENT_TRANSPORT events in the loop below.  Without one (a free
+     * running host such as the standalone) the last known state stands --
+     * "not playing" from activation -- and only the override is applied,
+     * so a mode changed from the GUI takes effect here, on the audio
+     * thread. */
     if (process->transport)
         apply_transport(data, process->transport);
+    else
+        m4a_engine_apply_latch_mode(&data->engine, (M4ALatchMode)data->eventLatchMode,
+                                    data->transportWasPlaying, data->transportWasPlaying);
 
     const uint32_t numFrames = process->frames_count;
     const uint32_t numEvents = process->in_events->size(process->in_events);
@@ -543,6 +549,8 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
      * frequency. */
     float pcmMixRate = (float)m4a_pcm_freq_mode_hz(data->pcmFreqMode);
     if (stream->write(stream, &pcmMixRate, sizeof(pcmMixRate)) != sizeof(pcmMixRate)) return false;
+    /* MIDI event latch override (M4ALatchMode), appended after the mix rate */
+    if (stream->write(stream, &data->eventLatchMode, 1) != 1) return false;
 
     return true;
 }
@@ -598,6 +606,12 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (stream->read(stream, &pcmMixRate, sizeof(pcmMixRate)) != (int64_t)sizeof(pcmMixRate))
         pcmMixRate = 13379.0f;
     data->pcmFreqMode = (uint8_t)m4a_pcm_freq_mode_from_hz(pcmMixRate);
+    /* Latch override is optional (absent in older saves): "transport".
+     * Applied by plugin_process at its next block, not here. */
+    uint8_t latchByte = M4A_LATCH_TRANSPORT;
+    if (stream->read(stream, &latchByte, 1) != 1)
+        latchByte = M4A_LATCH_TRANSPORT;
+    data->eventLatchMode = (uint8_t)m4a_latch_mode_from_byte(latchByte);
 
     if (data->activated) {
         /* Only reload voicegroup if the project root or name actually changed */
@@ -635,6 +649,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         gs.respectBaseMidiKey = data->respectBaseMidiKey;
         gs.portamentoEnabled  = data->portamentoEnabled;
         gs.pwmEnabled         = data->pwmEnabled;
+        gs.eventLatchMode     = data->eventLatchMode;
         gs.polyDebugInvert    = data->polyDebugInvert;
         gs.reverbAmount     = data->reverbAmount;
         gs.masterVolume     = data->masterVolume;
@@ -725,6 +740,9 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
     data->respectBaseMidiKey = gs.respectBaseMidiKey;
     data->portamentoEnabled  = gs.portamentoEnabled;
     data->pwmEnabled         = gs.pwmEnabled;
+    /* Applied by plugin_process at its next block (it may flush the queue,
+     * which must not race the audio thread). */
+    data->eventLatchMode     = gs.eventLatchMode;
     data->polyDebugInvert    = gs.polyDebugInvert;
     data->pcmFreqMode        = gs.pcmFreqMode;
 
@@ -842,6 +860,7 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
     gs.respectBaseMidiKey = data->respectBaseMidiKey;
     gs.portamentoEnabled  = data->portamentoEnabled;
     gs.pwmEnabled         = data->pwmEnabled;
+    gs.eventLatchMode     = data->eventLatchMode;
     gs.polyDebugInvert    = data->polyDebugInvert;
     gs.voicegroupLoaded = (data->loadedVg != NULL);
 

@@ -146,7 +146,7 @@ Caveat: I haven't actually tested this on Linux.  It theoretically works...
 5. Use Program Change (PC) midi messages to select instruments from the voicegroup.
 6. Play MIDI notes. You should hear GBA-accurate audio.
 
-While the DAW's transport is playing, note, CC, program change and pitch bend events are held to the next GBA frame (one VBlank, about 16.7 ms), where the game's sound engine would start them; while the transport is stopped, and in the standalone (which has no transport), they apply at once so live playing stays responsive. A host's note choke always cuts the note at once.
+While the DAW's transport is playing, note, CC, program change and pitch bend events are held to the next GBA frame (one VBlank, about 16.7 ms), where the game's sound engine would start them; while the transport is stopped, and in the standalone (which has no transport), they apply at once so live playing stays responsive. This is the default, "Follow Transport"; **Options → Quantize to GBA Frames** (or `quantize_events` in the config) can set it to "Always" or "Never" instead. A host's note choke always cuts the note at once.
 
 The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings can be changed live through the GUI and are saved in the DAW's project state.
 
@@ -164,6 +164,7 @@ The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings ca
 | `respect_base_midi_key` | `0` | Opt-in: treat a PCM voice's key as the sample's base MIDI note so pressed notes play at the intended pitch |
 | `portamento` | `0` | Opt-in: enable the portamento glide effect (CC 5 = glide time in ticks) |
 | `pwm` | `0` | Opt-in: enable pulse-width modulation on CGB square channels (CC 0x17 / 0x19) |
+| `quantize_events` | `transport` | Hold MIDI events to the next GBA frame: `transport` (while the DAW transport plays; never in the standalone), `on` (always), `off` (never) |
 | `sound_data_paths` | *(auto)* | Extra `.inc` files for sample symbols (semicolon-separated, relative to project root) |
 | `voicegroup_paths` | *(auto)* | Extra voicegroup search directories or files |
 | `sample_dirs` | *(auto)* | Extra `.wav` sample search directories |
@@ -178,7 +179,7 @@ The plugin opens a settings panel built with [Dear ImGui](https://github.com/oco
 - **General** tab — **Project Root** / **Voicegroup**: edit and press **Reload** to apply; **Song Volume** (0–127), **Reverb** (0–127), **Polyphony**, and **PCM Mix Rate** take effect immediately
 - **Voices** tab — inspect and edit individual voices in the loaded voicegroup
 - **Polyphony** tab — realtime monitor for debugging polyphony overflow
-- **Options** menu — toggle the opt-in effect features (Respect Base MIDI Key, Portamento, Pulse-Width Modulation); hover an item for help text. Toggles take effect immediately and are saved per project.
+- **Options** menu — toggle the opt-in effect features (Respect Base MIDI Key, Portamento, Pulse-Width Modulation) and choose **Quantize to GBA Frames** (Follow Transport / Always / Never); hover an item for help text. Changes take effect immediately (the quantize choice at the next audio block) and are saved per project.
 
 On Windows the GUI is embedded inside the DAW's FX window. On Linux/macOS it opens as a floating window.
 
