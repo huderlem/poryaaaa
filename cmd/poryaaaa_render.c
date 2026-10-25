@@ -813,7 +813,9 @@ static void print_usage(const char *prog)
         "                              tempo (at an even BPM about 0.46 %% faster; mid2agb drops\n"
         "                              an odd BPM by one), the LFO stepping on the same ticks\n"
         "                              (MPlayStart's tempo at the song start).  With\n"
-        "                              --gba-start-delay each tick lands on the ROM's frame.\n"
+        "                              --gba-start-delay each tick and LFO step lands on the\n"
+        "                              ROM's frame (without it the ticks of the first frames\n"
+        "                              collapse onto frame 3 and the LFO runs 3 frames behind).\n"
         "                              Default: the exact tempo map\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
@@ -2155,7 +2157,9 @@ oom:
 
     uint64_t samplePos = 0;
     /* --gba-tempo-grid: the engine's LFO clock starts with the song, as
-     * MPlayStart seeds it, at the origin (before frame 3's SoundMain). */
+     * MPlayStart seeds it, at the origin (before frame 3's SoundMain).  The
+     * boot's frame-2 tick already leaves that state (tempoI 150, tempoC 0),
+     * so this only states it; the held TEMPOs are what move the steps. */
     const uint32_t gridClocksPerBeat = gbaTempoGrid ? (extendedClocks ? 48 : 24) : 0;
     bool songTempoStarted = !gbaTempoGrid;
     for (int i = 0; i < renderEvtCount; i++) {
