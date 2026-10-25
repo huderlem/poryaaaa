@@ -83,7 +83,11 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
 
 One change at a time, never a batch: in this project three "verified"
 constant changes applied together once hid that one of them broke four
-bit-exact tests. For each candidate:
+bit-exact tests. `test/accuracy/tools/claim_check.sh [<baseline.json>]
+[<out dir>]` does steps 1-3 below in one run (build, the three test
+binaries, the write-cycle diff of every probed test in `build/probe/`,
+the harness and `compare_reports.py`; about five minutes). For each
+candidate:
 
 1. Apply it alone; rebuild `poryaaaa_render` and `poryaaaa_unit_tests`.
 2. `accuracy.py`, then `compare_reports.py <latest baseline> build/accuracy/report.json`.

@@ -4077,8 +4077,9 @@ static void test_sequencer_players(void)
         m4a_sequencer_frame(&seq);
         ASSERT_EQ(seq.frameCycles, 1390, "SE2 no-tick frame, 4 of 9 tracks existing (se_contest_place frame 4)");
 
-        /* BGM, for the record: one of ten (the sq1 probe's 1402 minus the
-         * track's 6 ... the three existing tracks' 20 - 14 each). */
+        /* BGM, for the record: the sq1 probe's one-track no-tick frame
+         * (1402) plus 6 for each further existing track (20 instead of 14
+         * in the apply pass). */
         m4a_sequencer_set_player(&seq, M4A_PLAYER_BGM);
         m4a_sequencer_start(&seq, song3);
         m4a_sequencer_frame(&seq);

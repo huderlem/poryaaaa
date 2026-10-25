@@ -57,14 +57,15 @@ def parse(path):
 
 
 def bgm_run(ev):
-    """Breakpoints of the BGM player's MPlayMain: from the last MPlayMain
-    entry before the first internal label with r7 == BGM up to CgbSound."""
+    """Breakpoints of the selected player's MPlayMain (BGM unless --player):
+    from the last MPlayMain entry before the first internal label with
+    r7 == BGM up to CgbSound."""
     mp = [i for i, e in enumerate(ev) if e[2] == "MPlayMain"]
     cgb = [i for i, e in enumerate(ev) if e[2] == "CgbSound"]
     if not mp or not cgb:
         return None
-    # the BGM run is the MPlayMain entry whose following internal label carries r7 == BGM,
-    # or (paused player: no labels) the one followed by FadeOutBody/_081DDA6C with r7 == BGM
+    # the player's run is the MPlayMain entry whose following internal label carries r7 == BGM
+    # (the selected player), or (paused: no labels) the one followed by FadeOutBody/_081DDA6C with it
     start = None
     for i in mp:
         for j in range(i + 1, cgb[0]):
@@ -150,8 +151,9 @@ def main(paths, show):
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    if args and args[0] == "--player":
-        BGM = PLAYERS.get(args[1].upper()) or int(args[1], 16)
-        args = args[2:]
+    if "--player" in args:
+        i = args.index("--player")
+        BGM = PLAYERS.get(args[i + 1].upper()) or int(args[i + 1], 16)
+        del args[i:i + 2]
     paths = [a for a in args if not a.isdigit()]
     main(paths, set(int(a) for a in args if a.isdigit()))

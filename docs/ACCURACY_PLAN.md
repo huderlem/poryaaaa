@@ -1462,6 +1462,45 @@ is one player), MPlayStart's priority / `unk_B` gating against an already
 playing song (the ROM starts one SE from silence), and the cry players
 (next slice).
 
+**Code review of the SE slice (2026-10-24).**  Two independent reviews
+(player selection and MPlayMain position against m4a.c `m4aSongNumStart` /
+`MPlayOpen` / `MPlayStart` / `CgbSound` and m4a_1.s, decoding the raw probe
+logs themselves; runner, songs.json plumbing and the SE `.s` files against
+the ROM bytes), then `tools/claim_check.sh` (new: build, the three test
+binaries, the write diff of all 37 probed tests, the harness and
+`compare_reports.py` in one run) on the adopted changes.  Neither found a
+divergence.  Byte checks: gSongTable's `ms` for the six ids equals the
+player the runner reads from song_table.inc, the header pointers equal the
+map's labels, track count / priority / reverb bytes equal the `.s`,
+gMPlayTable's numTracks 10 / 3 / 9 / 1 equal `m4a_sequencer_set_player`.
+Confirmed from the logs: the chain positions of all four players on every
+frame (item 2), both loops over the player's trackCount (3), ply_fine's
+segments on all four FINE frames (4), the finished tick's 24 on the SE
+frames **and on the BGM player** (wave.txt frame 156, `_081DD9A4` with r4
+0 -> `_081DDA6C` = 24: the earlier base had charged the exit alone there),
+the NR14 path reading IO NR10 as the C does (6), the unit tests' numbers
+(8).  Adopted, harness-neutral (claim_check: 43/44, 0 moved writes, every
+row 0.0): ply_fine charging a flat 50 per unlink (R1#4: the previous
+`(unlink - WALK_UNLINK_00)` term was always 0 since every chained channel
+at FINE has prev 0, and a chain of two or more is unmeasured -- the prev
+0 / next set unlink is 4 cheaper than prev 0 / next 0 and the loop's
+taken bne about 4 more, so est. 50 for those too); `--player` under a
+"Compiled-song options" usage heading (R2#7); `probe_mplay.py --player`
+anywhere in the arguments and its docstrings (R2#6); a test comment
+(R1#8).  Not acted on: `m4a_sequencer_start`'s second loop clearing to
+16 tracks instead of the player's count (R1#1; track_stop is a no-op on
+a non-existing track and the frame loops visit maxTracks only -- the
+wider clear is what a host switching players in-process needs); the
+unk_B / priority gate of MPlayStart and `tone` (R1#1, unobservable from
+one start); an out-of-range player selecting BGM without an error (R1#2;
+the cry players are the next slice, which will extend
+`M4A_PLAYER_COUNT`); the STOP flags of ply_fine set by track index rather
+than by chain membership (R1#4, identical for every reachable state); a
+misspelled songs.json entry being skipped with a warning like a missing
+song (R2#2); `M4A_SEQ_DEFAULT_MAX_TRACKS` kept as a definition (R1#7 /
+R2#9).  Baseline refreshed from the claim_check run after the fixes:
+identical to the one above.
+
 **Next slice: cries.**  `StartCry` in `test/accuracy/rom/main.c` plays
 `gCryTable[id]` through `SetPokemonCryTone` on one of the two cry players
 (`gPokemonCryMusicPlayers`, 2 tracks each, chain entries 291 and 346 and

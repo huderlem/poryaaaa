@@ -241,17 +241,16 @@ static void ply_fine(M4ASequencer *s, int i)
     /* RealClearChain on every chained channel, newest first: each unlink
      * sees prev == 0 (the one before it was just removed) and next set
      * except for the last, whose RealClearChain -> ply_fine_done is the
-     * measured 50; the others' loop-continuing cost is est. the walk's
-     * M4A_CYC_WALK_UNLINK_* (the taken bne). */
+     * measured 50.  A chain of two or more at FINE is unmeasured: the
+     * others are charged est. 50 too (the prev 0 / next set unlink is 4
+     * cheaper than prev 0 / next 0 in the walk, and the loop's bne is then
+     * taken, about 4 more). */
     int chain[CHAN_COUNT];
     int n = chain_list(s, i, chain);
     cyc(s, n == 0 ? M4A_CYC_FINE_EMPTY : M4A_CYC_FINE_LOOP);
     for (int k = 0; k < n; k++) {
-        int unlink = unlink_cost(s, chain[k], M4A_CYC_WALK_UNLINK_00, M4A_CYC_WALK_UNLINK_01,
-                                 M4A_CYC_WALK_UNLINK_10, M4A_CYC_WALK_UNLINK_11);
-        if (k == n - 1)
-            unlink = M4A_CYC_FINE_UNLINK_LAST + (unlink - M4A_CYC_WALK_UNLINK_00);
-        cyc(s, M4A_CYC_FINE_CHAN + M4A_CYC_FINE_UNLINK_CALL + unlink);
+        s->chainOwner[chain[k]] = 0;
+        cyc(s, M4A_CYC_FINE_CHAN + M4A_CYC_FINE_UNLINK_CALL + M4A_CYC_FINE_UNLINK_LAST);
     }
     cyc(s, M4A_CYC_FINE_DONE);
     for (int h = 0; h < CHAN_COUNT; h++) {
