@@ -3603,6 +3603,44 @@ and a cry player in one chain, the latent cross-player steal of slice
 ROM parameter first, not an engine change; a second cry while both cry
 players are busy (the `maxClock` replacement) stays refused.
 
+**Code review of slice 8b-ii (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: the runner's `--id2 / --start-frame2` line against
+`mgba_render.c`'s flat argv parser and its AccParams patch -- `b = rom + off
++ 8`, so `b[12..14]` are block offsets 20..22, `u16 id2` / `u8 startFrame2`
+of `rom/main.c`, `StartTest`'s wait and `StartCry(id2, 0, 120, 15360, 140,
+0, 0)`; the poryaaaa line against `--cry2`'s 0..0xFFFF, `--cry2-start-frame`'s
+1..255, the "go together" / "needs --cry" / cry-player-0 checks and the
+cry0 default without `--player`; `frames_for` 122 / 182 / 241 from the
+file's constants and the same rule as every one-cry row; 4.0 s = 238.9
+frames covering the start tick 62, the unlink 181 and both EOTs 143 / 202;
+the `--input midi` skip through the same `cry` branch, the both-or-neither
+check making the `int()` safe, no other consumer of the keys; `claim_check`'s
+argument lines rebuilt by awk to `--cry 0 --cry2 15 --cry2-start-frame 20`
+/ `--cry 123 --cry2 381 --cry2-start-frame 60`, the `_p1` logs skipped by
+the empty args, the rungs 179 -> 3.0 and 239 -> 4.0 with every existing
+probe at 69 / 179 / 599 / 1199 lines unchanged; the notes against gate b
+and d.  Reviewer 2: every field of the two rows against gate c of 8b-i,
+`.events` `slot_crossed=3` / `24`, the 62 shared rows of the baseline
+field by field with python (0 differences, headers equal, the .txt diff
+only the two appended rows and the summary), the nine FAILs, the README /
+skill text and a grep for the stale "no corpus entry" sentences.)  **No
+divergence.**  **Adopted** (one `claim_check.sh` against
+`2026-10-25_two-cry-rows.json`: 57 diffed, 0 moved, 55/64, 0 regressions,
+every row 0.0, unit 1471/1471, blip 49112/0, songs 561/561 -- unexercised
+by the corpus, neutral by construction): the runner refuses an `"id2"`
+outside 0..65535 or a `"start_frame2"` outside 1..255 with a warning and
+a skip, since `mgba_render` would take a 0 as "no second cry" while
+`poryaaaa_render` refuses it.  **Not acted on, recorded**: the
+`songs.json` notes and this section say "180 / 240 frames" for the probes
+(the plan's nominal lengths) while `grep -c '^frame'` counts 179 / 239,
+the rung thresholds being set on the latter; `claim_check`'s printed cry
+line carries a double space before `--cry2` (awk rebuilds it); its python
+block runs without `-I` (pre-existing, the repo's own file); 241 x
+280896 / 16777216 x 48000 is 193680, not the 192996 samples `mgba_render`
+reports for 241 frames (the blip's own rounding; the plan quotes the
+reported count); step 11's "one sequencer per render" sentence stays
+historical.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

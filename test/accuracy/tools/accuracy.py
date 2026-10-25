@@ -148,6 +148,10 @@ def build_tests(args):
                 if ("id2" in s) != ("start_frame2" in s):
                     print(f"warning: {name}: a second cry needs both \"id2\" and \"start_frame2\", skipping", file=sys.stderr)
                     continue
+                if "id2" in s and not (0 <= int(s["id2"]) <= 0xFFFF and 1 <= int(s["start_frame2"]) <= 255):
+                    # The ROM's u16 id2 / u8 startFrame2; 0 means no second cry to the ROM but is refused by poryaaaa_render.
+                    print(f"warning: {name}: \"id2\" takes 0..65535 and \"start_frame2\" 1..255, skipping", file=sys.stderr)
+                    continue
                 tests.append(dict(name=name, group="cry", type="cry", id=int(s["id"]), midi=None, song=None,
                                   voicegroup=None, volume=None, reverb=None, extended=False,
                                   seconds=float(s.get("seconds", 2.0)), player=None, cry=int(s["id"]),
