@@ -167,6 +167,7 @@ target_link_libraries(poryaaaa_test PRIVATE m)
 # ---- Standalone Renderer ----
 add_executable(poryaaaa_render
     cmd/poryaaaa_render.c
+    cmd/gba_tempo_grid.c
     ${ENGINE_SOURCES}
 )
 target_include_directories(poryaaaa_render PRIVATE plugin third_party)
@@ -184,11 +185,13 @@ endif()
 # ---- Unit Tests ----
 add_executable(poryaaaa_unit_tests
     test/test_engine.c
+    cmd/gba_tempo_grid.c
     ${ENGINE_SOURCES}
 )
 
 target_include_directories(poryaaaa_unit_tests PRIVATE
     plugin
+    cmd
 )
 
 target_link_libraries(poryaaaa_unit_tests PRIVATE m)

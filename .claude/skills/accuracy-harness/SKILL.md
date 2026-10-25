@@ -23,6 +23,7 @@ test/accuracy/tools/accuracy.py --tests micro      # or song, se, or name,name
 test/accuracy/tools/accuracy.py --input midi       # the plugin's MIDI path instead of the .s
 test/accuracy/tools/accuracy.py --input midi --midi-quantize   # ... with poryaaaa_render --quantize (the frame latch)
 test/accuracy/tools/accuracy.py --input midi --no-gba-start-delay  # ... with the first MIDI note at output time 0
+test/accuracy/tools/accuracy.py --input midi --gba-tempo-grid  # ... with each MIDI tick on the ROM's tempoC / 150 frame
 test/accuracy/tools/accuracy.py --committed-refs   # no mgba build needed, micro-tests only
 build/poryaaaa_song_tests build/accuracy/rom       # .s parser vs ROM, byte for byte
 ```
@@ -46,7 +47,9 @@ note on frame 4.  **The midi-input reports are their own baseline family**
 (`baselines/<date>_midi-path-*.json`, the report's `"input"` field says
 `midi`, `"midi_quantize"` and `"gba_start_delay"` say which form; the two
 2026-10-25 baselines without the delay are `midi-path-start` / `-latch`,
-with it `midi-path-aligned` / `-aligned-latch`): never
+with it `midi-path-aligned` / `-aligned-latch`, with it and
+`--gba-tempo-grid` `midi-path-tempo-grid` / `-tempo-grid-latch`, the
+report's `"gba_tempo_grid"` true): never
 compare one against a song-input baseline with `compare_reports.py`, and
 never save a midi run as the song-input baseline.  What separates the two
 paths today is not the mix grid (both paths mix the same SoundMainRAM
@@ -59,7 +62,10 @@ removes it) and its tempo grid (exact BPM where the ROM ticks on tempoC /
 150: with the delay, tick n on frame 3 + ceil(1.2443 n)
 against the ROM's 3 + ceil(1.25 n), one frame early on bend, the lfo
 rows, psg_mix and vol's ramp ticks 110, 114, ..., 130, and the engine's
-LFO one frame late on one tick in four, n = 0 mod 4).  Aligned, the eleven PCM rows without such an
+LFO one frame late on one tick in four, n = 0 mod 4; `--gba-tempo-grid`
+puts every tick on the ROM's frame: bend -inf, vol -47.2 (the VOL on its
+FINE tick, which ply_fine's unlink keeps from the releasing note), the
+songs' drift 0.0, the LFO grid left to slice 3b).  Aligned, the eleven PCM rows without such an
 event are bit-identical to their `--song` renders (-inf, pcm_cmp /
 pcm_chord at their -55 floor); the PSG rows keep the fixed CgbSound entry
 (same writes, -2667 on frame 3, -464 .. -472 on tick frames, -1388 ..
@@ -67,7 +73,7 @@ pcm_chord at their -55 floor); the PSG rows keep the fixed CgbSound entry
 command batching (a VOL before a note in one tick reaches only the new
 note on the GBA, every channel on the MIDI path).  To take a midi row
 apart, diff it against its own `--song` render, not the reference; plan,
-"Milestone 5 slice 1" and "slice 2a".
+"Milestone 5 slice 1", "slice 2a" and "slice 3a".
 
 Output: a table on stdout and `build/accuracy/report.json`. poryaaaa WAVs and
 logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-mgba>/`.

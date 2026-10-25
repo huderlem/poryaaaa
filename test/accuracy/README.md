@@ -39,7 +39,7 @@ cmake -B build -DACCURACY_POKEEMERALD_DIR=$HOME/pokeemerald -DACCURACY_MGBA_DIR=
 cmake --build build --target accuracy          # ROM + mgba_render + poryaaaa_render + comparison
 # or by hand:
 make -C test/accuracy/rom POKEEMERALD=$HOME/pokeemerald
-test/accuracy/tools/accuracy.py [--input song|midi] [--midi-quantize] [--no-gba-start-delay] [--tests micro|song|name,...] [--gate -40] [--update-refs] [-- extra poryaaaa_render args]
+test/accuracy/tools/accuracy.py [--input song|midi] [--midi-quantize] [--no-gba-start-delay] [--gba-tempo-grid] [--tests micro|song|name,...] [--gate -40] [--update-refs] [-- extra poryaaaa_render args]
 build/poryaaaa_song_tests build/accuracy/rom        # parser vs ROM, byte for byte
 ```
 
@@ -58,10 +58,19 @@ sample a blip frame before that SoundMain), so tick n plays on the frame
 the compiled song's would at the exact MIDI tempo.  The renderer's own
 default is off (the first note at output time 0, which is what a user
 rendering a MIDI wants); `--no-gba-start-delay` runs the harness that way.
+`--gba-tempo-grid` adds `poryaaaa_render --gba-tempo-grid` (slice 3a; off
+in both tools unless asked, `--no-gba-tempo-grid` says so): each MIDI tick
+moves from its exact-tempo time to the frame MPlayMain plays it on --
+tempoC += tempoI once per frame (MPlayStart's 150 before the first TEMPO,
+mid2agb's tempoI = 2 x floor(BPM x tbs / 2) from the first MTrk's tempo
+events), a tick each time tempoC reaches 150 -- dispatched at the last
+sample a blip frame before that frame's SoundMain; with the start delay
+every tick lands on the ROM's frame and the songs' 0.46 % drift is gone.
 A midi-input report (`"input": "midi"`; `"midi_quantize"` true / false,
 absent in reports written before slice 1; `"gba_start_delay"` true /
 false, absent in the reports written before slice 2a, which all ran
-without it) is a separate baseline family,
+without it; `"gba_tempo_grid"` likewise from slice 3a) is a separate
+baseline family,
 `baselines/<date>_midi-path-*.json`; it is never compared against a
 song-input baseline.
 

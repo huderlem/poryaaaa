@@ -8,6 +8,7 @@
 #include "m4a_tables.h"
 #include "m4a_song.h"
 #include "m4a_sequencer.h"
+#include "gba_tempo_grid.h"
 #include "m4a_cry.h"
 #include "voicegroup_loader.h"
 #ifndef _WIN32
@@ -5910,6 +5911,143 @@ static void test_gba_start_delay_origin(void)
     free(wd);
 }
 
+/*
+ * poryaaaa_render --gba-tempo-grid places MIDI tick n on the frame MPlayMain
+ * plays it: tempoC += tempoI once per frame (MPlayStart's 150 before the first
+ * TEMPO), a tick each time tempoC reaches 150, a TEMPO changing only the next
+ * frame's add; grid frame 0 is frame 3.  The event is dispatched at the last
+ * sample a blip frame before that frame's SoundMain, the --gba-start-delay
+ * origin's rule at every frame (plan, milestone 5 slice 3a).  Without the
+ * flag the renderer passes the grid NULL and every exact sample through.
+ */
+static void test_gba_tempo_grid(void)
+{
+    printf("Testing the --gba-tempo-grid tick -> frame mapping...\n");
+    char msg[160];
+
+    /* mid2agb's TEMPO byte, doubled by ply_tempo */
+    ASSERT_EQ(gba_tempo_grid_tempo_i(500000, 24), 120, "120 BPM -> tempoI 120");
+    ASSERT_EQ(gba_tempo_grid_tempo_i(500000, 48), 240, "120 BPM with -X -> tempoI 240");
+    ASSERT_EQ(gba_tempo_grid_tempo_i(800000, 24), 74, "75 BPM -> tempoI 74 (the byte is 75/2)");
+    ASSERT_EQ(gba_tempo_grid_tempo_i(250000, 24), 240, "240 BPM -> tempoI 240");
+    ASSERT_EQ(gba_tempo_grid_tempo_i(461538, 24), 130, "130.0001 BPM rounds to 130");
+
+    /* mid2agb's clocks: 24 * tbs * tick / division, truncated */
+    GbaTempoGrid g;
+    gba_tempo_grid_init(&g, 96, 24);
+    ASSERT_EQ((int)gba_tempo_grid_clock(&g, 3), 0, "division 96: tick 3 -> clock 0");
+    ASSERT_EQ((int)gba_tempo_grid_clock(&g, 5), 1, "division 96: tick 5 -> clock 1");
+    gba_tempo_grid_init(&g, 24, 48);
+    ASSERT_EQ((int)gba_tempo_grid_clock(&g, 3), 6, "-X, division 24: tick 3 -> clock 6");
+
+    /* No TEMPO: MPlayStart's 150, a tick every frame */
+    gba_tempo_grid_init(&g, 24, 24);
+    int ok = 1;
+    for (int n = 0; n <= 100; n++)
+        ok &= gba_tempo_grid_frame(&g, (uint64_t)n) == n;
+    ASSERT(ok, "no TEMPO: tick n on grid frame n");
+
+    /* TEMPO 120 at tick 0: tick n on frame ceil(1.25 n) (frame 3 + that) */
+    gba_tempo_grid_init(&g, 24, 24);
+    ASSERT_EQ((int)gba_tempo_grid_frame(&g, 0), 0, "120: tick 0 on grid frame 0 (the add of 150)");
+    gba_tempo_grid_set_tempo(&g, 500000);
+    ok = 1;
+    for (int n = 1; n <= 400; n++)
+        ok &= gba_tempo_grid_frame(&g, (uint64_t)n) == (5 * n + 3) / 4;
+    ASSERT(ok, "120: tick n on grid frame ceil(1.25 n), n = 1 .. 400");
+
+    /* TEMPO 240 at tick 0: two ticks in one frame on three frames in five */
+    static const int f240[] = { 0, 1, 2, 2, 3, 4, 4, 5, 5, 6, 7 };
+    gba_tempo_grid_init(&g, 24, 24);
+    gba_tempo_grid_frame(&g, 0);
+    gba_tempo_grid_set_tempo(&g, 250000);
+    for (int n = 1; n < (int)(sizeof(f240) / sizeof(f240[0])); n++) {
+        snprintf(msg, sizeof(msg), "240: tick %d on grid frame %d", n, f240[n]);
+        ASSERT_EQ((int)gba_tempo_grid_frame(&g, (uint64_t)n), f240[n], msg);
+    }
+
+    /* A tempo change inside a two-tick frame: 240, then 60 at tick 2.  Tick 3
+     * still plays on tick 2's frame (the frame's add was 240), the new add
+     * starts on the next frame: tick 4 on frame 4, tick 5 on frame 7. */
+    gba_tempo_grid_init(&g, 24, 24);
+    gba_tempo_grid_frame(&g, 0);
+    gba_tempo_grid_set_tempo(&g, 250000);
+    ASSERT_EQ((int)gba_tempo_grid_frame(&g, 2), 2, "240 -> 60: tick 2 on frame 2");
+    gba_tempo_grid_set_tempo(&g, 1000000);
+    ASSERT_EQ((int)gba_tempo_grid_frame(&g, 3), 2, "240 -> 60: tick 3 still on frame 2");
+    ASSERT_EQ((int)gba_tempo_grid_frame(&g, 4), 4, "240 -> 60: tick 4 on frame 4");
+    ASSERT_EQ((int)gba_tempo_grid_frame(&g, 5), 7, "240 -> 60: tick 5 on frame 7");
+    ASSERT_EQ((int)gba_tempo_grid_frame(&g, 5), 7, "a placed tick queried again keeps its frame");
+
+    /* The dispatch samples: grid frame 0 at the origin (slice 2a's O), the
+     * events of one frame on one sample, relative to grid frame 0. */
+    static const int rates[] = { 22050, 44100, 48000, 96000 };
+    static const int origins[] = { 1158, 2317, 2522, 5045 };
+    for (size_t r = 0; r < 4; r++) {
+        snprintf(msg, sizeof(msg), "%d Hz: grid frame 0 at the --gba-start-delay origin %d", rates[r], origins[r]);
+        ASSERT_EQ((int)gba_tempo_grid_sample(0, rates[r]), origins[r], msg);
+    }
+    gba_tempo_grid_init(&g, 24, 24);
+    ASSERT_EQ((int)gba_tempo_grid_dispatch_sample(&g, 0, 0, 250000, 48000.0), 0,
+              "dispatch: tick 0 (the TEMPO) at MIDI time 0");
+    uint64_t s2 = gba_tempo_grid_dispatch_sample(&g, 999, 2, 0, 48000.0);
+    uint64_t s3 = gba_tempo_grid_dispatch_sample(&g, 999, 3, 0, 48000.0);
+    ASSERT(s2 == s3 && s2 == gba_tempo_grid_sample(2, 48000.0) - gba_tempo_grid_sample(0, 48000.0),
+           "dispatch: ticks 2 and 3 (one frame) on grid frame 2's sample");
+
+    /* Off: the exact sample, unchanged, whatever the tick or tempo */
+    ok = 1;
+    for (uint64_t x = 0; x < 200000; x += 977)
+        ok &= gba_tempo_grid_dispatch_sample(NULL, x, x / 7, (x & 1) ? 250000 : 0, 48000.0) == x;
+    ASSERT(ok, "no grid: every event keeps its exact-tempo sample");
+
+    /* The machine at a grid frame's dispatch: past the previous frame's
+     * SoundMain, short of its own; a note-on there starts on that frame. */
+    WaveData *wd = seq_test_wave();
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+    static const int frames[] = { 1, 5, 37 };
+    static const int erates[] = { 22050, 48000, 96000 };
+    for (int q = 0; q < 2; q++) {
+        for (size_t r = 0; r < 3; r++) {
+            for (size_t j = 0; j < 3; j++) {
+                M4AEngine engine;
+                m4a_engine_init(&engine, (float)erates[r]);
+                m4a_engine_set_voicegroup(&engine, voices);
+                m4a_engine_boot(&engine, true);
+                m4a_engine_set_quantize_events(&engine, q == 1);
+                m4a_engine_program_change(&engine, 0, 0);
+                const int64_t soundMain = ROM_FIRST_TICK_CYCLE + (int64_t)frames[j] * GBA_CYCLES_PER_FRAME;
+                int s = (int)gba_tempo_grid_sample(frames[j], erates[r]);
+                float *buf = malloc(sizeof(float) * (size_t)(s + 8192) * 2);
+                m4a_engine_process(&engine, buf, buf + s + 8192, s);
+                snprintf(msg, sizeof(msg), "%d Hz%s: grid frame %d dispatched after the previous SoundMain and before its own",
+                         erates[r], q ? " latched" : "", frames[j]);
+                ASSERT(engine.gba.now > soundMain - GBA_CYCLES_PER_FRAME && engine.gba.now < soundMain
+                       && engine.nextSoundMain == soundMain, msg);
+                m4a_engine_note_on(&engine, 0, 60, 127);
+                int more = (int)((double)(soundMain - engine.gba.now + 2 * GBA_BLIP_FRAME) * erates[r] / GBA_CPU_HZ) + 1;
+                m4a_engine_process(&engine, buf, buf + s + 8192, more);
+                bool started = false;
+                for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+                    if ((engine.pcmChannels[i].status & CHN_ON) && !(engine.pcmChannels[i].status & CHN_START))
+                        started = true;
+                snprintf(msg, sizeof(msg), "%d Hz%s: a note dispatched on grid frame %d starts on frame %d",
+                         erates[r], q ? " latched" : "", frames[j], frames[j] + 3);
+                ASSERT(engine.nextSoundMain == soundMain + GBA_CYCLES_PER_FRAME && started, msg);
+                free(buf);
+                m4a_engine_destroy(&engine);
+            }
+        }
+    }
+    free(wd);
+}
+
 static void test_event_latch(void)
 {
     printf("Testing the MIDI event latch (quantizeEvents)...\n");
@@ -6716,6 +6854,7 @@ int main(void)
     test_transport_stop_edge();
     test_latch_mode();
     test_gba_start_delay_origin();
+    test_gba_tempo_grid();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
