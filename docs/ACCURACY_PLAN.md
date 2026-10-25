@@ -3291,6 +3291,95 @@ be stealable by a later cry 0 note if no channel were free -- not reached
 `2026-10-25_second-cry-rom.json` (0 regressions, every row 0.0); no engine
 or ROM code changed after the baseline, so it stands as saved.
 
+### Engine: two cry players (slice 8b-i, 2026-10-25) -- the structural statement
+
+Written before any code change, from probe step 11 and the slice-8a
+handoff; nothing here is measured anew.  **What the engine does today**:
+one `M4ASequencer` per render, attached to the engine's single
+`frameHook`; `m4a_sequencer_frame` starts its cycle count at the player's
+`mpEntry` (the deeper players' paused costs folded in: cry 0's 826 = 566 +
+71 + 3 x 63), charges `mpHead` and the body, and ends with `mpExit` (the
+outer players' idle 63 each plus the tail 55: cry 0's 118) before
+publishing the CgbSound entry.  Its tracks are engine tracks 0..n-1 by
+the same index (`engine->tracks[i]`, `m4a_engine_note_on(e, i, ...)`,
+the channel's `trackIndex` compared with `i` in `ply_note`'s scan and the
+CGB steal test); its per-track chain bookkeeping (`chainOwner`, `chanSeq`)
+is its own; the voicegroup is the engine's one `voiceGroup`, which `--cry`
+loads with the cry's ToneData as voice 0.
+
+**What has to change**, in the order SoundMain composes it:
+
+1. **A second sequencer instance** for cry player 1: its own `M4ASeqTrack`s,
+   its own `M4ASong` (the template copy `gPokemonCrySongs[1]`, 52 bytes in
+   IWRAM: `dataInRam` set, so the same 7-per-byte rule), its own
+   `chainOwner` / `chanSeq`, its own tempo accumulator and clock.  Its
+   engine tracks are a **disjoint range** (`trackBase` 2: engine tracks
+   2..3, above cry 0's 0..1 as `gPokemonCryTracks[2..3]` 0x030022F8 lies
+   above `[0..1]` 0x03002258), so `ply_note`'s scan and the engine's
+   allocation compare the second cry's track against the first's channel
+   as the GBA compares the track pointers: channel 0's track is the
+   *earlier* one -> `M4A_CYC_SCAN_EARLIER_TRACK`, not a steal candidate.
+   Its VOICE 0 must resolve to the **second** cry's ToneData: a
+   per-sequencer voicegroup (NULL = the engine's), consulted by `ply_voice`
+   only; the engine's channels carry the voice by copy as before.
+2. **Channels** stay the shared twelve: both sequencers call the same
+   `m4a_engine_note_on`, whose allocation is `ply_note`'s index-order scan
+   over `pcmChannels[0..maxPcmChannels)`.  With cry 0 on channel 0 (ON,
+   priority 10, lower track) the second cry's note passes it over and takes
+   channel 1: `SCAN_ON` 20 + `SCAN_ON_CMP` 4 + `SCAN_CMP` 12 +
+   `SCAN_EARLIER_TRACK` 22 + `SCAN_NEXT` 12 = 70, then `SCAN_FREE` 14 --
+   the existing constants, as step 11 found.  Nothing new.
+3. **The frame order**: `MPlayMain` is entered for cry 1 first (291) but
+   its body runs **last**, after cry 0's, because each player calls the
+   previously opened one before its own body.  So the second sequencer is
+   chained *after* the first: the engine's hook runs cry 0's body to its
+   `_081DDA6C`, then cry 1 continues from that cycle count (not from its
+   own `mpEntry`), then the last one charges the exit.  Cost composition:
+   - cry 0 playing, cry 1 paused: 826 + 142 + body0 + **63** (cry 1's
+     `mpPaused`) + **55** (cry 1's `mpExit`) = the one-cry 1596 (body 510):
+     the 118 cry 0 charged alone is exactly 63 + 55, so a single-player
+     render is unchanged by construction -- and the single-player code path
+     is kept literally (no outer sequencer: `mpExit` as before).
+   - both playing: 826 + 142 + body0 (`_081DDA6C` 1478 steady) + **142**
+     (cry 1's `mpHead`: FadeOutBody 88 + 54) + body1 + **55** = 2185 with
+     both bodies 510; the second start tick 1596 + 79 + 3061 = 4736 (79 =
+     142 - 63: a playing player costs the frame its head less the paused
+     idle, plus its body).
+   - cry 1 playing, cry 0 paused: 826 + **63** (cry 0's `mpPaused`) + 142 +
+     body1 + 55: `_081DDA6C` 889, FadeOutBody 977, `_081DD9BC` 1031, exit
+     55 -- step 5's est. row, measured in step 11.
+   - the tick-all-done frame (`M4A_CYC_TICK_ALL_DONE` 24) and the apply pass
+     end at the player's `_081DDA6C` as before; only the exit moves to the
+     chain's last member.  Splitting one `cyc()` of 118 into 63 + 55 charges
+     the FIFO DMA stall identically (the stall count is over the half-open
+     cycle range, additive over a split).
+   - the frame line of `--seq-log` is written once, by the last member,
+     after both players' per-command / per-track lines, so `entry_diff` /
+     `cmd_diff` / `track_diff` read a two-player log unchanged (the probe's
+     ply_* and `_081DD998` breakpoints are in the same order: cry 0's then
+     cry 1's); the track number on the `c` / `t` lines becomes the engine
+     track index (2 / 3 for cry 1) so the two players' lines are telling
+     apart.  No tool change expected; if one is needed it is recorded in
+     the Done section.
+4. **The second start**: `StartCry(id2, 0, 120, 15360, 140, 0, 0)` on VBlank
+   `startFrame2` = `MPlayStart` between two SoundMains, the start tick on
+   engine frame `startFrame2 + 2` (as cry 0's `startFrame` 1 gives frame 3).
+   In the engine a frame hook's entry is engine frame `frameCount + 2`
+   (boot runs frame 2's hook), so the start is issued at the top of the
+   hook of frame `startFrame2 + 2`, before either body -- `MPlayStart`
+   touches only the player's own tracks, so the point between the previous
+   SoundMain and this one is the same state.  `SetPokemonCryTone`'s
+   player choice is taken at that moment from the two players' track 0
+   (flags 0 and `chan` 0 or `chan->track != track` = free; the first free
+   wins -- cry 1 in both runs, cry 0 having MPT_FLG_EXIST); neither free
+   (the `maxClock` replacement) is refused with a message, out of scope.
+   The second cry plays at CRY_MODE_NORMAL's defaults only.
+5. **No new timing constant**: every number above is one of `M4A_CYC_MP_*`,
+   the per-player `mpHead` / `mpPaused` / `mpExit` `m4a_sequencer_set_player`
+   already derives, and the per-track / per-command costs the one-cry
+   renders use.  If a frame of the two runs does not compose from them the
+   gate records it and stops; nothing is fitted.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
