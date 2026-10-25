@@ -1518,10 +1518,10 @@ next ROM change: the boot path up to `m4aSoundInit` and the per-frame loop
 must stay instruction-identical; check pcm / pcm_cmp / cry_bulbasaur
 renders against the baseline references byte for byte before the harness.
 
-**The symbol shift.**  `StartTest` grew by 0x40 (0x58 -> 0x98 bytes), so
+**The symbol shift.**  `StartTest` grew by 0x40 (0x78 -> 0xb8 bytes, `nm -S`), so
 every ROM symbol from `AgbMain` on moved **+0x40** (nm tables before /
 after: 14530 names, the same set; 16 ROM symbols before `AgbMain` at 0x0,
-9461 at +0x40, 49 IWRAM / 233770 other at 0; `AgbMain` 0x8000300 ->
+9461 at +0x40, 41 IWRAM + 8 EWRAM / 233770 other at 0; `AgbMain` 0x8000300 ->
 0x8000340, `CgbSound` 0x800103c -> **0x800107c**, `MPlayMain` 0x8002600 ->
 0x8002640, `ply_note` 0x80028dc -> 0x800291c, `_081DCFB0` 0x8001d8c ->
 0x8001dcc, `gCryTable` 0x0802afc8 -> 0x0802b008; `StartCry` 0x80001e8 and
@@ -1675,7 +1675,7 @@ chain (`_081DD938` r3 = 0x3C after each `ply_endtie`, the track's `chan` 0;
 alone; (b) Jynx (cry 0) on **137** as alone, Wailord (cry 1) on **181** = 62 +
 119.  Length against pitch at the defaults (key 60, TUNE 0, 10512 Hz):
 Jynx's 23524 samples run 2.238 s, about 134 frames from frame 3, and
-Wailord's 20846 run 1.983 s, about 119 frames from frame 62, so both end
+Wailord's 20846 run 1.983 s, 118.4 frames from frame 62, so both end
 before their EOTs (143 / 202); the release is 0 anyway.  The task's
 expectation of stamps on (b)'s EOT frames does not hold at the defaults;
 nothing is cut.  Deaths are the unlink frames.
@@ -3241,6 +3241,55 @@ SoundMainRAM -- then adds `poryaaaa_render --cry2 N --cry2-start F`, a
 `songs.json` key, the runner, and corpus entries for the two runs above
 (expected: the skeleton and deaths of step 11, both EOTs on empty chains, the
 floor residual at the listed crossings).  Cries over music stay later still.
+
+**Code review of the second-cry ROM slice (2026-10-25).**  Two independent
+read-only reviews (reviewer 1: `SetPokemonCryTone`'s free test, `maxClock`
+fallback and tie, the song copy and pointer rewrites against the ROM's
+`StartCry` path and the logs' r7 / r5 / r4; `MPlayStart`'s boolean with the
+cry players' `unk_B` 0 and the priority never consulted, the nine setters in
+`PlayCryInternal`'s order and the second call's values; `MPlayOpen`'s prepend
+and `MPlayMain`'s call-before-body giving bodies BGM, SE1, SE2, SE3, cry 0,
+cry 1 with exactly six entries on every frame of both logs; `ply_note`'s
+scan from `_081DDBFA` walked in the source for an ON channel at equal
+priority with a lower track pointer -- `_081DDC14` / `_081DDC18` /
+`_081DDC24` / `bls` / `bcc` / `_081DDC34`, not recorded as a steal candidate
+-- against the log's label order and the 20 / 4 / 12 / 22 / 12 deltas, 1003
+against 933 for the two `ply_note` spans; `AgbMain`'s single `StartTest`
+call, the wait loop's count, exactly one `MPlayStart` per cry, the tick on
+count + 2; the block layout against crt0.s, agbcc hazards.  Reviewer 2: the
+28-byte layout against the ROM bytes at 0xC0 and both patchers' b[12..14],
+the `symbol[N]` parse and sizeof MusicPlayerInfo 0x40, the nm tables
+re-counted (9461 at +0x40, 16 at 0, IWRAM / EWRAM 0, no other shift), the
+CgbSound disassemblies (586 lines, one literal word +0x40) and each label's
+instruction, the README / skill addresses, every step-11 number against the
+raw logs and `.frames` / `.events` files, the sample headers from the ROM
+(freq 10764288, sizes 8183 / 1902 / 23524 / 20846), the `_p1` files, the Done
+section against step 11, and the two baselines field by field).  **No
+divergence** in anything either review could test; every number confirmed.
+**Adopted** (cosmetic, no engine or ROM code changed): the probe's `.frames`
+header now prints the eighth argument as given (`gPokemonCryMusicPlayers[1]`,
+it had printed the truncated symbol; the `_p1` files re-run, only their
+header line changed); `StartTest`'s sizes 0x78 -> 0xb8 (`nm -S`; growth
++0x40 as stated), "41 IWRAM + 8 EWRAM" for the 49 RAM symbols, Wailord
+118.4 frames instead of "about 119".  **Not acted on, recorded**: the
+`maxClock` fallback (both cry players busy: the larger `clock` is replaced,
+a tie takes player 0) is never exercised in these logs; `startFrame2` <=
+`startFrame` starts both cries on the same count (cry 0's START processed
+first), never before or twice; `SetPokemonCryPitch` reads `tuneValue2 -
+tuneValue` from the global template left by the previous cry, so a chorus-0
+cry after a chorused one inherits its TUNE2 -- inaudible, since chorus 0
+sets trackCount 1 and part1 never runs, and a nonzero chorus overwrites
+TUNE2; the one-cry comparison log `cry_bulbasaur.txt` is from the
+2026-10-24 ROM (0x8c lower from `AgbMain` on), its frame-4 cycles identical
+to the new logs'; the first cry's `MPlayStart` is 85 cycles later in the
+main loop because `StartTest` grew (no SoundMain effect, the first tick's
+cycles are identical); the cry players' equal priority 10 protects cry 0's
+channel from a cry 1 steal by the lower-track tiebreak while cry 1's would
+be stealable by a later cry 0 note if no channel were free -- not reached
+(maxChans 5, channel 1 free).  `claim_check.sh` after the edits: 55 diffed, 0 moved, unit
+1395/1395, blip 49112/0, songs 561/561, harness identical to
+`2026-10-25_second-cry-rom.json` (0 regressions, every row 0.0); no engine
+or ROM code changed after the baseline, so it stands as saved.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

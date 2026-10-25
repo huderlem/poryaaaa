@@ -391,7 +391,8 @@ static void writeStats(FILE* f, struct LateStats* s) {
 
 int main(int argc, char** argv) {
 	if (argc < 6) { fprintf(stderr, "probe rom out.txt frames type id [map [player-symbol or symbol[N] [pitch [pan [volume [length [release [chorus [id2 [startFrame2]]]]]]]]]]\n"); return 1; }
-	char playerSym[128]; strncpy(playerSym, argc > 7 ? argv[7] : "gMPlayInfo_BGM", sizeof playerSym - 1); playerSym[sizeof playerSym - 1] = 0;
+	const char* playerArg = argc > 7 ? argv[7] : "gMPlayInfo_BGM";   /* as given, for the .frames header */
+	char playerSym[128]; strncpy(playerSym, playerArg, sizeof playerSym - 1); playerSym[sizeof playerSym - 1] = 0;
 	unsigned long playerIndex = 0;   /* "symbol[N]": the N-th MusicPlayerInfo (0x40 bytes each) from the symbol */
 	{ char* br = strchr(playerSym, '['); if (br) { playerIndex = strtoul(br + 1, NULL, 10); *br = 0; } }
 	int cryPitch = argc > 8 ? atoi(argv[8]) : 15360;   /* StartCry's parameters, mgba_render's defaults */
@@ -500,7 +501,7 @@ int main(int argc, char** argv) {
 	char path[1024];
 	snprintf(path, sizeof path, "%s.frames", argv[2]);
 	FILE* ff = fopen(path, "w");
-	fprintf(ff, "# frame | m4aSoundMain SoundMain MPlayMain CgbSound SoundMainRAM (cycles from line 160 start) | vsync (from line 150) | mplay calls, ply_note, ply_all, tracks exist/start/count, tempoC (%s) | c15 before->after | writes\n", playerSym);
+	fprintf(ff, "# frame | m4aSoundMain SoundMain MPlayMain CgbSound SoundMainRAM (cycles from line 160 start) | vsync (from line 150) | mplay calls, ply_note, ply_all, tracks exist/start/count, tempoC (%s) | c15 before->after | writes\n", playerArg);
 	for (int k = 1; k < MAX_FRAMES; ++k) {
 		struct FrameRec* r = &gFrameRecs[k];
 		if (!r->used) continue;
