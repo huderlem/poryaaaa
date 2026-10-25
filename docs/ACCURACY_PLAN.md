@@ -1885,7 +1885,9 @@ player's handlers): the stolen note is audible in the PCM mix alone (the
 **What slice 9b needs -- structural statement only, nothing implemented.**
 (Historical since slice 9b-i, 2026-10-25: its "today" sentences about
 `init_chained`, `set_player` and `chainOwner[]` describe the code before
-that slice; see "Done: milestone 4 slice 9b-i".)
+that slice; see "Done: milestone 4 slice 9b-i".  Item (4)'s "today"
+sentences about the runner's loader and `poryaaaa_render`'s `--cry2`
+requiring `--cry` are historical since 9b-i / 9b-ii likewise.)
 (1) `MAX_TRACKS` 16 in `plugin/m4a_engine.h` holds both chains: BGM (10) ->
 cry 0 (2) with trackBase 10 (engine tracks 10..11), SE1 (3) -> cry 0 with
 trackBase 3 (tracks 3..4); a BGM -> SE1 -> cry 0 chain is 10 + 3 + 2 = 15
@@ -4026,7 +4028,9 @@ already has an outer, and accepts BGM -> SE1 (10..12) -> cry 0 (13..14).
 
 **Tool changes**: none (`entry_diff` / `cmd_diff` / `track_diff` /
 `probe_diff` read the chained log as for two cries).  **What slice 9b-ii
-needs**: `songs.json` keys on `se` / `song` entries -- the same `"id2"` /
+needs** (historical since slice 9b-ii, 2026-10-25: done as written below,
+see "Done: milestone 4 slice 9b-ii"; the "today" sentences describe the
+runner before it): `songs.json` keys on `se` / `song` entries -- the same `"id2"` /
 `"start_frame2"` pair (both or neither, the runner's range checks 0..65535
 / 1..255) in the song / SE branch of the runner's loader, which today
 builds `cry2` / `cry2_start_frame` only for `kind == "cry"`; the runner's
@@ -4126,8 +4130,8 @@ duplicated -- `StartTest` runs the second-cry block after its type switch,
 slice 9a's premise) and `poryaaaa_render --song <.s> ... [--player seN]
 --cry2 N --cry2-start-frame F` (after `--player`, the song / SE branch
 only: a cry entry's own `--cry2` line is untouched); `--input midi` skips
-such an entry with a message ("a cry over the song has no MIDI"), as it
-skips cries.  The reference frame count is the existing `seconds ->
+such an entry with a message ("a cry over the song has no MIDI; skipped
+with --input midi"), as it skips cries.  The reference frame count is the existing `seconds ->
 frames + 2`: 182 for both rows.  `claim_check.sh`: a probe log named
 `cry_over_*` is resolved against the SE / song entry of that name (its
 `"song"` for the `.s`, `--player` from `song_table.inc` for an SE, then
@@ -4152,8 +4156,8 @@ lines in the refs' `.log`s; the residual the PCM scheduler-lateness floor
 attributed run by run in 9b-i (6 / 20 `timer0 slot_crossed` in the
 `.events`).  `compare_reports.py` against `2026-10-25_two-cry-rows.json`:
 0 regressions, every one of the 64 existing rows 0.0 in null and worst
-and identical in every `report.json` field but the `ref` / `test` paths
-(checked with python), the two new rows "only in after".  **Gate b**:
+and identical in every `report.json` field, the `ref` / `test` paths
+included (checked with python), the two new rows "only in after".  **Gate b**:
 `claim_check.sh` against the previous baseline -- **59 tests diffed**
 (57 + the two new logs: the SE's 284 and the BGM's 156 mgba writes, max
 |d| 0 cycles each, the engine lines rebuilt as `--song
@@ -4170,8 +4174,59 @@ copy), 66 rows, **57/66** at -40 dB, the nine documented FAILs unchanged
 cry_pidgey_quiet, cry_bulbasaur_reverse, cry_pidgey_echo_start,
 cry_pidgey_echo_start_chorus, cry_jynx_high_pitch); the `.txt` differs
 from the previous one by the two appended rows and the summary line only.
-Reproduced once with `claim_check.sh` against it after the commit (the
-numbers in the review paragraph below).
+Reproduced once with `claim_check.sh` against it after the commit: 59
+diffed, 0 moved, 57/66, 0 regressions, every row 0.0; unit 1521/1521,
+blip 49112/0, songs 561/561.
+
+**Code review of slice 9b-ii (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: the runner's `mgba_render` line against
+`mgba_render.c`'s type-independent `--id2` / `--start-frame2` parse and
+AccParams patch `b[12..14]` and `main.c`'s `StartTest` running the
+second-cry block after its type switch with `StartCry(id2, 0, 120, 15360,
+140, 0, 0)`; the `poryaaaa_render` line against the order-independent argv
+loop, the 0..65535 / 1..255 ranges, the "go together" / "needs --cry or
+--song" / player <= SE3 checks, the BGM default without `--player`,
+`render_song` -> `load_cry2` -> `render_sequenced`'s `song2` branch;
+`second_cry_ok` against the previous inline checks (same conditions and
+messages, both call sites `continue`), the `"song"` key reaching every
+lookup (songs.h, midi.cfg, song_table.inc, the .mid / .s paths) while
+`name` stays the row, no existing entry changed, a `"song"` on a cry entry
+ignored; `frames_for(3.0)` = 182 against both refs' `.log`s; the midi skip
+before any command; `claim_check.sh`'s `overs` block and awk re-run on the
+real files (`--player se1   --cry2 0 --cry2-start-frame 30` / `--cry2 0
+--cry2-start-frame 60`), the `cry_over_*` case before `cry_*` (bash takes
+the first match; after it the two logs would skip silently), the
+`_se` / `_bgm` twin logs and the `_p1` logs skipped as before, every other
+probe log's line unchanged, 179 lines -> the 3.0 s rung; reviewer 2: every
+field of the two rows against the `.frames` / raw logs / `.events` (ids
+33 / 405, SE1 / BGM, gCryTable[0], the start ticks 32 / 62 at 5672 / 7136,
+the free take of channel 0 from `_081DDC40 chan=0` on raw f33, the steal
+of 0x03001000 from track 0x03000090 on raw f63, the -32 / -127 / +126 /
++84 / -28 / +172 table recomputed against the alone run, no `_081DCFB0`
+stamp for either cry, the SE's EOT 172 / 173 and the BGM cry's 202 past
+the log, 6 / 20 crossings); the baseline against the previous one with
+python (headers equal, the 64 shared rows identical in every field, two
+new rows, the `.txt` diff two rows and the summary), the rows' numbers
+against 9b-i gate c and the refs' `.log`s, the refs byte-identical to the
+scratch WAVs, the nine FAILs, the README / skill / plan text and a grep for
+stale phrases).  **No divergence; no wrong fact or number.**  Acted on
+(docs only; `claim_check.sh` after: 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0, unit 1521/1521, blip 49112/0, songs 561/561):
+the cry_over_bgm note's "BGM (10 tracks)" made "9 of the BGM player's 10
+tracks" (the song has 9, the player 10); this section's skip message
+quoted in full and its "but the ref / test paths" sentence corrected (the
+paths are identical too); historical markers on 9b-i's "What slice 9b-ii
+needs" paragraph and on step 12's item (4).  Recorded, not acted on:
+step 12's "Deaths and unlinks summary" names the cry's unlink tick (79 /
+109) as its death frame where 9b-i and the rows name the count-path frame
+before it (78 / 108), a pre-existing wording difference inside the plan;
+the rows say "180 frames" (the probe's nominal length) where `grep -c
+'^frame'` counts 179, both stated correctly where they stand; the runner
+still renders and caches the mgba reference of a row it then skips under
+`--input midi`, as it always has for cries; `second_cry_ok`'s docstring
+repeats the former inline comment; for an SE / song entry the pair check
+now runs after the songs.h / type / player checks (a malformed pair on a
+row with a bad song name reports the song first).
 
 **What comes next**: the next ground-truth probe is a second cry while
 both cry players are busy (the game's `SetPokemonCryTone` replacing the
