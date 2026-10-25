@@ -73,9 +73,30 @@ typedef struct {
     uint32_t patternStack[3];
 } M4ASeqTrack;
 
-typedef struct {
+typedef struct M4ASequencer M4ASequencer;
+struct M4ASequencer {
     M4AEngine *engine;
     const M4ASong *song;
+    /* The engine track this player's track 0 is (its tracks are the range
+     * [trackBase, trackBase + maxTracks)); 0 for a lone player.  A second
+     * player attached with m4a_sequencer_init_chained takes a disjoint
+     * range above the first's, as the GBA's MusicPlayerTrack arrays lie
+     * in memory (gPokemonCryTracks[2..3] above [0..1]): ply_note's channel
+     * scan and the steal tests order tracks by that index as the GBA
+     * orders them by address. */
+    uint8_t trackBase;
+    /* The voicegroup VOICE selects from (NULL: the engine's).  The second
+     * cry player's song is the template copy whose VOICE 0 is the second
+     * cry's ToneData, so each player names its own. */
+    const ToneData *voiceGroup;
+    /* SoundMain's MPlayMain chain: each player calls the previously opened
+     * one before its own body, so the bodies run in MPlayOpen order (BGM,
+     * SE1, SE2, SE3, cry 0, cry 1).  `outer` is the next player whose body
+     * runs after this one's, continuing from this one's _081DDA6C cycle
+     * count; `inner` the one before.  NULL for a lone player: then mpEntry
+     * folds the deeper players' paused costs in and mpExit the outer ones'. */
+    M4ASequencer *outer;
+    M4ASequencer *inner;
 
     uint32_t status;        /* MUSICPLAYER_STATUS_*: PAUSE when stopped/finished */
     uint32_t clock;         /* song ticks since start */
@@ -121,19 +142,42 @@ typedef struct {
     /* Optional trace: one line per frame, "<frame> <CgbSound entry cycles from
      * VBlank line 160>", comparable to mgba_probe's .frames column.  NULL = off. */
     void *traceFile;            /* FILE * */
-} M4ASequencer;
+};
 
 /* Attach to an engine: installs the frame hook and takes over the per-tick
  * work the engine otherwise does itself (gate times, tempo, LFO). */
 void m4a_sequencer_init(M4ASequencer *seq, M4AEngine *engine);
 
-/* Detach from the engine, restoring its own tick behaviour. */
+/* A second player on the same engine, run in SoundMain's chain after
+ * `inner` (its body after inner's, from inner's _081DDA6C), on engine
+ * tracks [trackBase, trackBase + its track count).  Installs no hook:
+ * inner's hook runs the chain.  Select its player with
+ * m4a_sequencer_set_player (it must be a higher M4A_PLAYER_* than inner's)
+ * and its voicegroup with m4a_sequencer_set_voicegroup.  Returns 0, or -1
+ * when inner already has an outer player or trackBase overlaps inner's
+ * tracks, which changes nothing. */
+int m4a_sequencer_init_chained(M4ASequencer *seq, M4ASequencer *inner, int trackBase);
+
+/* The 128-entry voicegroup this player's VOICE commands select from (NULL:
+ * the engine's, the default). */
+void m4a_sequencer_set_voicegroup(M4ASequencer *seq, const ToneData *voiceGroup);
+
+/* SetPokemonCryTone's test of a cry player (m4a.c): its track 0 has no
+ * flags and no channel of its own chained (track->chan == 0 or
+ * chan->track != track).  True before anything ever played on it and
+ * after its song's FINE. */
+bool m4a_sequencer_player_free(const M4ASequencer *seq);
+
+/* Detach from the engine, restoring its own tick behaviour (a chained
+ * player: unlinks it from the chain). */
 void m4a_sequencer_detach(M4ASequencer *seq);
 
 /* Select the music player (M4A_PLAYER_*; the song table's `ms` field):
  * sets the track count and the MPlayMain chain position the timing model
  * charges.  Call before m4a_sequencer_start; init selects the BGM player.
- * Returns 0, or -1 for an out-of-range value, which changes nothing. */
+ * Returns 0, or -1 for an out-of-range value, a chained player's out of
+ * chain order (not above its inner's, not below its outer's) or a track
+ * count past the engine's tracks, which changes nothing. */
 int m4a_sequencer_set_player(M4ASequencer *seq, int player);
 
 /* MPlayStart: begin playing `song` (which must outlive playback).  Applies the

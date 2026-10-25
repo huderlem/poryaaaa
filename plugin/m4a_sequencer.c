@@ -27,6 +27,10 @@ static const uint8_t gClockTable[49] = {
 
 static inline bool chan_is_pcm(int h) { return h < TOTAL_PCM_CHANNELS; }
 
+/* The player's track i as the engine knows it (M4ASequencer.trackBase). */
+static inline int etrk(const M4ASequencer *s, int i) { return s->trackBase + i; }
+#define ETRK(s, i) ((s)->engine->tracks[(s)->trackBase + (i)])
+
 static inline uint8_t *chan_status(M4AEngine *e, int h)
 {
     return chan_is_pcm(h) ? &e->pcmChannels[h].status : &e->cgbChannels[h - TOTAL_PCM_CHANNELS].status;
@@ -133,11 +137,14 @@ static inline void cyc(M4ASequencer *s, int n)
 }
 
 /* Publish the frame's sum as the CgbSound entry (cycles from the SoundMain
- * entry) and trace it when asked. */
+ * entry) and trace it when asked: the chain's last member does, after the
+ * members before it have written their per-command / per-track lines. */
 static void publish_cycles(M4ASequencer *s)
 {
-    s->engine->cgbEntryCycles = s->frameCycles - M4A_CYC_SOUNDMAIN_ENTRY;
     s->frameCount++;
+    if (s->outer)
+        return;
+    s->engine->cgbEntryCycles = s->frameCycles - M4A_CYC_SOUNDMAIN_ENTRY;
     if (s->traceFile)   /* the ROM's first song frame is engine frame 3 */
         fprintf((FILE *)s->traceFile, "%u %d\n", s->frameCount + 1, s->frameCycles);
 }
@@ -179,7 +186,7 @@ static inline int ram_bytes(const M4ASequencer *s, int n)
 static void set_engine_priority(M4ASequencer *s, int i)
 {
     uint32_t p = (uint32_t)s->priority + s->tracks[i].priority;
-    s->engine->tracks[i].priority = p > 0xFF ? 0xFF : (uint8_t)p;
+    ETRK(s, i).priority = p > 0xFF ? 0xFF : (uint8_t)p;
 }
 
 /* TrackStop: silence and release every channel of the track. */
@@ -205,7 +212,7 @@ static void track_stop(M4ASequencer *s, int i)
 static void track_start(M4ASequencer *s, int i)
 {
     M4ASeqTrack *t = &s->tracks[i];
-    M4ATrack *et = &s->engine->tracks[i];
+    M4ATrack *et = &ETRK(s, i);
     uint32_t cmdPtr = t->cmdPtr;    /* Clear64byte stops short of cmdPtr / patternStack */
     uint32_t stack[3];
     memcpy(stack, t->patternStack, sizeof(stack));
@@ -245,7 +252,7 @@ static void track_start(M4ASequencer *s, int i)
 /* clear_modM */
 static void clear_mod_m(M4ASequencer *s, int i)
 {
-    M4ATrack *et = &s->engine->tracks[i];
+    M4ATrack *et = &ETRK(s, i);
     et->modM = 0;
     et->lfoSpeedC = 0;
     s->tracks[i].flags |= (et->modT == 0) ? MPT_FLG_PITCHG : MPT_FLG_VOLCHG;
@@ -383,59 +390,59 @@ static void ply_tempo(M4ASequencer *s, int i)
 
 static void ply_keysh(M4ASequencer *s, int i)
 {
-    s->engine->tracks[i].keyShift = (int8_t)next_byte(s, &s->tracks[i]);
+    ETRK(s, i).keyShift = (int8_t)next_byte(s, &s->tracks[i]);
     s->tracks[i].flags |= MPT_FLG_PITCHG;
 }
 
 static void ply_voice(M4ASequencer *s, int i)
 {
-    m4a_engine_program_change(s->engine, i, next_byte(s, &s->tracks[i]));
+    m4a_engine_program_change_from(s->engine, etrk(s, i), s->voiceGroup, next_byte(s, &s->tracks[i]));
 }
 
 static void ply_vol(M4ASequencer *s, int i)
 {
     uint8_t v = next_byte(s, &s->tracks[i]);
     /* The master volume is baked into the song, so no songMasterVolume scaling. */
-    s->engine->tracks[i].rawVolume = v;
-    s->engine->tracks[i].volume = v;
+    ETRK(s, i).rawVolume = v;
+    ETRK(s, i).volume = v;
     s->tracks[i].flags |= MPT_FLG_VOLCHG;
 }
 
 static void ply_pan(M4ASequencer *s, int i)
 {
-    s->engine->tracks[i].pan = (int8_t)(next_byte(s, &s->tracks[i]) - C_V);
+    ETRK(s, i).pan = (int8_t)(next_byte(s, &s->tracks[i]) - C_V);
     s->tracks[i].flags |= MPT_FLG_VOLCHG;
 }
 
 static void ply_bend(M4ASequencer *s, int i)
 {
-    s->engine->tracks[i].bend = (int8_t)(next_byte(s, &s->tracks[i]) - C_V);
+    ETRK(s, i).bend = (int8_t)(next_byte(s, &s->tracks[i]) - C_V);
     s->tracks[i].flags |= MPT_FLG_PITCHG;
 }
 
 static void ply_bendr(M4ASequencer *s, int i)
 {
-    s->engine->tracks[i].bendRange = next_byte(s, &s->tracks[i]);
+    ETRK(s, i).bendRange = next_byte(s, &s->tracks[i]);
     s->tracks[i].flags |= MPT_FLG_PITCHG;
 }
 
 static void ply_lfos(M4ASequencer *s, int i)
 {
     uint8_t v = next_byte(s, &s->tracks[i]);
-    s->engine->tracks[i].lfoSpeed = v;
+    ETRK(s, i).lfoSpeed = v;
     if (v == 0)
         clear_mod_m(s, i);
 }
 
 static void ply_lfodl(M4ASequencer *s, int i)
 {
-    s->engine->tracks[i].lfoDelay = next_byte(s, &s->tracks[i]);
+    ETRK(s, i).lfoDelay = next_byte(s, &s->tracks[i]);
 }
 
 static void ply_mod(M4ASequencer *s, int i)
 {
     uint8_t v = next_byte(s, &s->tracks[i]);
-    s->engine->tracks[i].mod = v;
+    ETRK(s, i).mod = v;
     if (v == 0)
         clear_mod_m(s, i);
 }
@@ -443,15 +450,15 @@ static void ply_mod(M4ASequencer *s, int i)
 static void ply_modt(M4ASequencer *s, int i)
 {
     uint8_t v = next_byte(s, &s->tracks[i]);
-    if (s->engine->tracks[i].modT != v) {
-        s->engine->tracks[i].modT = v;
+    if (ETRK(s, i).modT != v) {
+        ETRK(s, i).modT = v;
         s->tracks[i].flags |= MPT_FLG_VOLCHG | MPT_FLG_PITCHG;
     }
 }
 
 static void ply_tune(M4ASequencer *s, int i)
 {
-    s->engine->tracks[i].tune = (int8_t)(next_byte(s, &s->tracks[i]) - C_V);
+    ETRK(s, i).tune = (int8_t)(next_byte(s, &s->tracks[i]) - C_V);
     s->tracks[i].flags |= MPT_FLG_PITCHG;
 }
 
@@ -476,13 +483,13 @@ static void ply_xcmd(M4ASequencer *s, int i)
     case 0x07:                                    /* xrele: track->tone.release, which the next
                                                    * ply_note copies into its channel (the cry
                                                    * song's SetPokemonCryRelease value) */
-        s->engine->tracks[i].currentVoice.release = next_byte(s, t);
+        ETRK(s, i).currentVoice.release = next_byte(s, t);
         break;
     case 0x08:                                    /* xiecv */
-        m4a_engine_xcmd(s->engine, i, M4A_XCMD_IECV, next_byte(s, t));
+        m4a_engine_xcmd(s->engine, etrk(s, i), M4A_XCMD_IECV, next_byte(s, t));
         break;
     case 0x09:                                    /* xiecl */
-        m4a_engine_xcmd(s->engine, i, M4A_XCMD_IECL, next_byte(s, t));
+        m4a_engine_xcmd(s->engine, etrk(s, i), M4A_XCMD_IECL, next_byte(s, t));
         break;
     case 0x0C: {                                  /* xwait */
         uint16_t len = (uint16_t)(rd8(s, t->cmdPtr) | (rd8(s, t->cmdPtr + 1) << 8));
@@ -501,7 +508,7 @@ static void ply_xcmd(M4ASequencer *s, int i)
                                                    * DirectSound channel at (SetPokemonCryProgress) */
         uint32_t v = rd8(s, t->cmdPtr) | ((uint32_t)rd8(s, t->cmdPtr + 1) << 8)
                    | ((uint32_t)rd8(s, t->cmdPtr + 2) << 16) | ((uint32_t)rd8(s, t->cmdPtr + 3) << 24);
-        s->engine->tracks[i].sampleStart = v;
+        ETRK(s, i).sampleStart = v;
         t->cmdPtr += 4;
         break;
     }
@@ -528,7 +535,7 @@ static void ply_endtie(M4ASequencer *s, int i)
     int best = -1;
     uint32_t bestSeq = 0;
     for (int h = 0; h < CHAN_COUNT; h++) {
-        if (!chan_in_chain(e, h, i))
+        if (!chan_in_chain(e, h, etrk(s, i)))
             continue;
         uint8_t st = *chan_status(e, h);
         if (!(st & (CHN_START | CHN_ENV_MASK)) || (st & CHN_STOP))
@@ -548,7 +555,7 @@ static void ply_endtie(M4ASequencer *s, int i)
  * VOLCHG/PITCHG pass share it). */
 static int tvps_cost(const M4ASequencer *s, int i, uint8_t flags, bool inNote)
 {
-    const M4ATrack *et = &s->engine->tracks[i];
+    const M4ATrack *et = &ETRK(s, i);
     int c = 0;
     if (flags & MPT_FLG_VOLSET)
         c += M4A_CYC_TVPS_VOLSET + (et->modT == 1 ? M4A_CYC_TVPS_VOLSET_MODT1 : 0);
@@ -561,7 +568,7 @@ static int tvps_cost(const M4ASequencer *s, int i, uint8_t flags, bool inNote)
  * (key + keyM as ply_note and the pitch pass compute it). */
 static int cgb_freq_key_cost(const M4ASequencer *s, int i, int key, bool noise)
 {
-    int k = key + s->engine->tracks[i].keyM;
+    int k = key + ETRK(s, i).keyM;
     if (k < 0)
         k = 0;
     if (noise)
@@ -643,7 +650,7 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
 {
     M4ASeqTrack *t = &s->tracks[i];
     M4AEngine *e = s->engine;
-    M4ATrack *et = &e->tracks[i];
+    M4ATrack *et = &ETRK(s, i);
     t->gateTime = gClockTable[cmd];
 
     int entry = M4A_CYC_NOTE_ENTRY;
@@ -677,7 +684,7 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
     const ToneData *voice = m4a_engine_resolve_voice(&et->currentVoice, t->key);
     if (!voice) {
         cyc(s, M4A_CYC_NOTE_VOICE_BAD + M4A_CYC_NOTE_EXIT);
-        (void)m4a_engine_note_on(e, i, t->key, t->velocity);
+        (void)m4a_engine_note_on(e, etrk(s, i), t->key, t->velocity);
         return;
     }
     cyc(s, (trackType & VOICE_KEYSPLIT_ALL) ? M4A_CYC_NOTE_VOICE_DRUM
@@ -700,7 +707,7 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
         } else if (ch->priority > priority) {
             cyc(s, M4A_CYC_NOTE_CGB_REJECT_PRIO + M4A_CYC_NOTE_EXIT);
             expect = -1;
-        } else if (ch->trackIndex >= i) {
+        } else if (ch->trackIndex >= etrk(s, i)) {
             cyc(s, M4A_CYC_NOTE_CGB_TRACK);
         } else {
             cyc(s, M4A_CYC_NOTE_CGB_REJECT_TRACK + M4A_CYC_NOTE_EXIT);
@@ -708,7 +715,7 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
         }
     } else {
         cyc(s, M4A_CYC_NOTE_PCM_PATH + (romVoice ? M4A_CYC_NOTE_ROM_VOICE_PATH : 0));
-        expect = scan_pcm_cost(s, i, priority);
+        expect = scan_pcm_cost(s, etrk(s, i), priority);
         if (expect < 0)
             cyc(s, M4A_CYC_NOTE_EXIT);
     }
@@ -716,7 +723,7 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
     /* Voice resolution, priority, channel allocation and the note start are
      * the engine's note-on (see m4a_engine_note_on for the correspondence).
      * It returns the channel it started, if any. */
-    int h = m4a_engine_note_on(e, i, t->key, t->velocity);
+    int h = m4a_engine_note_on(e, etrk(s, i), t->key, t->velocity);
     if (h < 0)
         return;
     /* A note the GBA rejected (expect < 0) was charged its exit above; the
@@ -822,7 +829,7 @@ static int endtie_cycles(M4ASequencer *s, int i)
 static int cmd_cycles(M4ASequencer *s, int i, uint8_t cmd)
 {
     const M4ASeqTrack *t = &s->tracks[i];
-    const M4ATrack *et = &s->engine->tracks[i];
+    const M4ATrack *et = &ETRK(s, i);
     /* ROM-song measurements (step 3); ram_bytes() takes off the song-data
      * reads for a song in IWRAM (step 5: measured on tune, goto, voice, vol,
      * pan, xcmd and TIE; the others follow the same per-byte rule, est.). */
@@ -857,7 +864,7 @@ static void dispatch(M4ASequencer *s, int i, uint8_t cmd)
 {
     cyc(s, M4A_CYC_CMD_TABLE);
     if (s->traceFile)   /* the handler's entry, for probe comparison */
-        fprintf((FILE *)s->traceFile, "  c%d %02X %d\n", i, cmd, s->frameCycles);
+        fprintf((FILE *)s->traceFile, "  c%d %02X %d\n", etrk(s, i), cmd, s->frameCycles);
     cyc(s, cmd_cycles(s, i, cmd));
     switch (cmd) {
     case 0xB1: ply_fine(s, i); break;
@@ -905,7 +912,7 @@ static void dispatch(M4ASequencer *s, int i, uint8_t cmd)
  * cost of each branch from _081DD938 to _081DD994. */
 static void lfo_step(M4ASequencer *s, int i)
 {
-    M4ATrack *et = &s->engine->tracks[i];
+    M4ATrack *et = &ETRK(s, i);
     if (et->lfoSpeed == 0) {
         cyc(s, M4A_CYC_WAIT_LFOS0);
         return;
@@ -958,7 +965,7 @@ static void track_tick(M4ASequencer *s, int i)
     cyc(s, n ? M4A_CYC_TICK_CHAIN : M4A_CYC_TICK_NO_CHAIN);
     for (int k = 0; k < n; k++) {
         int h = chain[k];
-        if (chan_in_chain(e, h, i)) {
+        if (chan_in_chain(e, h, etrk(s, i))) {
             uint8_t *gate = chan_gate_time(e, h);
             if (*gate == 0) {
                 cyc(s, M4A_CYC_WALK_GATE0);
@@ -1014,7 +1021,7 @@ static void track_tick(M4ASequencer *s, int i)
         if (c >= 0xCF) {
             cyc(s, M4A_CYC_CMD_NOTE);
             if (s->traceFile)
-                fprintf((FILE *)s->traceFile, "  c%d %02X %d\n", i, c, s->frameCycles);
+                fprintf((FILE *)s->traceFile, "  c%d %02X %d\n", etrk(s, i), c, s->frameCycles);
             ply_note(s, i, (uint8_t)(c - 0xCF));
         } else if (c > 0xB0) {
             dispatch(s, i, c);
@@ -1038,7 +1045,7 @@ static void track_apply(M4ASequencer *s, int i)
     cyc(s, M4A_CYC_APPLY_FLAGGED + M4A_CYC_APPLY_TVPS + tvps_cost(s, i, t->flags, false));
     /* TrkVolPitSet runs before the channel loop, so the key tests below
      * see the new keyM; the engine's apply does the same work. */
-    m4a_engine_track_apply(e, i, vol, pit);
+    m4a_engine_track_apply(e, etrk(s, i), vol, pit);
     int chain[CHAN_COUNT];
     int n = chain_list(s, i, chain);
     if (n == 0) {
@@ -1046,7 +1053,7 @@ static void track_apply(M4ASequencer *s, int i)
     } else {
         for (int k = 0; k < n; k++) {
             int h = chain[k];
-            if (!chan_in_chain(e, h, i)) {
+            if (!chan_in_chain(e, h, etrk(s, i))) {
                 cyc(s, M4A_CYC_APPLY_CH_DEAD);
                 s->chainOwner[h] = 0;
                 continue;
@@ -1067,16 +1074,12 @@ static void track_apply(M4ASequencer *s, int i)
     t->flags &= 0xF0;
 }
 
-void m4a_sequencer_frame(M4ASequencer *s)
+/* MPlayMain's body for this player, from where the deeper player left
+ * off (frameCycles already positioned) to its own _081DDA6C. */
+static void frame_body(M4ASequencer *s)
 {
-    /* SoundMain timing model: the CgbSound entry follows MPlayMain's work.
-     * Costs are the probe measurements in m4a_engine.h, summed along
-     * MPlayMain's control flow; the sum is published as cycles from the
-     * SoundMain entry. */
-    s->frameCycles = s->mpEntry;
     if (!s->song || (s->status & MUSICPLAYER_STATUS_PAUSE)) {
-        cyc(s, s->mpPaused + s->mpExit);
-        publish_cycles(s);
+        cyc(s, s->mpPaused);
         return;
     }
     cyc(s, s->mpHead);
@@ -1098,14 +1101,13 @@ void m4a_sequencer_frame(M4ASequencer *s)
                 cyc(s, M4A_CYC_TICK_NO_TRACK);
             }
             if (s->traceFile)   /* _081DD998 of track i, for probe comparison */
-                fprintf((FILE *)s->traceFile, "  t%d %d\n", i, s->frameCycles);
+                fprintf((FILE *)s->traceFile, "  t%d %d\n", etrk(s, i), s->frameCycles);
             cyc(s, i + 1 < nTracks ? M4A_CYC_TICK_NEXT : M4A_CYC_TICK_LAST);
         }
         s->clock++;
         if (trackBits == 0) {
             s->status = MUSICPLAYER_STATUS_PAUSE;
-            cyc(s, M4A_CYC_TICK_ALL_DONE + s->mpExit);
-            publish_cycles(s);
+            cyc(s, M4A_CYC_TICK_ALL_DONE);
             return;              /* skips the volume/pitch pass, as the GBA does */
         }
         s->status = trackBits;
@@ -1125,8 +1127,35 @@ void m4a_sequencer_frame(M4ASequencer *s)
             track_apply(s, i);
         cyc(s, i + 1 < nTracks ? M4A_CYC_APPLY_NEXT : M4A_CYC_APPLY_LAST);
     }
-    cyc(s, s->mpExit);
-    publish_cycles(s);
+}
+
+void m4a_sequencer_frame(M4ASequencer *s)
+{
+    /* SoundMain timing model: the CgbSound entry follows MPlayMain's work.
+     * Costs are the probe measurements in m4a_engine.h, summed along
+     * MPlayMain's control flow; the sum is published as cycles from the
+     * SoundMain entry.  A lone player: its entry (the deeper players'
+     * paused costs), its body, its exit (the outer players' idle costs and
+     * the tail).  A chain (plan, "Engine: two cry players"): the deepest
+     * member's entry, each member's body in MPlayOpen order from the
+     * previous member's _081DDA6C -- a playing member costs its head
+     * (M4A_CYC_MP_SE_HEAD 142) and body, a paused one its idle 63 -- and
+     * the last member's exit; the one-cry 118 = 63 + 55 is the same sum
+     * split, so a lone player's frame is unchanged. */
+    s->frameCycles = s->mpEntry;
+    frame_body(s);
+    M4ASequencer *last = s;
+    for (M4ASequencer *o = s->outer; o; o = o->outer) {
+        o->frameCycles = last->frameCycles;
+        /* players between the two in the chain, none of them attached:
+         * paused, M4A_CYC_MP_IDLE each (none between the cry players) */
+        cyc(o, (o->player - last->player - 1) * M4A_CYC_MP_IDLE);
+        frame_body(o);
+        publish_cycles(last);
+        last = o;
+    }
+    cyc(last, last->mpExit);
+    publish_cycles(last);
 }
 
 /* ------------------------------------------------------------------------
@@ -1151,12 +1180,50 @@ void m4a_sequencer_init(M4ASequencer *s, M4AEngine *engine)
     engine->externalSequencer = true;
 }
 
+int m4a_sequencer_init_chained(M4ASequencer *s, M4ASequencer *inner, int trackBase)
+{
+    if (!inner || inner->outer || trackBase < inner->trackBase + inner->maxTracks
+        || trackBase >= MAX_TRACKS)
+        return -1;
+    memset(s, 0, sizeof(*s));
+    s->engine = inner->engine;
+    s->status = MUSICPLAYER_STATUS_PAUSE;
+    s->loopTrack = -1;
+    s->trackBase = (uint8_t)trackBase;
+    s->inner = inner;
+    s->frameCount = inner->frameCount;
+    /* the next player up the chain; set_player checks the order */
+    m4a_sequencer_set_player(s, inner->player + 1 < M4A_PLAYER_COUNT ? inner->player + 1 : inner->player);
+    inner->outer = s;
+    return 0;
+}
+
+void m4a_sequencer_set_voicegroup(M4ASequencer *s, const ToneData *voiceGroup)
+{
+    s->voiceGroup = voiceGroup;
+}
+
+bool m4a_sequencer_player_free(const M4ASequencer *s)
+{
+    /* SetPokemonCryTone (m4a.c): track->flags == 0 and (track->chan == 0
+     * or chan->track != track).  track->chan is the chain head: the
+     * newest channel chainOwner still holds for track 0. */
+    if (s->tracks[0].flags != 0)
+        return false;
+    int chain[CHAN_COUNT];
+    int n = chain_list(s, 0, chain);
+    return n == 0 || chan_track(s->engine, chain[0]) != etrk(s, 0);
+}
+
 int m4a_sequencer_set_player(M4ASequencer *s, int player)
 {
     /* NUM_TRACKS_BGM / SE1 / SE2 / SE3 in pokeemerald sound/music_player_table.inc;
      * the cry players' 2 is MPlayOpen's argument in m4aSoundInit (m4a.c). */
     static const uint8_t trackCounts[M4A_PLAYER_COUNT] = { 10, 3, 9, 1, 2, 2 };
     if (player < 0 || player >= M4A_PLAYER_COUNT)
+        return -1;
+    if ((s->inner && player <= s->inner->player) || (s->outer && player >= s->outer->player)
+        || s->trackBase + trackCounts[player] > MAX_TRACKS)
         return -1;
     s->player = (uint8_t)player;
     s->maxTracks = trackCounts[player];
@@ -1186,6 +1253,17 @@ int m4a_sequencer_set_player(M4ASequencer *s, int player)
 
 void m4a_sequencer_detach(M4ASequencer *s)
 {
+    if (s->inner) {
+        s->inner->outer = s->outer;
+        if (s->outer)
+            s->outer->inner = s->inner;
+        s->inner = s->outer = NULL;
+        return;
+    }
+    if (s->outer) {
+        s->outer->inner = NULL;
+        s->outer = NULL;
+    }
     if (s->engine && s->engine->frameHookUser == s) {
         s->engine->frameHook = NULL;
         s->engine->frameHookUser = NULL;

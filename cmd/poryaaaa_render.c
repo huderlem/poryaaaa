@@ -753,6 +753,15 @@ static void print_usage(const char *prog)
         "                              is two tracks, the second's TUNE = (chorus + TUNE) & 0x7F\n"
         "                              (the game's modes pass 20 and 192; 128..255 wrap to the s8\n"
         "                              the game's u32 becomes, 192 = -64)\n"
+        "  --cry2 <id> --cry2-start-frame <1..255>\n"
+        "                              a second cry while the first plays: gCryTable[id] at\n"
+        "                              CRY_MODE_NORMAL's defaults (volume 120, pan 0, pitch 15360,\n"
+        "                              length 140, release 0, chorus 0), started on VBlank F as the\n"
+        "                              accuracy ROM's StartCry does (mgba_render --id2 N --start-frame2 F;\n"
+        "                              its first tick is on engine frame F + 2).  It takes the first\n"
+        "                              free cry player (SetPokemonCryTone): cry player 1 while the\n"
+        "                              first cry plays, whose MPlayMain body runs after cry 0's on\n"
+        "                              the same frame; both busy is refused.  Needs --cry on cry0.\n"
         "\n"
         "Output (at least one required):\n"
         "  --output <file.wav>         Write rendered audio to WAV file\n"
@@ -805,6 +814,8 @@ typedef struct {
     const char *songPath;        /* --song, or NULL with --cry */
     int cry;                     /* --cry: gCryTable index, or -1 */
     M4ACryParams cryParams;      /* --cry-pitch / --cry-pan / --cry-volume / --cry-length / --cry-release / --cry-progress / --cry-chorus over PlayCryInternal's defaults */
+    int cry2;                    /* --cry2: a second cry's gCryTable index, or -1 */
+    int cry2StartFrame;          /* --cry2-start-frame: the VBlank it starts on (its tick on engine frame + 2) */
     bool respectBaseMidiKey, portamento, pwm;
     int maxChannels;
     double sampleRate;
@@ -858,9 +869,44 @@ static int grow_buffers(float **l, float **r, uint64_t *cap, uint64_t need, uint
     return 0;
 }
 
+/* --cry2: the second cry's StartCry, issued between two SoundMains as the
+ * ROM's StartTest issues it on VBlank startFrame2 -- at the top of the
+ * frame hook of engine frame startFrame2 + 2, before either player's
+ * MPlayMain body (a hook's entry is engine frame frameCount + 2: boot runs
+ * frame 2's).  SetPokemonCryTone's rule picks the player then: the first
+ * free cry player, cry 1 while the first cry plays; neither free is
+ * refused (the game's maxClock replacement, out of scope). */
+static struct {
+    M4AFrameHook hook;          /* the sequencer chain's hook, run after the check */
+    void *user;
+    M4ASequencer *players[2];   /* cry player 0, cry player 1 */
+    M4ASong *song;              /* pending; NULL once started or refused */
+    const ToneData *voices;
+    uint32_t startFrame;
+    int startedOn;              /* the player it took, -1 before */
+    bool refused;
+} sCry2;
+static void cry2_hook(M4AEngine *engine, void *user)
+{
+    if (sCry2.song && sCry2.players[0]->frameCount == sCry2.startFrame) {
+        int p = m4a_cry_choose_player(sCry2.players);
+        if (p < 0) {
+            sCry2.refused = true;
+        } else {
+            m4a_sequencer_set_voicegroup(sCry2.players[p], sCry2.voices);
+            m4a_sequencer_start(sCry2.players[p], sCry2.song);
+            sCry2.startedOn = p;
+        }
+        sCry2.song = NULL;
+    }
+    sCry2.hook(engine, user);
+}
+
 /* Play a loaded song through the sequencer on the chosen player.  Takes
- * ownership of `song` and `vg`. */
+ * ownership of `song` and `vg`, and of `song2` / `vg2` (a second cry at
+ * CRY_MODE_NORMAL's defaults started on VBlank startFrame2, or NULL). */
 static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceGroup *vg,
+                            M4ASong *song2, LoadedVoiceGroup *vg2, int startFrame2,
                             float **outL, float **outR, uint64_t *outTotal, uint64_t *outFadeStart)
 {
     M4AEngine engine;
@@ -873,14 +919,44 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
     m4a_engine_set_pwm_enabled(&engine, o->pwm);
     m4a_engine_set_pcm_freq_mode(&engine, o->pcmFreqMode);
 
-    M4ASequencer seq;
+    M4ASequencer seq, seq2;
     m4a_sequencer_init(&seq, &engine);
     if (m4a_sequencer_set_player(&seq, o->player) != 0) {
         fprintf(stderr, "Error: no music player %d\n", o->player);
         m4a_engine_destroy(&engine);
         voicegroup_free(vg);
         m4a_song_free(song);
+        if (song2) m4a_song_free(song2);
+        if (vg2) voicegroup_free(vg2);
         return -1;
+    }
+    memset(&sCry2, 0, sizeof(sCry2));
+    sCry2.startedOn = -1;
+    if (song2) {
+        /* The two cry players, in SoundMain's chain: cry 1's body after cry
+         * 0's on the same frame, on engine tracks 2..3 above cry 0's 0..1. */
+        if (o->player != M4A_PLAYER_CRY0
+            || m4a_sequencer_init_chained(&seq2, &seq, seq.trackBase + seq.maxTracks) != 0
+            || m4a_sequencer_set_player(&seq2, M4A_PLAYER_CRY1) != 0) {
+            fprintf(stderr, "Error: --cry2 needs the first cry on cry player 0 (--player cry0, the default)\n");
+            m4a_sequencer_detach(&seq);
+            m4a_engine_destroy(&engine);
+            voicegroup_free(vg);
+            m4a_song_free(song);
+            m4a_song_free(song2);
+            voicegroup_free(vg2);
+            return -1;
+        }
+        sCry2.players[0] = &seq;
+        sCry2.players[1] = &seq2;
+        sCry2.song = song2;
+        sCry2.voices = vg2->voices;
+        sCry2.startFrame = (uint32_t)startFrame2;
+        sCry2.hook = engine.frameHook;
+        sCry2.user = engine.frameHookUser;
+        engine.frameHook = cry2_hook;
+        printf("  Second cry: StartCry on VBlank %d (its first tick on engine frame %d), cry player 1 if the first still plays\n",
+               startFrame2, startFrame2 + 2);
     }
     if (o->player != M4A_PLAYER_BGM)
         printf("  Music player: %s (%u tracks)\n", kPlayerNames[o->player], seq.maxTracks);
@@ -894,6 +970,8 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
     }
     FILE *seqLog = o->seqLogPath ? fopen(o->seqLogPath, "w") : NULL;
     seq.traceFile = seqLog;
+    if (song2)
+        seq2.traceFile = seqLog;    /* one log: both players' lines, the frame line by the last */
     /* Replay the hardware boot with its output kept, so the render lines up
      * with an emulator recording from reset: the song's first frame is the
      * first SoundMain after the one the game catches on boot. */
@@ -930,6 +1008,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
             fprintf(stderr, "Out of memory allocating audio buffers\n");
             if (seqLog) fclose(seqLog);
             if (sPsgLog.f) { fclose(sPsgLog.f); sPsgLog.f = NULL; }
+            if (song2) { m4a_sequencer_detach(&seq2); voicegroup_free(vg2); m4a_song_free(song2); }
             m4a_sequencer_detach(&seq);
             m4a_engine_destroy(&engine);
             voicegroup_free(vg);
@@ -938,9 +1017,27 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
         }
         m4a_engine_process(&engine, l + total, r + total, (int)n);
         total += n;
+        if (sCry2.refused) {
+            fprintf(stderr, "Error: --cry2 at %.3f s: neither cry player is free (both busy: the game replaces the "
+                            "longer-playing one, which this renderer does not do)\n", (double)total / rate);
+            if (seqLog) fclose(seqLog);
+            if (sPsgLog.f) { fclose(sPsgLog.f); sPsgLog.f = NULL; }
+            m4a_sequencer_detach(&seq2);
+            m4a_sequencer_detach(&seq);
+            m4a_engine_destroy(&engine);
+            voicegroup_free(vg);
+            voicegroup_free(vg2);
+            m4a_song_free(song);
+            m4a_song_free(song2);
+            free(l);
+            free(r);
+            return -1;
+        }
 
         if (!fixed && endAt == UINT64_MAX) {
-            if (m4a_sequencer_finished(&seq)) {
+            bool done = m4a_sequencer_finished(&seq)
+                     && (!song2 || (sCry2.song == NULL && m4a_sequencer_finished(&seq2)));
+            if (done) {
                 endAt = total + tailSamps;
                 printf("  Song ended (FINE) at %.3f s; %.2f s tail\n",
                        (double)total / rate, o->tailSeconds);
@@ -957,6 +1054,14 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
                 (double)limit / rate);
 
     printf("  %u notes, %u song ticks\n", seq.noteCount, seq.clock);
+    if (song2) {
+        if (sCry2.startedOn == 1)
+            printf("  Second cry on cry player 1: %u notes, %u song ticks\n", seq2.noteCount, seq2.clock);
+        else if (sCry2.startedOn == 0)
+            printf("  Second cry on cry player 0 (the first cry had finished): %u song ticks\n", seq.clock);
+        else
+            printf("  Second cry never started (the render ended before VBlank %d)\n", startFrame2);
+    }
     if (fadeStart != UINT64_MAX && fadeStart < total) {
         uint64_t fs = total - fadeStart;
         for (uint64_t i = 0; i < fs; i++) {
@@ -971,6 +1076,11 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
     if (sPsgLog.f) {
         fclose(sPsgLog.f);
         sPsgLog.f = NULL;
+    }
+    if (song2) {
+        m4a_sequencer_detach(&seq2);
+        voicegroup_free(vg2);
+        m4a_song_free(song2);
     }
     m4a_sequencer_detach(&seq);
     m4a_engine_destroy(&engine);
@@ -1010,7 +1120,7 @@ static int render_song(const SongRenderOpts *o, float **outL, float **outR,
         return -1;
     }
     printf("Voicegroup loaded successfully.\n");
-    return render_sequenced(o, song, vg, outL, outR, outTotal, outFadeStart);
+    return render_sequenced(o, song, vg, NULL, NULL, 0, outL, outR, outTotal, outFadeStart);
 }
 
 /* --cry: gCryTable[id] through the cry song template (m4a_cry.h), as the
@@ -1045,7 +1155,44 @@ static int render_cry(const SongRenderOpts *o, float **outL, float **outR,
     printf("  %s: volume %u, pan %d, pitch %d, length %u, release %u, progress %u, chorus %d, priority %u, %u track%s\n",
            song->name, cp.volume, cp.pan, cp.pitch, cp.length, cp.release, cp.progress, cp.chorus, cp.priority,
            song->trackCount, song->trackCount == 1 ? "" : "s");
-    return render_sequenced(o, song, vg, outL, outR, outTotal, outFadeStart);
+    if (o->cry2 < 0)
+        return render_sequenced(o, song, vg, NULL, NULL, 0, outL, outR, outTotal, outFadeStart);
+
+    /* --cry2: the second cry's sample and its own template copy (the ROM's
+     * gPokemonCrySongs[1]) at CRY_MODE_NORMAL's defaults. */
+    char symbol2[128];
+    uint8_t type2 = VOICE_CRY;
+    if (voicegroup_cry_table_entry(o->projectRoot, o->cry2, symbol2, sizeof(symbol2), &type2) != 0) {
+        fprintf(stderr, "Error: no gCryTable entry %d in %s/sound/cry_tables.inc (--cry2)\n", o->cry2, o->projectRoot);
+        voicegroup_free(vg);
+        m4a_song_free(song);
+        return -1;
+    }
+    printf("Cry %d (second, --cry2): %s%s\n", o->cry2, symbol2, (type2 & VOICE_TYPE_REV) ? " (reversed: gCryTable_Reverse's entry)" : "");
+    fflush(stdout);
+    LoadedVoiceGroup *vg2 = voicegroup_load_cry_typed(o->projectRoot, symbol2, type2, NULL);
+    if (!vg2) {
+        fprintf(stderr, "Failed to load cry sample '%s'\n", symbol2);
+        voicegroup_free(vg);
+        m4a_song_free(song);
+        return -1;
+    }
+    const WaveData *wd2 = vg2->voices[0].wav;
+    printf("  %s: %u samples at %u Hz, %s%s%s\n", symbol2, wd2->size, wd2->freq >> 10,
+           (vg2->voices[0].type & VOICE_TYPE_CMP) ? "DPCM" : "uncompressed (no built .bin: plays as DirectSound)",
+           (vg2->voices[0].type & VOICE_TYPE_REV) ? ", played in reverse" : "",
+           (wd2->status & 0x4000) ? ", loops" : "");
+    M4ACryParams cp2;
+    m4a_cry_params_default(&cp2);
+    M4ASong *song2 = m4a_cry_song_new(&cp2);
+    if (!song2) {
+        voicegroup_free(vg2);
+        voicegroup_free(vg);
+        m4a_song_free(song);
+        return -1;
+    }
+    printf("  %s (second): the defaults, %u track, StartCry on VBlank %d\n", song2->name, song2->trackCount, o->cry2StartFrame);
+    return render_sequenced(o, song, vg, song2, vg2, o->cry2StartFrame, outL, outR, outTotal, outFadeStart);
 }
 
 /* Loop-expansion bookkeeping: which notes are keyed on (note-on emitted, no
@@ -1145,6 +1292,8 @@ int main(int argc, char *argv[])
     const char *midiPath      = NULL;
     const char *songPath      = NULL;
     int         cryId         = -1;
+    int         cry2Id        = -1;
+    int         cry2Start     = 0;
     M4ACryParams cryParams;
     bool        cryParamsSet  = false;
     m4a_cry_params_default(&cryParams);
@@ -1183,6 +1332,22 @@ int main(int argc, char *argv[])
                 return 1;
             }
             cryId = (int)v;
+        } else if (strcmp(argv[i], "--cry2") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            long v = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || v < 0 || v > 0xFFFF) {
+                fprintf(stderr, "Error: --cry2 takes a gCryTable index (got '%s')\n", argv[i]);
+                return 1;
+            }
+            cry2Id = (int)v;
+        } else if (strcmp(argv[i], "--cry2-start-frame") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            long v = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || v < 1 || v > 255) {
+                fprintf(stderr, "Error: --cry2-start-frame takes a VBlank count 1..255 (the ROM's u8 startFrame2; got '%s')\n", argv[i]);
+                return 1;
+            }
+            cry2Start = (int)v;
         } else if ((strcmp(argv[i], "--cry-pitch") == 0 || strcmp(argv[i], "--cry-pan") == 0
                     || strcmp(argv[i], "--cry-volume") == 0 || strcmp(argv[i], "--cry-length") == 0
                     || strcmp(argv[i], "--cry-release") == 0 || strcmp(argv[i], "--cry-progress") == 0
@@ -1287,6 +1452,14 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Note: --cry ignores the <voicegroup> argument (the cry's sample is its voicegroup)\n");
     if (cryId < 0 && cryParamsSet)
         fprintf(stderr, "Note: --cry-pitch / --cry-pan / --cry-volume / --cry-length / --cry-release / --cry-progress / --cry-chorus only apply to --cry\n");
+    if ((cry2Id >= 0) != (cry2Start > 0)) {
+        fprintf(stderr, "Error: --cry2 <id> and --cry2-start-frame <F> go together\n");
+        return 1;
+    }
+    if (cry2Id >= 0 && cryId < 0) {
+        fprintf(stderr, "Error: --cry2 needs --cry (the first cry)\n");
+        return 1;
+    }
     if (midiPath && !vgName) {
         fprintf(stderr, "Error: --midi needs a <voicegroup> argument\n\n");
         print_usage(argv[0]);
@@ -1311,7 +1484,7 @@ int main(int argc, char *argv[])
             player = M4A_PLAYER_CRY0;      /* SetPokemonCryTone from silence */
         SongRenderOpts o = {
             .projectRoot = projectRoot, .voicegroup = vgName, .songPath = songPath, .cry = cryId,
-            .cryParams = cryParams,
+            .cryParams = cryParams, .cry2 = cry2Id, .cry2StartFrame = cry2Start,
             .respectBaseMidiKey = respectBaseMidiKey,
             .portamento = portamento, .pwm = pwm, .maxChannels = maxChannels,
             .sampleRate = sampleRate, .pcmFreqMode = pcmFreqMode,

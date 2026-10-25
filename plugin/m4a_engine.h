@@ -751,6 +751,12 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
 const ToneData *m4a_engine_resolve_voice(const ToneData *voice, uint8_t key);
 void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key);
 void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program);
+/* The same from another 128-entry voicegroup (NULL: the engine's): a music
+ * player whose song names its own voicegroup -- the second cry player's
+ * song, whose VOICE 0 is the second cry's ToneData (m4a_sequencer.h,
+ * m4a_sequencer_set_voicegroup). */
+void m4a_engine_program_change_from(M4AEngine *engine, int trackIndex,
+                                    const ToneData *voiceGroup, uint8_t program);
 void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value);
 /* Extended command (XCMD), already resolved to its gXcmdTable index the way
  * mid2agb resolves a CC 0x1E + CC 0x1D/0x1F pair when it compiles a song.

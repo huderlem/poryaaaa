@@ -695,16 +695,24 @@ void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
 /*
  * Program Change - select instrument from voicegroup
  */
-void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program)
+void m4a_engine_program_change_from(M4AEngine *engine, int trackIndex,
+                                    const ToneData *voiceGroup, uint8_t program)
 {
+    if (!voiceGroup)
+        voiceGroup = engine->voiceGroup;
     /* voiceGroup holds exactly 128 entries; a wild program must not pick a
      * voice from whatever memory follows it. */
-    if (trackIndex < 0 || trackIndex >= MAX_TRACKS || !engine->voiceGroup || program > 127)
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS || !voiceGroup || program > 127)
         return;
 
     M4ATrack *track = &engine->tracks[trackIndex];
     track->currentProgram = program;
-    track->currentVoice = engine->voiceGroup[program];
+    track->currentVoice = voiceGroup[program];
+}
+
+void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t program)
+{
+    m4a_engine_program_change_from(engine, trackIndex, NULL, program);
 }
 
 void m4a_engine_refresh_voices(M4AEngine *engine)

@@ -26,6 +26,7 @@
 
 #include <stdint.h>
 #include "m4a_song.h"
+#include "m4a_sequencer.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +58,16 @@ M4ASong *m4a_cry_song_new(const M4ACryParams *p);
 /* The template's bytes before any setter (gPokemonCrySongTemplate's first
  * M4A_CRY_SONG_SIZE bytes as the ROM holds them, pointer words 0). */
 extern const uint8_t gM4ACrySongTemplate[M4A_CRY_SONG_SIZE];
+
+/* SetPokemonCryTone's player choice (src/m4a.c 1660-1699): the first of
+ * the two cry players (gPokemonCryMusicPlayers[0], [1]) whose track 0 is
+ * free -- flags 0 and chan 0 or chan->track != track
+ * (m4a_sequencer_player_free) -- gets the cry.  Returns 0 or 1, or -1 when
+ * neither is free: the game then replaces the player with the larger
+ * clock (a tie takes player 0), which is not implemented -- callers
+ * refuse (plan, "Done: milestone 4 slice 8a", not acted on).  A NULL
+ * entry is a player that does not exist in this render (never free). */
+int m4a_cry_choose_player(M4ASequencer *const players[2]);
 
 #ifdef __cplusplus
 }

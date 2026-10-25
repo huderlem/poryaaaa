@@ -62,6 +62,14 @@ const uint8_t gM4ACrySongTemplate[M4A_CRY_SONG_SIZE] = {
     0x00, 0x00                                      /* padding */
 };
 
+int m4a_cry_choose_player(M4ASequencer *const players[2])
+{
+    for (int i = 0; i < 2; i++)
+        if (players[i] && m4a_sequencer_player_free(players[i]))
+            return i;
+    return -1;
+}
+
 void m4a_cry_params_default(M4ACryParams *p)
 {
     p->volume = 120;        /* CRY_VOLUME */
