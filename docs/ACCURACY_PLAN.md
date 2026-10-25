@@ -2047,6 +2047,93 @@ pitch 14440 through the real mixer, frames 3..145 against the probe with
 the channel alive at the EOT); the corpus, runner, `claim_check.sh`,
 README and skill; this section and the baseline.
 
+### Done: milestone 4 slice 4, cry length / release modes (2026-10-24)
+
+Three cries with `PlayCryInternal`'s whole modes join the corpus: pitch,
+length and release together as `src/sound.c` sets them (`songs.json` cry
+entries take optional `"length"` / `"release"` keys, `SetPokemonCryLength`
+/ `SetPokemonCryRelease`'s arguments, forwarded like pitch / pan / volume:
+`mgba_render --length/--release`, `poryaaaa_render --cry-length/
+--cry-release`, `mgba_probe`'s twelfth / thirteenth arguments,
+`claim_check.sh` likewise).  None of the three modes sets chorus, so no
+value is left out; chorus (two tracks), the reverse cries, a second cry
+while one plays and cries over music stay for later slices.  The test
+ROM's `StartCry` takes length and release from `struct AccParams` (the
+probe section, step 7: the block's reserved bytes, defaults 140 / 0 in the
+ROM data, the +0x30 symbol shift, the 51 existing rows identical under the
+rebuilt ROM before any engine change).  No engine code changed in this
+slice: the setters (`m4a_cry.c`), `ply_xrele`, the PCM release step and
+`ply_fine`'s unlink of a releasing channel were already ported; the slice
+exercises them against the ROM for the first time and gates them.
+Baseline `baselines/2026-10-24_cry-modes.json` / `.txt`: **49/54 pass at
+-40 dB**; the 51 previous rows are unchanged to the decimal
+(`compare_reports.py 2026-10-24_cry-variants.json 2026-10-24_cry-modes.json`:
+0 regressions, 0 improvements, every -inf still -inf, every row 0.0;
+cry_pidgey, cry_jynx, se_rain_stop, cry_bulbasaur_howl and cry_pidgey_quiet
+FAIL on the documented floor as before).  `poryaaaa_unit_tests`
+1260/1260 (39 new), `poryaaaa_blip_tests` 49112/0, `poryaaaa_song_tests`
+561/561.  `claim_check.sh`: 47 probed tests (the three new ones added), 0
+moved writes.
+
+| test | gCryTable | mode (pitch / length / release) | sample | null | worst 1 s | ref dBFS |
+|---|---|---|---|---|---|---|
+| cry_jynx_faint_full | 123 | CRY_MODE_FAINT: 14440 / 140 / 200 | 23524 samples, 2.75 s at this pitch: released by the EOT at frame 143, 18 release passes, the channel stopped on 161 | -61.0 | -56.1 | -25.7 |
+| cry_wailord_doubles | 381 | CRY_MODE_DOUBLES: 15360 / 20 / 225 | 20846 samples, 1.98 s: released by the EOT at frame 23, 30 release passes, stopped on 53 | -47.3 | -45.9 | -29.4 |
+| cry_pidgey_roar2 | 15 | CRY_MODE_ROAR_2: 15616 / 60 / 225 | 1902 samples at key 61, 0.17 s: gone at frame 14, the EOT at 63 finds an empty chain | -50.1 | -49.8 | -33.6 |
+
+**The channel's death frames, probe against engine**: the probe's new
+`_081DCFB0` stamp (SoundMainRAM's `statusFlags = 0`, broken at the IWRAM
+copy since the ROM label never executes) puts cry_jynx_faint_full's death
+on **frame 161** and cry_wailord_doubles' on **frame 53**; the engine's
+channel loses CHN_ON on the same frames (`test_sequencer_cycles_cry_faint_full`
+asserts 161 with the envelope 199, 155, 121, 94, 73, 57, 44, 34, 26, 20,
+15, 11, 8, 6, 4, 3, 2, 1 on frames 143..160; the Wailord run's 53 follows
+from the same arithmetic at release 225, 224 .. 1 on 23..52, which
+`test_pcm_release_envelope` pins on a hand-built channel).  The last
+non-zero output sample of reference and render agrees to the sample on
+all three (cry_jynx_faint_full 2.7159 s, cry_wailord_doubles 0.9110 s,
+cry_pidgey_roar2 0.2930 s).  The `ply_endtie`-with-match frame reads
+**82** from the probe on both (a) and (b), as step 6 measured; (c)'s
+empty chain reads 54.  No run put two channels on the cry track, so
+`_SKIP` 18 stays est.  The "1689-type unlink frame" the task names does
+not exist for (a) and (b): `ply_fine` unlinks the releasing channel on the
+EOT frame itself (the track is gone), and the death is SoundMainRAM's
+alone -- hence the new breakpoint.
+
+**Per-test sequencer residual**: `entry_diff.py` 0 on all 177 complete
+frames of each of the three (the probe's incomplete frame 179 excepted),
+`cmd_diff.py` 0, `track_diff.py` 0, with no new constant: the EOT frames
+are 1928 (a, b) and 1810 (c), the xwait ticks 1596 / 1576, the start
+tick 4077, all from the existing model.
+
+**Residual attribution** (skill, "Attributing a residual below -40 dB";
+every run of differing output samples above 20 int16 LSB, both sides,
+against the probe's `L timer0` slot crossings, raw `fN` = frame N-1):
+cry_jynx_faint_full 4 crossings (1.6777, 2.4813, 2.5483, 2.6823 s), 2
+runs: 1.6779 s (frame 100, 0.3 PCM samples, 2.9 LSB) and 2.4815 s (frame
+148, in the release tail at env 44, 0.6 LSB), each 0.2 ms after a
+crossing; the crossings at 2.5483 / 2.6823 s fall at env 11 and 2 and
+produce no run above the threshold.  cry_wailord_doubles 6 crossings
+(0.2043, 0.2713, 0.3383, 0.4052, 0.5392, 0.6062 s), 4 runs: 0.2045 (7.3
+LSB), 0.2715 (2.0), 0.3385 (4.4 right / 3.7 left), 0.4054 s (2.4, frame
+24, the first release pass at env 224), each 0.2 ms after a crossing; the
+two later crossings fall at env 15 and 5 and produce none.  cry_pidgey_roar2
+1 crossing (0.1374 s), 1 run at 0.1376 s (3.2 LSB).  **No run anywhere
+else**: nothing at a release pass that is not at a slot crossing, nothing
+at either channel's death, nothing at (c)'s EOT -- the release arithmetic
+differs by nothing; all three residuals are item 1c's scheduler-lateness
+floor, large per sample because the DPCM cry waveforms jump.  (a) is as
+deep as cry_jynx_faint (-61.2) because its one loud crossing is the same
+one; (b) and (c) pass where cry_pidgey / cry_jynx fail because their
+crossings land on quieter stretches (cry_pidgey_roar2's single crossing is
+at 0.137 s against cry_pidgey's at 0.204 s: the key-61 sample has moved on
+by then).
+
+The work, in order (commits on `accuracy-harness` after 3a7f8b3): the ROM
+/ probe / mgba_render and the neutrality check (step 7); the CLI flags,
+runner, corpus, unit tests, README and skill; this section and the
+baseline.  The two reviews follow below.
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM
