@@ -4248,6 +4248,38 @@ static void test_cry_song(void)
     m4a_song_free(song);
 }
 
+/* XCMD xRELE (ply_xrele, m4a.c): the byte becomes the track tone's release,
+ * so a note started after it releases at that rate instead of the voice's.
+ * The cry song carries SetPokemonCryRelease's value this way (0 at the
+ * defaults; the game's other cry modes use 200 / 225). */
+static void test_sequencer_xrele(void)
+{
+    printf("Testing XCMD xRELE...\n");
+    ToneData voices[128];
+    seq_test_voices(voices);           /* voice 0: square 1, release 0 */
+    M4ASong *song = parse_song_text(
+        "\t.equ\tt_grp, voicegroup_test\n\t.equ\tt_pri, 0\n\t.equ\tt_rev, 0\n\t.equ\tt_mvl, 127\n"
+        "\t.equ\tt_key, 0\n\t.equ\tt_tbs, 1\n\t.section .rodata\n\t.global\tt\n\t.align\t2\n"
+        "t_1:\n\t.byte\tVOICE , 0\n\t.byte\tXCMD , xRELE , 5\n\t.byte\tN04 , Cn3 , v127\n"
+        "\t.byte\tW24\n\t.byte\tFINE\n\t.align\t2\nt:\n\t.byte\t1, 0, t_pri, t_rev\n\t.word\tt_grp\n\t.word\tt_1\n");
+    ASSERT(song != NULL, "xrele: song parses");
+    if (!song) return;
+    M4AEngine engine;
+    m4a_engine_init(&engine, 48000.0f);
+    m4a_engine_set_voicegroup(&engine, voices);
+    M4ASequencer seq;
+    m4a_sequencer_init(&seq, &engine);
+    m4a_sequencer_start(&seq, song);
+    m4a_sequencer_frame(&seq);         /* the start tick: VOICE, xRELE 5, the note */
+    ASSERT_EQ(engine.tracks[0].currentVoice.release, 5, "xrele: the track tone's release");
+    ASSERT_EQ(voices[0].release, 0, "xrele: the voicegroup's voice is untouched");
+    ASSERT_EQ(engine.cgbChannels[0].release, 5, "xrele: the note started after it carries the release");
+    ASSERT_EQ(seq.tracks[0].cmdPtr, song->trackOffsets[0] + 2 + 3 + 3 + 1, "xrele: one operand byte consumed (VOICE, XCMD xRELE n, the note, then the W24 that ends the tick)");
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&engine);
+    m4a_song_free(song);
+}
+
 /* One cry, frame by frame, against its probe: Cry_Pidgey (gCryTable 15,
  * 1902 DPCM samples at 10512 Hz) on cry player 0, build/probe/cry_pidgey.txt
  * (plan, "SoundMain timing probe, step 5").  The engine's mixer plays a
@@ -4301,7 +4333,7 @@ static void test_sequencer_cycles_cry(void)
     ASSERT_EQ(mismatches, 0, "sequencer: CgbSound entry matches the cry_pidgey probe on frames 3..145 (cry 0)");
     ASSERT(m4a_sequencer_finished(&seq), "sequencer: the cry finished");
     ASSERT_EQ(seq.noteCount, 1, "sequencer: one TIE");
-    ASSERT_EQ(seq.clock, 142, "sequencer: 142 ticks (the start tick, 140 xwait ticks, the EOT tick)");
+    ASSERT_EQ(seq.clock, 142, "sequencer: 142 ticks (141 command ticks: xwait waits on 3..142 and expires with EOT / FINE on 143; the finished tick on 144)");
 
     m4a_sequencer_detach(&seq);
     m4a_engine_destroy(&engine);
@@ -4357,6 +4389,7 @@ int main(void)
     test_sequencer_players();
     test_sequencer_cycles_se2();
     test_cry_song();
+    test_sequencer_xrele();
     test_sequencer_cycles_cry();
     test_fifo_dma_stall();
     test_fixed_rate_voice_ignores_pitch();

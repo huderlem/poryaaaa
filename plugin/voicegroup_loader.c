@@ -2995,9 +2995,11 @@ LoadedVoiceGroup *voicegroup_load_cry(const char *projectRoot, const char *sampl
 int voicegroup_cry_table_symbol(const char *projectRoot, int index, char *out, size_t outLen)
 {
     char path[MAX_PATH_LEN];
+    if (index < 0)
+        return -1;
     build_path(path, sizeof(path), projectRoot, "sound/cry_tables.inc");
     FILE *f = fopen(path, "r");
-    if (!f || index < 0)
+    if (!f)
         return -1;
     char line[512];
     int inTable = 0, n = 0, rc = -1;

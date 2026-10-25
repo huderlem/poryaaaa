@@ -1698,11 +1698,64 @@ the real mixer with a stand-in DPCM sample of its length and rate, the
 channel dying on frame 14 as in mgba); the corpus, runner, `claim_check.sh`
 cry case, README and skill; this section and the baseline.
 
+**Code review of the cry slice (2026-10-24).**  Two independent reviews
+(the template, setters, player selection and chain position against m4a.c
+`SetPokemonCryTone` / `SetPokemonCry*` / `m4aSoundInit`, m4a_tables.c and
+m4a_1.s, decoding the raw cry probe logs themselves; the runner, songs.json
+plumbing, `--cry`, `claim_check.sh`, the loader and the template / ToneData
+/ sample bytes against the ROM), then `tools/claim_check.sh` on each
+adopted change alone.  Neither found a divergence at the defaults.  Byte
+checks: gCryTable[15 / 0 / 381 / 123] are `20 3C 00 00 <wav> FF 00 FF 00`
+with the map's Cry_Pidgey / Bulbasaur / Wailord / Jynx pointers; the four
+`cries/*.bin` files are byte-identical to the ROM at those pointers (header
+and data), the .bin newer than the .wav so the loader takes it and keeps
+the CMP bit; `gPokemonCrySongTemplate` at 0x08002F20 equals
+`gM4ACrySongTemplate` but for the voicegroup_dummy word; the setters
+hand-applied with mgba_render's defaults give `test_cry_song`'s bytes;
+`voicegroup_cry_table_symbol` walks the 388 `cry` lines in the ROM's order
+and stops at `gCryTable_Reverse::`.  Confirmed from the logs: SE3's
+`_081DDA6C` 826, FadeOutBody +88, `_081DD9BC` 968, exit 63 + 55 on every
+frame; frames 3 / 4 / 14 / 143 / 144 / 145 segment by segment against the
+port's charges (item 7 of review 1); the byte-read counts of every handler
+(`ldrb` / `READ_XCMD_BYTE`) behind `ram_bytes()`, ply_note's 1 / 2 / 3
+test reads, gXcmdTable's indices, ply_endtie's walk conditions.
+**Adopted** (R1#6, latent divergence, harness-neutral by construction --
+no vanilla song or default cry uses it; gated by `test_sequencer_xrele`):
+`XCMD xRELE` now stores the track tone's release as `ply_xrele` does (the
+port skipped the byte, so a cry with `SetPokemonCryRelease` != 0, the
+game's other cry modes, or a song using xRELE would have cut the note at
+EOT instead of releasing it); the parser learned the MPlayDef.s xcmd
+names (`xWAVE` .. `xWAIT`).  claim_check: 0 moved writes, every row 0.0.
+**Adopted, cosmetic** (one claim_check for the batch, every row 0.0):
+`--cry` rejects non-numeric ids (was atoi: `abc` played Bulbasaur, R2#6);
+the FILE leak on a negative index in `voicegroup_cry_table_symbol` (both);
+`ram_bytes` charged on the `_081DD8E0` segment that holds the ldrb
+(`M4A_CYC_CMD_BYTE` / `_RUNNING`) rather than the fetch before it (R1#5a;
+same sum); xcmd sub-commands 0x00 / 0x03 (`ply_xxx` = ply_fine) no longer
+charged XIEC on top of ply_fine's own cost (R1#5d, unreachable); the
+142-tick comment in `test_sequencer_cycles_cry` (R1#7).  **Not acted on**:
+`XCMD 0x0D` (`unk_3C`, the sample start offset `ply_note` copies into the
+channel's count: R1#6) -- the port skips it, so `M4ACryParams.progress`
+!= 0 would start the sample at 0; every `PlayCryInternal` mode passes 0
+and the test ROM too, so it is harness-neutral today and belongs to the
+variants slice with the mixer's SF_START offset; the game's persistent
+`gPokemonCrySong` (a second cry after a chorus cry sees a different
+`tuneValue2 - tuneValue`; unused bytes at trackCount 1, and the harness
+starts one cry from reset: R1#2, R2#2); the reference render done before
+the `--input midi` skip and the skipped test absent from the report (R2#4);
+the probes' `.frames` files hold 179 `frame` lines for a 180-frame run
+(the docs say 180 frames, the probe's argument: R2#5, #8); the 2 s windows
+of cry_pidgey / cry_bulbasaur end before the EOT tick (the EOT finds an
+empty chain on every cry; wailord and jynx run 3 s and cover it: R2#3).
+Baseline refreshed from the cosmetic batch's claim_check run: identical
+to the one above.
+
 Not in this slice (next): the pitch / pan / volume / length variants
 (`PlayCryInternal`'s other modes, `--pitch` etc. on both sides),
 `CRY_MODE_*` with chorus (two tracks) and the reverse cries
 (`gCryTable_Reverse`, `TONEDATA_TYPE_REV` on DPCM), a cry-sample DPCM
-audit against the ROM bytes, a second cry while one plays (cry 1's
+audit against the ROM bytes (the four corpus .bin files already match the
+ROM byte for byte), the `XCMD 0x0D` start offset, a second cry while one plays (cry 1's
 position, `SetPokemonCryTone`'s clock rule), and a cry over music.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)

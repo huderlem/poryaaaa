@@ -456,8 +456,13 @@ static void ply_xcmd(M4ASequencer *s, int i)
     switch (n) {
     case 0x01: t->cmdPtr += 4; break;             /* xwave */
     case 0x02: case 0x04: case 0x05: case 0x06:  /* xtype xatta xdeca xsust */
-    case 0x07: case 0x0A: case 0x0B:             /* xrele xleng xswee */
+    case 0x0A: case 0x0B:                        /* xleng xswee */
         t->cmdPtr += 1;
+        break;
+    case 0x07:                                    /* xrele: track->tone.release, which the next
+                                                   * ply_note copies into its channel (the cry
+                                                   * song's SetPokemonCryRelease value) */
+        s->engine->tracks[i].currentVoice.release = next_byte(s, t);
         break;
     case 0x08:                                    /* xiecv */
         m4a_engine_xcmd(s->engine, i, M4A_XCMD_IECV, next_byte(s, t));
@@ -758,6 +763,8 @@ static int xcmd_cycles(const M4ASequencer *s, const M4ASeqTrack *t)
     }
     case 0x01:                                    /* xwave (est.: as xiec with four bytes) */
         return M4A_CYC_XCMD_SUB + M4A_CYC_XIEC + ram_bytes(s, 5);
+    case 0x00: case 0x03:                         /* ply_xxx = gMPlayJumpTable[0] = ply_fine, which charges itself */
+        return M4A_CYC_XCMD_SUB + ram_bytes(s, 1);
     default:                                      /* xtype xatta xdeca xsust xleng xswee (est.: as xiec) */
         return M4A_CYC_XCMD_SUB + M4A_CYC_XIEC + ram_bytes(s, 2);
     }
@@ -960,10 +967,10 @@ static void track_tick(M4ASequencer *s, int i)
             return;
         }
 
-        cyc(s, M4A_CYC_CMD_FETCH + ram_bytes(s, 1));   /* _081DD8E0's ldrb of the command byte */
-        uint8_t c = rd8(s, t->cmdPtr);
+        cyc(s, M4A_CYC_CMD_FETCH);
+        uint8_t c = rd8(s, t->cmdPtr);   /* _081DD8E0's ldrb: the one song-data read of this segment */
         if (c < 0x80) {
-            cyc(s, M4A_CYC_CMD_RUNNING);
+            cyc(s, M4A_CYC_CMD_RUNNING + ram_bytes(s, 1));
             c = t->runningStatus;
             if (c < 0x80) {
                 /* A data byte before any command: the GBA indexes
@@ -973,7 +980,7 @@ static void track_tick(M4ASequencer *s, int i)
             }
         } else {
             t->cmdPtr++;
-            cyc(s, M4A_CYC_CMD_BYTE);
+            cyc(s, M4A_CYC_CMD_BYTE + ram_bytes(s, 1));
             if (c >= 0xBD) {
                 t->runningStatus = c;
                 cyc(s, M4A_CYC_CMD_BYTE_RS);

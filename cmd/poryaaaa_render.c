@@ -1155,11 +1155,13 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--song") == 0 && i + 1 < argc) {
             songPath = argv[++i];
         } else if (strcmp(argv[i], "--cry") == 0 && i + 1 < argc) {
-            cryId = atoi(argv[++i]);
-            if (cryId < 0) {
-                fprintf(stderr, "Error: --cry takes a gCryTable index\n");
+            char *end = NULL;
+            long v = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || v < 0 || v > 0xFFFF) {
+                fprintf(stderr, "Error: --cry takes a gCryTable index (got '%s')\n", argv[i]);
                 return 1;
             }
+            cryId = (int)v;
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
             outputPath = argv[++i];
         } else if (strcmp(argv[i], "--play") == 0) {
