@@ -954,6 +954,65 @@ from 1902 (Pidgey, 0.18 s) to 23524 (Jynx, 2.24 s), so at pitch 15360 no
 cry reaches the 140-tick EOT with its sample still playing; the EOT finds
 an empty chain on every cry.
 
+### SoundMain timing probe, step 6: cry variants (2026-10-24, milestone 4 slice 3)
+
+Runs: three cries with `PlayCryInternal`'s non-default pitch / pan /
+volume values through `StartCry`, probe type 1 for 180 frames each with
+`gPokemonCryMusicPlayers`, the probe's new ninth / tenth / eleventh
+arguments (pitch, pan, volume; `patchParams` wrote 0x3C00 / 0 / 120 before):
+`cry_jynx_faint` (123, pitch 14440 = CRY_MODE_FAINT's, pan 0, volume 120),
+`cry_bulbasaur_howl` (0, pitch 15800 = CRY_MODE_HIGH_PITCH's, pan 63, volume
+120), `cry_pidgey_quiet` (15, pitch 15360, pan 0, volume 90 =
+CRY_MODE_ENCOUNTER / HIGH_PITCH's).  Cycles from VBlank line 160, as in
+step 5.
+
+**The template bytes** (`SetPokemonCryPitch`: b = pitch + 0x80, key =
+(b >> 8) & 0x7F, tune = (b >> 1) & 0x7F, tune2 = (16 + tune) & 0x7F from the
+template's 0x50 - 0x40; `SetPokemonCryPanpot`: (pan + 0x40) & 0x7F;
+`SetPokemonCryVolume`: volume & 0x7F), worked by hand before the first
+render and confirmed by the probe (`_081DD938`'s r3 after the EOT is the
+track key: 0x38 / 0x3E / 0x3C):
+
+| variant | pitch | b | TIE key (0x2A) | TUNE (0x12) | TUNE2 (0x19) | PAN (0x28) | VOL (0x1D) |
+|---|---|---|---|---|---|---|---|
+| cry_jynx_faint | 14440 | 0x38E8 | 0x38 (56) | 0x74 (c_v + 52) | 0x04 | 0x40 | 0x78 |
+| cry_bulbasaur_howl | 15800 | 0x3E38 | 0x3E (62) | 0x1C (c_v - 36) | 0x2C | 0x7F (63 + 64) | 0x78 |
+| cry_pidgey_quiet | 15360 | 0x3C80 | 0x3C (60) | 0x40 (c_v) | 0x50 | 0x40 | 0x5A (90) |
+
+Every other byte is the defaults' (`test_cry_song`).  14440 is
+CRY_MODE_FAINT's pitch (the task's "CRY_MODE_WEAK" uses 15000); 90 is a game
+value (ENCOUNTER / HIGH_PITCH; ECHO_END uses 70); pan 63 is the value
+`battle_anim_throw.c` gives the opponent side (an SE pan there; the cry
+callers pass -25 / 25 / 63 / -63).
+
+**ply_endtie with a chained channel holding the key** (the first
+measurement; step 5 derived `M4A_CYC_ENDTIE_MATCH` 28 as the ROM 89 minus
+the RAM 61).  At pitch 14440 Cry_Jynx's 23524 samples run 2.75 s, past the
+140-tick EOT at frame 143 (2.38 s), so the EOT's walk finds the channel:
+`ply_endtie` -> `_081DD938` **82** on cry_jynx_faint's frame 143 against
+**54** on the other three variants and all four defaults (empty chain, no
+key byte): the match costs **28**, exactly the derived value.  The rest of
+that frame: `ply_fine` -> `ply_fine_loop` 10 -> `ply_fine_ok` 14 ->
+`RealClearChain` 12 -> `ply_fine_done` 50 -> `_081DD994` 28 (one live
+channel unlinked, step 3's FINE costs), against `ply_fine` -> `_done` 16
+with an empty chain; and the tick's walk over the live channel is the
+steady +20 (1596 vs 1576).  Frame 143's CgbSound entry is **1928** = 1810
++ 20 + 28 + 70; 144 is 1192 and 145 on 1007 as on every cry (the FINE
+cleared the track, so 144 has no walk).  `_SKIP` 18 (a chained channel
+passed over) stays est.: no run has two channels on the cry track.
+
+**Everything else is the defaults'**: the start tick 4077 (pitch, pan and
+volume change bytes, not paths: ply_tune / ply_pan / ply_vol cost the same
+whatever the operand), the steady xwait tick 1596 while the channel lives
+and 1576 after it dies (the unlink tick 1689: cry_bulbasaur_howl frame 46,
+four frames before cry_bulbasaur's 50, the sample being faster at 15800;
+cry_pidgey_quiet frame 14 as cry_pidgey; cry_jynx_faint never), the 2-cycle DAC rounding on SoundMainRAM_Buffer's
+entry on frames 137 / 141 as before.  `entry_diff.py` 0 on all 177
+complete frames, `cmd_diff.py` / `track_diff.py` 0 on each of the three
+with the port's existing constants: the harness needed no new number.
+The release-0 cut at the EOT (the channel's SF_STOP on frame 143, gone on
+144) is the first audible one in the corpus: no sample run differs there.
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`

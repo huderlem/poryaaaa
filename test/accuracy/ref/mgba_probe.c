@@ -9,10 +9,14 @@
  *       -I$MGBA/build/include $MGBA/build/libmgba-static.a -lz -lpng -lm \
  *       -lpthread -lrt -ldl /usr/lib/x86_64-linux-gnu/libEGL.so /usr/lib/x86_64-linux-gnu/libGL.so
  *   ./mgba_probe build/accuracy/rom/accuracy_test.gba out.txt <frames> <type> <id> \
- *       build/accuracy/rom/accuracy_test.map [player]
+ *       build/accuracy/rom/accuracy_test.map [player [pitch [pan [volume]]]]
  *
- * type/id as in mgba_render (0 = song, 2 = micro, id = line in micro.cfg
- * from 0 or the song id).  Filter FIFO writes (040000A0/A4) out of the log to
+ * type/id as in mgba_render (0 = song, 1 = cry, 2 = micro, id = line in
+ * micro.cfg from 0, the song id or the gCryTable index).  The ninth, tenth
+ * and eleventh arguments are the cry parameters StartCry passes to
+ * SetPokemonCryPitch / Panpot / Volume (mgba_render's --pitch / --pan /
+ * --volume; defaults 15360, 0, 120 as mgba_render's), ignored by the other
+ * types.  Filter FIFO writes (040000A0/A4) out of the log to
  * see the rest.  `player` (eighth argument, default gMPlayInfo_BGM) names
  * the MusicPlayerInfo symbol whose track flags and tempoC the `.frames`
  * summary reads: gMPlayInfo_SE1 / SE2 / SE3 for a sound effect (the song
@@ -337,11 +341,15 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 }
 static void paused(struct mDebugger* d) { d->state = DEBUGGER_RUNNING; }
 
-static int patchParams(uint8_t* rom, size_t size, int type, int id) {
+/* The ROM's parameter block (test/accuracy/rom/main.c struct AccParams,
+ * as mgba_render patches it): type, volume, id, pitch (s16), pan (s8),
+ * start frame 1. */
+static int patchParams(uint8_t* rom, size_t size, int type, int id, int pitch, int pan, int volume) {
 	for (size_t off = 0; off + 32 <= size; off += 4) {
 		if (memcmp(rom + off, "PORYACC1", 8) == 0) {
 			uint8_t* b = rom + off + 8;
-			b[0] = type; b[1] = 120; b[2] = id & 0xFF; b[3] = id >> 8; b[4] = 0; b[5] = 0x3C; b[6] = 0; b[7] = 1;
+			b[0] = type; b[1] = (uint8_t) volume; b[2] = id & 0xFF; b[3] = id >> 8;
+			b[4] = (uint8_t) (pitch & 0xFF); b[5] = (uint8_t) ((pitch >> 8) & 0xFF); b[6] = (uint8_t) (int8_t) pan; b[7] = 1;
 			return 1;
 		}
 	}
@@ -367,14 +375,17 @@ static void writeStats(FILE* f, struct LateStats* s) {
 }
 
 int main(int argc, char** argv) {
-	if (argc < 6) { fprintf(stderr, "probe rom out.txt frames type id [map [player-symbol]]\n"); return 1; }
+	if (argc < 6) { fprintf(stderr, "probe rom out.txt frames type id [map [player-symbol [pitch [pan [volume]]]]]\n"); return 1; }
 	const char* playerSym = argc > 7 ? argv[7] : "gMPlayInfo_BGM";
+	int cryPitch = argc > 8 ? atoi(argv[8]) : 15360;   /* StartCry's parameters, mgba_render's defaults */
+	int cryPan = argc > 9 ? atoi(argv[9]) : 0;
+	int cryVolume = argc > 10 ? atoi(argv[10]) : 120;
 	int playerFound = 0;
 	gFrames = atol(argv[3]);
 	int type = atoi(argv[4]), id = atoi(argv[5]);
 	FILE* f = fopen(argv[1], "rb"); fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
 	uint8_t* rom = malloc(n); if (fread(rom, 1, n, f) != (size_t) n) return 1; fclose(f);
-	patchParams(rom, n, type, id);
+	patchParams(rom, n, type, id, cryPitch, cryPan, cryVolume);
 	gOut = fopen(argv[2], "w");
 	gFrameRecs = calloc(MAX_FRAMES, sizeof *gFrameRecs);
 	if (argc > 6) {
