@@ -28,7 +28,12 @@ struct AccParams
                         * through the same StartCry path, so SetPokemonCryTone picks its player */
     u8 startFrame2;    /* VBlank count at which the second cry starts; 0 = no second cry (a block
                         * patched by an older renderer plays as before) */
-    u8 reserved[5];
+    u8 reserved0;      /* alignment of id3 (block offset 23) */
+    u16 id3;           /* third cry (block offset 24): gCryTable index, started on startFrame3 with the
+                        * same defaults through the same StartCry path -- with both cry players busy,
+                        * SetPokemonCryTone replaces the one with the larger clock */
+    u8 startFrame3;    /* VBlank count at which the third cry starts (block offset 26); 0 = none */
+    u8 reserved1;
 };
 
 enum
@@ -76,8 +81,9 @@ static void StartCry(u16 index, s8 pan, u8 volume, s16 pitch, u16 length, u8 rel
 }
 
 /* Starts the test on gAccParams.startFrame (AgbMain's loop calls this on that
- * VBlank) and, if startFrame2 is nonzero, waits here for the second cry's frame
- * and starts it with CRY_MODE_NORMAL's defaults, then returns to the loop.
+ * VBlank) and, if startFrame2 / startFrame3 are nonzero, waits here for the
+ * second / third cry's frame and starts each with CRY_MODE_NORMAL's defaults,
+ * then returns to the loop.
  * The wait lives in this function so that AgbMain stays textually identical to
  * the ROM before the second cry existed and agbcc emits the same prologue and
  * steady-state loop: mgba's ordering of a timer-0 overflow against the DAC
@@ -105,16 +111,27 @@ static void StartTest(void)
         break;
     }
 
+    /* AgbMain's frame count is startFrame here (it counts VBlanks from 1). */
+    frame = gAccParams.startFrame ? gAccParams.startFrame : 1;
+
     if (gAccParams.startFrame2 != 0)
     {
-        /* AgbMain's frame count is startFrame here (it counts VBlanks from 1). */
-        frame = gAccParams.startFrame ? gAccParams.startFrame : 1;
         while (frame < gAccParams.startFrame2)
         {
             VBlankIntrWait();
             frame++;
         }
         StartCry(gAccParams.id2, 0, 120, 15360, 140, 0, 0);
+    }
+
+    if (gAccParams.startFrame3 != 0)
+    {
+        while (frame < gAccParams.startFrame3)
+        {
+            VBlankIntrWait();
+            frame++;
+        }
+        StartCry(gAccParams.id3, 0, 120, 15360, 140, 0, 0);
     }
 }
 

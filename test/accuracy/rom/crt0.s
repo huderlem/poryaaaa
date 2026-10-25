@@ -41,7 +41,10 @@ gAccParams:
 	.byte 0             @ cry chorus (SetPokemonCryChorus, s8; PlayCryInternal's default: one track)
 	.2byte 0            @ second cry id (gCryTable index, CRY_MODE_NORMAL's defaults)
 	.byte 0             @ second cry start frame (0 = no second cry)
-	.space 5            @ reserved
+	.byte 0             @ reserved (alignment of the third cry id)
+	.2byte 0            @ third cry id (gCryTable index, CRY_MODE_NORMAL's defaults)
+	.byte 0             @ third cry start frame (0 = no third cry)
+	.space 1            @ reserved
 
 	.align 2, 0
 Init:

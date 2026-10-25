@@ -1979,6 +1979,299 @@ slice, so the gate is the reproduction check: `claim_check.sh` against
 diffed, 0 moved, 55/64, 0 regressions, every row 0.0, unit 1471/1471, blip
 49112/0, songs 561/561 (the `cry_over_*` logs skipped by the `cry_` rule).
 
+### SoundMain timing probe, step 13: a third cry while both cry players are busy (2026-10-25, milestone 4 slice 10a)
+
+Ground truth only: the ROM's parameter block, the two patchers, the probe
+runs and this section.  No engine, plugin, `cmd/`, `test_engine.c`,
+`songs.json`, runner, `claim_check.sh`, baseline or new corpus row (slice
+8b-i's refusal of a `--cry2` while both cry players are busy is the path
+this step measures; the engine change is slice 10b).  Before any change,
+`claim_check.sh` against `2026-10-25_cry-over-song-rows.json` reproduced the
+baseline (59 diffed, 0 moved, 57/66, 0 regressions, every row 0.0; unit
+1521/1521, blip 49112/0, songs 561/561).
+
+**The rule, read from the source before the probe** (a prediction to
+test; `~/pokeemerald/src/m4a.c` `SetPokemonCryTone` 1660-1699, `MPlayStart`
+611-661, `src/m4a_1.s` `TrackStop` 1468-1503 and `_081DD9A4` 1341-1344;
+`src/sound.c` `PlayCryInternal` 369-: `StartCry` is its CRY_MODE_NORMAL
+defaults, so the third cry is `StartCry(id3, 0, 120, 15360, 140, 0, 0)`
+exactly as the second).  `SetPokemonCryTone` loops i = 0, 1 over
+`gPokemonCryTracks[i * 2]`: a player whose track 0 has `flags` 0 and
+either `chan` 0 or `chan->track != track` is free and taken at once
+(`goto start_song`); otherwise `if (maxClock < gPokemonCryMusicPlayers[i].clock)`
+records it (strict, `maxClock` starting at 0: a tie, or two clocks of 0,
+takes **player 0**), and after the loop `i = maxClockIndex`.  `clock` is
+set to 0 by `MPlayStart` (m4a.c 633) and incremented by one at
+`_081DD9A4` on every tick of that player (after its track loop, before the
+tempoC subtraction), so it counts the **ticks since the player's own
+start**: with both cry players at the template's tempo, the cry that
+started earlier has the larger clock and **is replaced**.  Then
+`ident++`, `gPokemonCrySongs[i] = gPokemonCrySong` (the 52-byte template
+copy, the same IWRAM copy as the replaced cry used), the pointer rewrites,
+`ident = ID_NUMBER`, `MPlayStart(&gPokemonCryMusicPlayers[i], ...)`.
+`MPlayStart` always starts a cry player (`unk_B` 0, step 11): it zeroes
+`status`, `clock`, `tempoC`, `fadeOI`, sets tempoD / tempoI 150 and tempoU
+0x100, and for each of the player's two tracks calls **`TrackStop`** then
+sets `flags = EXIST | START`, `chan = 0`, `cmdPtr = part[i]` (track 0) or
+`flags = 0` (track 1 at chorus 0).  `TrackStop` (m4a_1.s 1468): if the
+track has `MPT_FLG_EXIST` and a `chan`, it walks the chain from `chan`
+through `nextChannelPointer`: for each channel with `statusFlags != 0`, a
+CGB type calls `CgbOscOff`, every type then **stores `statusFlags = 0`**
+(`TrackStop_1`), and every channel gets `track = 0` (`TrackStop_2`); then
+`track->chan = 0` (`TrackStop_3`).  So **the replaced cry's PCM channel is
+cut outright**, between two SoundMains, in ROM code: no release, no
+SoundMainRAM envelope pass sees it again (statusFlags 0 is skipped), hence
+**no `_081DCFB0` stamp** (that store is SoundMainRAM's, at the IWRAM copy)
+and no unlink walk on the replaced player (its `chan` is 0 and its track is
+restarted); the `TrackStop` / `TrackStop_Loop` / `TrackStop_1` / `_2` /
+`_3` / `_Done` breakpoints in the raw log, under the `MPlayStart` of the
+third cry's VBlank, are where the cut shows.  The template's `reverb` is 0,
+so `m4aSoundMode` is not called.  **Prediction for the planned run** (Jynx
+on cry 0 from VBlank 1, Wailord on cry 1 from VBlank 20, Bulbasaur from
+VBlank 60): on VBlank 60 both track 0s have `MPT_FLG_EXIST` (Jynx's 23524
+samples run about 134 frames from frame 3, Wailord's 20846 about 118 from
+frame 22, both EOTs later still), neither is free; cry 0's `clock` is the
+larger (59 ticks, frames 3..61, against cry 1's 40, frames 22..61), so
+**cry player 0 is replaced**: Jynx is cut on VBlank 60 (channel 0,
+0x03000FC0, statusFlags := 0 by `TrackStop_1`), cry 0's track 0 restarts
+with START, and on engine frame **62** cry 0's body is a **start tick**
+whose `ply_note` scan finds channel 0 free (statusFlags 0, the first in
+index order: `_081DDBFA` -> `_081DDC40` 14, `SCAN_FREE`) -- so Bulbasaur
+takes **channel 0**, Jynx's old channel, and the start body is the lone
+cry's **2991** (the same RAM template copy, the same free take), the frame
+1007 + (79 + 2991) + (79 + 510) = **4666** (cry 1's steady body after it).
+Wailord continues untouched on channel 1: its unlink tick on frame 22 + 119
+= **141**, its EOT 22 + 140 = **162**; Bulbasaur's unlink on 62 + 47 =
+**109** (as alone 3 -> 50), its EOT 62 + 140 = **202** (past a 180-frame
+run).  Jynx's unlink on 137 and cry 0's EOT on 143 **do not happen**.  Frame
+62's other members: cry 1's body 510 steady.  Nothing of this was measured
+when the paragraph was written; the probe below decides.
+
+**The ROM change.**  `struct AccParams` gains `u16 id3` at block offset
+**24** (block bytes `b[16..17]` as the patchers count from the magic) and
+`u8 startFrame3` at **26** (`b[18]`), after a padding byte at 23 (`id3`'s
+alignment; `reserved0`) and before one reserved byte at 27; the block stays
+28 bytes, every existing field at its offset, both new fields 0 in
+`crt0.s` so a block patched by an older renderer plays as before.
+`StartTest` hoists its `frame` initialisation out of the second-cry block
+and adds a third block of the same shape after it: wait `VBlankIntrWait`
+per frame until `startFrame3`, then `StartCry(id3, 0, 120, 15360, 140, 0,
+0)` -- the second cry's defaults, `PlayCryInternal`'s CRY_MODE_NORMAL.
+`mgba_render --id3 N --start-frame3 F` and `mgba_probe`'s seventeenth /
+eighteenth arguments patch `b[16..18]`; both usage texts name them.
+**Boot-path rule, checked**: `AgbMain`'s disassembly before and after is
+identical in every instruction but the relative `bl StartTest` encoding
+(`f7ff ff82` -> `f7ff ff6a`: the callee stayed at 0x8000288 while the call
+site moved), the slice-8a result again.  `StartTest` grew 0xb8 -> **0xe8**
+(`nm -S`, +0x30), so every ROM symbol from `AgbMain` on moved **+0x30**
+(nm tables before / after: 14530 names, the same set; 15 ROM symbols before
+`AgbMain` at 0 -- `Init`, `IntrMain`, `StartCry`, `StartTest`, `gAccParams`,
+`VBlankIntr`, `VCountIntr`, the header labels --, **9457** at +0x30, 18
+IWRAM + 4166 other at 0): `AgbMain` 0x8000340 -> 0x8000370, `MPlayStart`
+0x8000c68 -> 0x8000c98, `CgbSound` 0x800107c -> **0x80010ac**, `_081DCFB0`
+0x8001dcc -> 0x8001dfc, `MPlayMain` 0x8002640 -> 0x8002670, `TrackStop`
+0x80028a8 -> 0x80028d8, `ply_note` 0x800291c -> 0x800294c, `gCryTable`
+0x802b008 -> 0x802b038; IWRAM unchanged (`gPokemonCrySongs` 0x03001f20,
+`gPokemonCryMusicPlayers` 0x03001f88, `gPokemonCryTracks` 0x03002258).
+`CgbSound`'s 566 objdump lines compared address-normalised: every
+instruction equal, the one literal-pool ROM pointer 0x08002f68 ->
+0x08002f98 (+0x30), so the `CgbSound_*` labels are step 11's **+0x30**
+(loop 0x80010dc, active 0x80010f2, step2 0x800116c, start 0x8001184,
+nostart 0x8001262, oscoff 0x8001286, step 0x80012d4, modvol 0x80012e8,
+stepdone 0x80013c8, envdone 0x80013da, pit 0x80013e4, vol 0x800145c, done
+0x80014d8, next 0x80014dc), each checked to land on the same instruction
+text as before; `build/probe/syms.nm` rebuilt from the new ELF with them
+appended.  **The three renders**: pcm, pcm_cmp and cry_bulbasaur (and sq1)
+rendered by the new `mgba_render` on the new ROM are **byte-identical**
+(`cmp`) to the current references in
+`build/accuracy/refs/56b288f4b49f-mGBA_0.10.5+m4a_blip/`; the ROM's sha1
+5484b140... -> b3d22c13..., so the harness keys a new refs directory.
+
+**The probe runs** (type 1, Jynx 123, the new `syms.nm`; each twice, with
+`gPokemonCryMusicPlayers` and `gPokemonCryMusicPlayers[1]` as the eighth
+argument; the two raw logs of each run have **identical cycle columns on
+every line** (0 differences with the annotation stripped), only the
+`MPlayMain trackCount / exist / start / tempoC` annotation of the selected
+player differs, 444 / 480 lines): `build/probe/cry_third_jynx_wailord_bulbasaur.txt`
+/ `_p1` -- `... 15360 0 120 140 0 0 381 20 0 60`, 180 frames: Wailord
+(381) on cry 1 from VBlank **20** (start tick frame 22), Bulbasaur (0) from
+VBlank **60** (frame 62) -- and the "alone" twin
+`cry_third_alone_jynx_wailord.txt` / `_p1` (`... 381 20`, no third cry);
+plus `build/scratch/cry_third_jynx_wailord_bulbasaur_240.txt` (240 frames,
+for Bulbasaur's EOT past 180).  The `cry_` prefix without a `songs.json`
+entry makes `claim_check.sh` skip them.  Cycles from VBlank line 160; raw
+`fN` = engine frame N - 1.
+
+**Which player, measured: cry player 0, as predicted.**  Raw f62 (engine
+frame 61, VBlank line 191: 38694 cycles after line 160's start, after that
+frame's SoundMain ended at CgbSound 2185 + its RAM pass, before frame 62's)
+holds the third cry's `MPlayStart` at cycle 17214347 with **r0 =
+0x03001F88** (`gPokemonCryMusicPlayers[0]`) and the song copy **r7 =
+0x03001F20** (`gPokemonCrySongs[0]`), then `TrackStop` +107 (r4 =
+0x03002258, cry 0's track 0), **`TrackStop_Loop`** +20 with **r4 =
+0x03000FC0** (Jynx's channel 0, the chain head), **`TrackStop_1`** +20 (r3
+= 7: `type & TONEDATA_TYPE_CGB` 0, the PCM path -- `statusFlags := 0`),
+`TrackStop_2` +2 (`track := 0`), `TrackStop_3` +8 (r4 = 0: no
+`nextChannelPointer`; `track->chan := 0`), `TrackStop_Done` +2; then
+`TrackStop` for track 1 (r4 = 0x030022A8, flags 0) -> `TrackStop_Done` 18.
+Jynx is **cut outright** 59 frames into its 134, mid-sample, between two
+SoundMains, in ROM code: no release, no envelope pass, **no `_081DCFB0`
+stamp** (none in any of the three logs).  Neither cry player was free:
+both track 0s had MPT_FLG_EXIST (the `.frames` `trk` columns read 1/0/2 on
+frame 61 for both players), and cry 0's clock was the larger.  The
+`TrackStop` cycles above (20 / 20 / 2 / 8 / 2; 18 for an empty track) run in
+the main loop outside SoundMain and cost the engine nothing.
+
+**Frame 62, the restart tick.**  Cry 0's body is **2991** -- the lone cry's
+first start tick to the cycle -- and its 123-line breakpoint sequence from
+`_081DD9BC` to its `_081DDA6C` is **identical label for label and delta
+for delta** to raw f4's (Jynx's own start on frame 3); the only differences
+in the two frames' logs are cry 1's live body following cry 0's instead of
+its paused 63, and CgbSound's first-channel segment (53 / 51).  The scan:
+`_081DDBFA` (r3 = 5 = maxChans) -> **`_081DDC40` 14** with **r4 =
+0x03000FC0, chan = 0**: channel 0, Jynx's old channel, `statusFlags` 0
+since the cut, the first in index order -- `SCAN_FREE` 14, no pass-over;
+`ClearChain` 12, `RealClearChain` 33, `_081DDC54` **48** (`NOTE_UNLINK_NONE`
+44 + `CHAIN_EMPTY` 4: cry 0's own chain was emptied by `TrackStop`).  So
+**Bulbasaur takes channel 0** and the frame is **4666** = 1007 + (79 +
+2991) + (79 + 510), the prediction's number.  In the `.frames` summary
+cry 0 reads `note 1 ply 15 trk 1/1/2` on frame 62 (START seen at
+MPlayMain entry), cry 1 (`_p1`) `trk 1/0/2` throughout.
+
+**Frame skeleton** (CgbSound entry).  Third-cry run: 2 1007, 3 **4077**, 4..21
+1596, 22 **4736** (Wailord's start on cry 1: the pass-over 70 as step 11),
+23..61 **2185**, 62 **4666**, 63..108 2185, 109 **2278** (Bulbasaur's unlink
+on cry 0, 62 + 47 as alone 3 -> 50; `RealClearChain` raw f110 under
+0x03001F88, prev 0 / next 0), 110..140 **2165**, 141 **2258** (Wailord's
+unlink on cry 1, 22 + 119, the twin's frame; raw f142 under 0x03001FC8),
+142..161 **2145**, 162 **2379** (cry 1's EOT, 22 + 140, with cry 0's track
+dead: 2145 + 234; `ply_endtie` -> `ply_fine` -> `ply_fine_done` raw f163),
+163 **1761** (cry 1's finished tick 185 on 1576), 164..201 **1576** (cry 0
+playing, dead track), 202 **1810** (Bulbasaur's EOT, 62 + 140, on an empty
+chain; the 240-frame run, raw f203), 203 **1192**, 204 on **1007**.  Twin:
+2 1007, 3 4077, 4..21 1596, 22 4736, 23..136 2185, 137 **2278** (Jynx's
+unlink on cry 0, as alone; raw f138), 138..140 2165, 141 2258 (Wailord's),
+142 2145, 143 **2379** (cry 0's EOT with cry 1's track dead; raw f144),
+144 1761, 145..161 1576, 162 **1810** (cry 1's EOT, raw f163), 163 1192,
+164 on 1007.  Against the twin the third-cry run differs on 62 (+2481),
+109 (+93), 110..136 (-20), 137 (-113), 143 (-234), 144 (-185), 145..161
+(+569) and from 162 on (+569: cry 0 alive with a dead track where the twin
+has cry 1 alone, then paused), nothing else.
+
+| player | body | where |
+|---|---|---|
+| cry 0 | 2991 | frames 3 and 62 (start ticks, free take of channel 0) |
+| cry 0 / cry 1 | 510 | steady tick, live channel |
+| cry 0 / cry 1 | 603 | the unlink tick (109 / 141; 137 in the twin) |
+| cry 0 / cry 1 | 490 | steady tick, dead track |
+| cry 1 | 3061 | frame 22 (start tick, pass-over 70 + free take) |
+| cry 0 / cry 1 | 724 | the EOT on an empty chain (202 / 162; 143 in the twin) |
+| cry 0 / cry 1 | 106 | the finished tick |
+
+**The chain rule holds on every frame**: CgbSound = 1007 + sum over playing
+players of (79 + body), body = `_081DD9BC` -> `_081DDA6C` measured per
+player, **177 / 177** frames (2..178) of the third-cry run and 177 / 177 of
+the twin (`build/scratch/bodies.py`), each player's body one of the seven
+values above.  Every number is an existing step 5 / 11 term (the 1007 idle
+frame, 79 + body per playing player in SoundMain's order, the RAM
+template's command costs, `SCAN_FREE` 14, the unlink + 93, the dead track
+- 20, the EOT + 234, the finished tick 185); **no constant is derived,
+fitted or changed**, and no segment in the three logs falls outside the
+existing `SCAN_*` / `NOTE_UNLINK_*` / `WALK_*` / `M4A_CYC_*` set.
+
+**Deaths and unlinks**: Jynx has no death of its own -- cut by `TrackStop`
+on VBlank 60 (raw f62) with about 75 frames of sample left, its unlink
+frame 137 and cry 0's EOT 143 gone; Bulbasaur (channel 0) ends through the
+count path, unlink 109, EOT 202; Wailord (channel 1) count path, unlink
+141, EOT 162 -- no `_081DCFB0` stamp in any log, every EOT on an empty
+chain (`_081DD938` r3 = 0x3C after `ply_endtie`, `ply_fine` -> `_done`).
+One channel per track's chain throughout.
+
+**Scheduler-lateness floor** (`.events` `L timer0`): third-cry run **7**
+crossings at 3428099, 4551683, 5675267, 25899776, 30394112, 31517702,
+33764869 = 0.2043, 0.2713, 0.3383, 1.5437, 1.8116, 1.8786, 2.0125 s (the
+240-frame run the same 7); twin **10** at 3428099, 4551683, 5675267,
+25899776, 27035906, 28159491, 29283075, 30406659, 31530243, 33777409 =
+0.2043, 0.2713, 0.3383, 1.5437, 1.6115, 1.6784, 1.7454, 1.8124, 1.8793,
+2.0133 s.
+
+**The reference for slice 10b**: `mgba_render --type cry --id 123 --id2 381
+--start-frame2 20 --id3 0 --start-frame3 60 --frames 182` ->
+`build/scratch/cry_third_jynx_wailord_bulbasaur.wav` (582348 bytes, 145576
+samples at 48 kHz); not listened to, not compared.
+
+**What slice 10b needs -- structural statement only, nothing implemented**
+(against `plugin/m4a_sequencer.c`, `plugin/m4a_cry.c` and
+`cmd/poryaaaa_render.c` as they stand at this commit).
+(1) **The player choice**: `m4a_cry_choose_player(players[2])`
+(`m4a_cry.c`) returns the first player for which
+`m4a_sequencer_player_free` holds and **-1 when neither is free**; it must
+instead apply `SetPokemonCryTone`'s fallback over the non-NULL players --
+`maxClock = 0, index = 0; if (maxClock < players[i]->clock) { maxClock =
+...; index = i; }` strictly, so a tie or two zero clocks give **player 0**
+-- and return that index.  The sequencer already keeps the GBA's `clock`:
+`M4ASequencer.clock` is zeroed by `m4a_sequencer_start` (`m4a_sequencer.c`
+1328, MPlayStart's `clock = 0`) and incremented once per tick after the
+track loop (1136, `_081DD9A4`), so on VBlank 60 it reads 59 for cry 0 and
+40 for cry 1 as the ROM's do.  In the over-song form (`--song --cry2`,
+`players[1]` NULL: cry player 1 is never opened) the GBA would find cry 1
+free and take it, so a third cry there needs cry 1 opened after cry 0 in
+the chain (BGM -> cry 0 -> cry 1 is 14 tracks, SE1 -> cry 0 -> cry 1 is 7;
+`init_chained_player` accepts both) -- or stays refused; the rule must not
+fall back to replacing cry 0 with one player.
+(2) **The replacement itself** is already `m4a_sequencer_start` on the
+busy sequencer: it runs `track_stop` on every track (the GBA's `TrackStop`
+through `MPlayStart`: every channel the track's `chainOwner` holds has
+`chainOwner[h]` cleared -- `track->chan = 0`, `channel->track = 0` -- and
+`m4a_engine_kill_channel` sets a PCM channel's `status` to 0 with no cycle
+charge and no write, CgbOscOff for a CGB one), then sets each song track's
+flags to EXIST | START with its `cmdPtr`, zeroes `clock`, `tempoC`,
+`status`, `chanSeq`, resets the tempo -- MPlayStart field for field.
+Issued at the top of the hook of engine frame `startFrame3 + 2` as
+`cry2_hook` issues the second cry (between the two SoundMains, before
+either body), the replaced sequencer's next body is a start tick whose
+`ply_note` scan finds the killed channel's status 0 first in index order:
+the engine's shared scan charges `SCAN_FREE` 14 and `NOTE_UNLINK_NONE` 44
++ `CHAIN_EMPTY` 4 on the emptied chain -- frame 62's 2991 and 4666 from the
+existing constants, if the sequencer's start-tick path is unchanged by the
+restart (the gate says).  The voicegroup: `m4a_sequencer_set_voicegroup(players[0],
+voices3)` before the start, as `cry2_hook` does for the second cry (cry
+0's first cry used the engine's `voiceGroup` from `--cry`; the per-sequencer
+override of slice 8b-i is consulted by `ply_voice` only, and the dead
+channel carries its voice by copy).
+(3) **`poryaaaa_render --cry3 <id> --cry3-start-frame <1..255>`** in the
+`--cry --cry2` form (both cry players opened): `sCry2` becomes a list of
+pending starts (song, voices, startFrame, startedOn), each issued by the
+hook on its frame through the chooser of (1); the `done` test covers every
+pending start and both sequencers; the report names the player the third
+cry took and the cry it replaced ("Third cry on cry player 0, replacing the
+first cry at tick 59"); `--cry3` without `--cry2`, a `--cry3-start-frame`
+not above `--cry2-start-frame`, and `--cry3` in the `--song` form are
+refused with messages (the GBA's behaviour there is a different state than
+this probe measured).  `--seq-log`'s `c` / `t` lines keep the engine track
+index (0 / 1 for cry 0, 2 / 3 for cry 1), so `entry_diff` / `cmd_diff` /
+`track_diff` read a three-cry log unchanged; the restart's `MPlayStart`
+leaves no trace in the probe's per-frame tools.
+(4) **Gates**: (a) `claim_check.sh` against the slice-10a baseline after
+the engine change -- the counts unchanged, every row 0.0, `-inf` rows
+`-inf`; (b) `entry_diff` / `cmd_diff` / `track_diff` 0 on the probed run
+(`--cry 123 --cry2 381 --cry2-start-frame 20 --cry3 0 --cry3-start-frame
+60`, 3 s) with frame 62's 4666 and the free take of channel 0 reproduced;
+(c) the null against `build/scratch/cry_third_jynx_wailord_bulbasaur.wav`
+at the one-cry rows' floor, every run above 20 LSB at one of the seven
+crossings above; (d) a unit test on the frame skeleton 3..178 with the kill
+of channel 0 on frame 62 (status 0, cry 0's `chainOwner` cleared, Wailord's
+channel 1 untouched), the free take, the deaths 109 / 141, the EOT 162 on
+an empty chain, the refusals of (3), and `m4a_cry_choose_player`'s
+fallback (both busy -> the larger clock; a tie -> 0; one free -> it).
+(5) **The corpus row** (10b-ii): `cry_third_jynx_wailord_bulbasaur` (cry,
+id 123, id2 381, start_frame2 20, **`"id3"` 0, `"start_frame3"` 60**, 3 s;
+the keys as `mgba_render` names them, both or neither, 0..65535 / 1..255,
+start_frame3 > start_frame2), the runner's `--id3 N --start-frame3 F` /
+`--cry3 N --cry3-start-frame F` lines, the reference frame count 182, the
+`claim_check.sh` cry line with the two new flags, `--input midi` skipping
+it like any cry.
+
 ### Done: SoundMain timing model (step 2, 2026-10-24)
 
 **27/38 pass at -40 dB** (output-stage baseline: 15/38); `compare_reports.py`
@@ -4236,6 +4529,55 @@ engine change until the frames are read) or an SE over music (BGM + SE1
 in one chain, the SE's PSG writes after the BGM's on the same frame; the
 `StartTest` block needs a second song id, so a ROM change under the
 boot-path rule).  Either is a probe step first, as 9a was for 9b.
+
+### Done: milestone 4 slice 10a, a third cry while both cry players are busy -- the ground truth (2026-10-25)
+
+The ROM's parameter block, the two patchers, the probe and the
+measurements only; **no engine, plugin, `cmd/`, `test_engine.c`,
+`songs.json`, runner, `claim_check.sh` or baseline change and no new corpus
+row** (probe step 13 above has every number, the rule as read and as
+measured, and slice 10b's structural statement).  Before any change,
+`claim_check.sh` against `2026-10-25_cry-over-song-rows.json` reproduced
+the baseline (59 diffed, 0 moved, 57/66, 0 regressions, every row 0.0;
+unit 1521/1521, blip 49112/0, songs 561/561).
+
+**The ROM** (`test/accuracy/rom/main.c`, `crt0.s`): `AccParams` + `u16 id3`
+(block offset 24) + `u8 startFrame3` (26) after a padding byte at 23, one
+reserved byte left, 28 bytes; `StartTest` waits for `startFrame3` after the
+second cry's block and runs `StartCry(id3, 0, 120, 15360, 140, 0, 0)`;
+`mgba_render --id3 / --start-frame3`; `mgba_probe` arguments 17 / 18.
+`AgbMain` instruction-identical (the relative `bl StartTest` encoding
+only); symbol shift **+0x30** from `AgbMain` on (`CgbSound` 0x80010ac, the
+`CgbSound_*` labels +0x30 in the skill and the probe header, IWRAM
+unchanged); pcm, pcm_cmp, cry_bulbasaur and sq1 rendered on the new ROM
+**byte-identical** to the current references (ROM sha1 b3d22c13...; the
+harness keys a new refs directory).
+
+**The rule and the measurement**: `SetPokemonCryTone` replaces the busy
+cry player with the strictly larger `clock` (ticks since its own
+`MPlayStart`; a tie -> player 0), and `MPlayStart`'s `TrackStop` cuts that
+player's chained channels outright (`statusFlags := 0` in ROM code, no
+release, no `_081DCFB0` stamp).  Measured on Jynx (cry 0, VBlank 1) +
+Wailord (cry 1, VBlank 20) + Bulbasaur (VBlank 60): **cry player 0**
+replaced (`MPlayStart` r0 0x03001F88 on raw f62, `TrackStop_Loop` /
+`TrackStop_1` on channel 0x03000FC0), Bulbasaur's start tick on frame
+**62** taking **channel 0** free (`SCAN_FREE` 14), body **2991** label for
+label the lone cry's, the frame **4666** = 1007 + (79 + 2991) + (79 + 510);
+Bulbasaur's unlink 109 / EOT 202, Wailord's 141 / 162, Jynx's 137 / 143
+gone.  Chain rule 177 / 177 frames on the run and on its twin; **no new
+constant**.  Crossings 7 / 10.  Reference for 10b:
+`build/scratch/cry_third_jynx_wailord_bulbasaur.wav`.
+
+**Gate** (no engine change: the reproduction check after the ROM change):
+`claim_check.sh` against `2026-10-25_cry-over-song-rows.json` -- **59 tests
+diffed, 0 moved** (the engine's write cycles against the existing probe
+logs), **57/66** at -40 dB, `compare_reports.py` **0 regressions**, every
+row 0.0, and every one of the 66 rows identical to the baseline in every
+`report.json` field but `ref` (the references re-rendered into
+`build/accuracy/refs/382db6b7de17-mGBA_0.10.5+m4a_blip/`, all **66 WAVs
+byte-identical** to the `56b288f4b49f` directory's by `cmp`); unit
+**1521/1521**, blip 49112/0, songs 561/561.  The baseline file stands as
+saved (no engine change; only the ref path moved, as in slice 8a).
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

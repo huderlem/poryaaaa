@@ -9,7 +9,7 @@
  *       -I$MGBA/build/include $MGBA/build/libmgba-static.a -lz -lpng -lm \
  *       -lpthread -lrt -ldl /usr/lib/x86_64-linux-gnu/libEGL.so /usr/lib/x86_64-linux-gnu/libGL.so
  *   ./mgba_probe build/accuracy/rom/accuracy_test.gba out.txt <frames> <type> <id> \
- *       build/accuracy/rom/accuracy_test.map [player [pitch [pan [volume [length [release [chorus [id2 [startFrame2]]]]]]]]]
+ *       build/accuracy/rom/accuracy_test.map [player [pitch [pan [volume [length [release [chorus [id2 [startFrame2 [id3 [startFrame3]]]]]]]]]]]
  *
  * type/id as in mgba_render (0 = song, 1 = cry, 2 = micro, id = line in
  * micro.cfg from 0, the song id or the gCryTable index).  The ninth to
@@ -20,7 +20,10 @@
  * chorus makes the cry song two tracks), ignored by the other types.  The
  * fifteenth and sixteenth arguments start a second cry (gCryTable index,
  * CRY_MODE_NORMAL's defaults) on the given VBlank while the first test plays
- * (mgba_render's --id2 / --start-frame2; start frame 0 = none).  Filter FIFO
+ * (mgba_render's --id2 / --start-frame2; start frame 0 = none); the
+ * seventeenth and eighteenth start a third cry the same way (mgba_render's
+ * --id3 / --start-frame3; with both cry players busy SetPokemonCryTone
+ * replaces the player with the larger clock, plan step 13).  Filter FIFO
  * writes (040000A0/A4) out of the log to
  * see the rest.  `player` (eighth argument, default gMPlayInfo_BGM) names
  * the MusicPlayerInfo symbol whose track flags and tempoC the `.frames`
@@ -50,17 +53,18 @@
  * The map still works and gives the function entries only.  Lines of the
  * form "<hex addr> t CgbSound_<name>" appended to the nm listing add
  * breakpoints inside CgbSound (compiled C, no labels of its own):
- * CgbSound_loop 0x80010ac (per-channel loop head), _active 0x80010c2,
- * _step2 0x800113c, _start 0x8001154, _nostart 0x8001232, _oscoff
- * 0x8001256, _step 0x80012a4 (envelope_step_repeat), _modvol 0x80012b8,
- * _stepdone 0x8001398, _envdone 0x80013aa, _pit 0x80013b4, _vol
- * 0x800142c, _done 0x80014a8, _next 0x80014ac in the 2026-10-25 ROM with
- * the second-cry parameters (build/accuracy/rom/accuracy_test.elf, the
- * CMake build; CgbSound at 0x800107c -- every ROM symbol from AgbMain on
- * moved +0x40 when main.c's StartTest grew, the body is unchanged; the
- * 2026-10-25 ROM with the cry chorus parameter had CgbSound at 0x800103c
- * and the labels 0x40 lower, the 2026-10-24 ROM with the length / release
- * parameters 0x8001020, the one before it 0x8000ff0; re-derive from
+ * CgbSound_loop 0x80010dc (per-channel loop head), _active 0x80010f2,
+ * _step2 0x800116c, _start 0x8001184, _nostart 0x8001262, _oscoff
+ * 0x8001286, _step 0x80012d4 (envelope_step_repeat), _modvol 0x80012e8,
+ * _stepdone 0x80013c8, _envdone 0x80013da, _pit 0x80013e4, _vol
+ * 0x800145c, _done 0x80014d8, _next 0x80014dc in the 2026-10-25 ROM with
+ * the third-cry parameters (build/accuracy/rom/accuracy_test.elf, the
+ * CMake build; CgbSound at 0x80010ac -- every ROM symbol from AgbMain on
+ * moved +0x30 when main.c's StartTest grew, the body is unchanged; the
+ * 2026-10-25 ROM with the second-cry parameters had CgbSound at 0x800107c
+ * and the labels 0x30 lower, the one with the cry chorus parameter
+ * 0x800103c, the 2026-10-24 ROM with the length / release parameters
+ * 0x8001020, the one before it 0x8000ff0; re-derive from
  * `objdump -d` if m4a.c, main.c or the toolchain changes).
  *
  * `<out>.events` summarizes mgba's own scheduler lateness: for the timer-0
@@ -355,8 +359,10 @@ static void paused(struct mDebugger* d) { d->state = DEBUGGER_RUNNING; }
 
 /* The ROM's parameter block (test/accuracy/rom/main.c struct AccParams,
  * as mgba_render patches it): type, volume, id, pitch (s16), pan (s8),
- * start frame 1, cry length (u16), cry release (u8), cry chorus (s8). */
-static int patchParams(uint8_t* rom, size_t size, int type, int id, int pitch, int pan, int volume, int length, int release, int chorus, int id2, int startFrame2) {
+ * start frame 1, cry length (u16), cry release (u8), cry chorus (s8), second
+ * cry id (u16) and start frame (u8), a padding byte, third cry id (u16) and
+ * start frame (u8). */
+static int patchParams(uint8_t* rom, size_t size, int type, int id, int pitch, int pan, int volume, int length, int release, int chorus, int id2, int startFrame2, int id3, int startFrame3) {
 	for (size_t off = 0; off + 32 <= size; off += 4) {
 		if (memcmp(rom + off, "PORYACC1", 8) == 0) {
 			uint8_t* b = rom + off + 8;
@@ -365,6 +371,7 @@ static int patchParams(uint8_t* rom, size_t size, int type, int id, int pitch, i
 			b[8] = (uint8_t) (length & 0xFF); b[9] = (uint8_t) ((length >> 8) & 0xFF); b[10] = (uint8_t) release;
 			b[11] = (uint8_t) (int8_t) chorus;
 			b[12] = id2 & 0xFF; b[13] = (id2 >> 8) & 0xFF; b[14] = (uint8_t) startFrame2;
+			b[16] = id3 & 0xFF; b[17] = (id3 >> 8) & 0xFF; b[18] = (uint8_t) startFrame3;
 			return 1;
 		}
 	}
@@ -390,7 +397,7 @@ static void writeStats(FILE* f, struct LateStats* s) {
 }
 
 int main(int argc, char** argv) {
-	if (argc < 6) { fprintf(stderr, "probe rom out.txt frames type id [map [player-symbol or symbol[N] [pitch [pan [volume [length [release [chorus [id2 [startFrame2]]]]]]]]]]\n"); return 1; }
+	if (argc < 6) { fprintf(stderr, "probe rom out.txt frames type id [map [player-symbol or symbol[N] [pitch [pan [volume [length [release [chorus [id2 [startFrame2 [id3 [startFrame3]]]]]]]]]]]]\n"); return 1; }
 	const char* playerArg = argc > 7 ? argv[7] : "gMPlayInfo_BGM";   /* as given, for the .frames header */
 	char playerSym[128]; strncpy(playerSym, playerArg, sizeof playerSym - 1); playerSym[sizeof playerSym - 1] = 0;
 	unsigned long playerIndex = 0;   /* "symbol[N]": the N-th MusicPlayerInfo (0x40 bytes each) from the symbol */
@@ -403,12 +410,14 @@ int main(int argc, char** argv) {
 	int cryChorus = argc > 13 ? atoi(argv[13]) : 0;
 	int cryId2 = argc > 14 ? atoi(argv[14]) : 0;          /* a second cry (mgba_render's --id2 / --start-frame2) */
 	int cryStartFrame2 = argc > 15 ? atoi(argv[15]) : 0;
+	int cryId3 = argc > 16 ? atoi(argv[16]) : 0;          /* a third cry (mgba_render's --id3 / --start-frame3) */
+	int cryStartFrame3 = argc > 17 ? atoi(argv[17]) : 0;
 	int playerFound = 0;
 	gFrames = atol(argv[3]);
 	int type = atoi(argv[4]), id = atoi(argv[5]);
 	FILE* f = fopen(argv[1], "rb"); fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
 	uint8_t* rom = malloc(n); if (fread(rom, 1, n, f) != (size_t) n) return 1; fclose(f);
-	patchParams(rom, n, type, id, cryPitch, cryPan, cryVolume, cryLength, cryRelease, cryChorus, cryId2, cryStartFrame2);
+	patchParams(rom, n, type, id, cryPitch, cryPan, cryVolume, cryLength, cryRelease, cryChorus, cryId2, cryStartFrame2, cryId3, cryStartFrame3);
 	gOut = fopen(argv[2], "w");
 	gFrameRecs = calloc(MAX_FRAMES, sizeof *gFrameRecs);
 	if (argc > 6) {

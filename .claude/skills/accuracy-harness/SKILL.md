@@ -152,28 +152,29 @@ the `CgbSound_*` addresses appended for the compiled CgbSound:
 ```sh
 arm-none-eabi-nm build/accuracy/rom/accuracy_test.elf > build/probe/syms.nm
 cat >> build/probe/syms.nm <<'EOF2'
-080010ac t CgbSound_loop
-080010c2 t CgbSound_active
-0800113c t CgbSound_step2
-08001154 t CgbSound_start
-08001232 t CgbSound_nostart
-08001256 t CgbSound_oscoff
-080012a4 t CgbSound_step
-080012b8 t CgbSound_modvol
-08001398 t CgbSound_stepdone
-080013aa t CgbSound_envdone
-080013b4 t CgbSound_pit
-0800142c t CgbSound_vol
-080014a8 t CgbSound_done
-080014ac t CgbSound_next
+080010dc t CgbSound_loop
+080010f2 t CgbSound_active
+0800116c t CgbSound_step2
+08001184 t CgbSound_start
+08001262 t CgbSound_nostart
+08001286 t CgbSound_oscoff
+080012d4 t CgbSound_step
+080012e8 t CgbSound_modvol
+080013c8 t CgbSound_stepdone
+080013da t CgbSound_envdone
+080013e4 t CgbSound_pit
+0800145c t CgbSound_vol
+080014d8 t CgbSound_done
+080014dc t CgbSound_next
 EOF2
 ```
-(addresses of the 2026-10-25 ROM with the second-cry parameters, CgbSound
-at 0x800107c: slice 8a's StartTest grew main.c by 0x40 bytes and every ROM
-symbol from AgbMain on moved by +0x40 with the bodies unchanged -- the
-2026-10-25 ROM with the cry chorus parameter had CgbSound at 0x800103c and
-each label 0x40 lower, the 2026-10-24 ROM with the length / release
-parameters 0x8001020, the one before that 0x8000ff0.
+(addresses of the 2026-10-25 ROM with the third-cry parameters, CgbSound
+at 0x80010ac: slice 10a's StartTest grew main.c by 0x30 bytes and every ROM
+symbol from AgbMain on moved by +0x30 with the bodies unchanged -- the
+2026-10-25 ROM with the second-cry parameters had CgbSound at 0x800107c and
+each label 0x30 lower, the one with the cry chorus parameter 0x800103c, the
+2026-10-24 ROM with the length / release parameters 0x8001020, the one
+before that 0x8000ff0.
 Re-derive from `arm-none-eabi-objdump -d` of CgbSound if m4a.c, main.c or
 the toolchain changes -- the header of mgba_probe.c names each one.
 **Changing the ROM**: keep `AgbMain`'s boot path and per-frame loop
@@ -351,6 +352,26 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   `--cry2 N --cry2-start-frame F` after `--player`, `--input midi` skips
   them, and `claim_check.sh` resolves a `cry_over_*` log against its entry
   and adds the two flags to that line.
+  A third cry while both cry players are busy: `mgba_render --id3 N
+  --start-frame3 F` / the probe's seventeenth and eighteenth arguments
+  (`... 15360 0 120 140 0 0 <id2> <F2> <id3> <F3>`, AccParams block bytes
+  24..26) start gCryTable[N] at the defaults on VBlank F3.  With neither
+  cry player free, `SetPokemonCryTone` replaces the one with the strictly
+  larger `clock` (ticks since its own MPlayStart; a tie takes player 0),
+  and `MPlayStart`'s `TrackStop` cuts that player's chained channels
+  outright between two SoundMains (`statusFlags := 0` in ROM code: no
+  release, no `_081DCFB0` stamp; the `TrackStop_Loop` / `TrackStop_1`
+  breakpoints under the `MPlayStart` of that VBlank show it).  The probed
+  run is `build/probe/cry_third_jynx_wailord_bulbasaur.txt` / `_p1` (Jynx
+  on cry 0, Wailord on cry 1 from VBlank 20, Bulbasaur from VBlank 60, 180
+  frames; the twin without the third cry is
+  `cry_third_alone_jynx_wailord.txt` / `_p1`): cry player 0 is replaced,
+  Jynx cut on VBlank 60, Bulbasaur's start tick on frame 62 takes Jynx's
+  channel 0 free (`SCAN_FREE` 14, body 2991 as a lone cry's, the frame
+  4666 = 1007 + (79 + 2991) + (79 + 510)); plan step 13.  poryaaaa does
+  not play it yet (`--cry2` while both are busy is refused; `--cry3` is
+  slice 10b).  No `songs.json` row; `claim_check.sh` skips the
+  `cry_third_*` logs by the `cry_` rule.
   Optional `"pitch"`, `"pan"`, `"volume"`, `"length"`, `"release"`,
   `"chorus"` keys (SetPokemonCryPitch / Panpot / Volume / Length / Release
   / Chorus's arguments; take the values from `PlayCryInternal`'s modes in

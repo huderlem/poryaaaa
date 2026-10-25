@@ -20,11 +20,14 @@
  *   mgba_render <rom.gba> <out.wav> --frames N [--rate 48000]
  *               [--type song|cry|micro|none] [--id N] [--pitch N] [--pan N]
  *               [--volume N] [--length N] [--release N] [--chorus N]
- *               [--start-frame N] [--id2 N --start-frame2 N] [--native-resampler]
+ *               [--start-frame N] [--id2 N --start-frame2 N] [--id3 N --start-frame3 N]
+ *               [--native-resampler]
  *
  * --id2 / --start-frame2 start a second cry (gCryTable index N, PlayCryInternal's
  * CRY_MODE_NORMAL defaults) on VBlank N while the first test plays; start
- * frame 0 (the default) means no second cry.
+ * frame 0 (the default) means no second cry.  --id3 / --start-frame3 start a
+ * third the same way (AccParams block bytes 24..26); with both cry players
+ * busy the ROM's SetPokemonCryTone replaces the player with the larger clock.
  */
 #include <mgba/core/blip_buf.h>
 #include <mgba/core/config.h>
@@ -58,6 +61,8 @@ struct Params {
 	int startFrame;
 	int id2;          /* second cry: gCryTable index, CRY_MODE_NORMAL's defaults */
 	int startFrame2;  /* its start frame; 0 = none */
+	int id3;          /* third cry, the same way (block offset 24) */
+	int startFrame3;  /* its start frame (block offset 26); 0 = none */
 };
 
 static void quietLog(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args) {
@@ -110,7 +115,7 @@ static void usage(const char* prog) {
 	        "Usage: %s <rom.gba> <out.wav> --frames N [--rate HZ] [--type song|cry|micro|none]\n"
 	        "          [--id N] [--pitch N] [--pan N] [--volume N] [--length N] [--release N]\n"
 	        "          [--chorus N] [--start-frame N] [--id2 N --start-frame2 N]\n"
-	        "          [--native-resampler]\n",
+	        "          [--id3 N --start-frame3 N] [--native-resampler]\n",
 	        prog);
 }
 
@@ -153,6 +158,9 @@ static int patchParams(uint8_t* rom, size_t size, const struct Params* p) {
 			b[12] = (uint8_t) (p->id2 & 0xFF);
 			b[13] = (uint8_t) (p->id2 >> 8);
 			b[14] = (uint8_t) p->startFrame2;
+			b[16] = (uint8_t) (p->id3 & 0xFF);
+			b[17] = (uint8_t) (p->id3 >> 8);
+			b[18] = (uint8_t) p->startFrame3;
 			return 1;
 		}
 	}
@@ -248,6 +256,10 @@ int main(int argc, char** argv) {
 			p.id2 = atoi(v); ++i;
 		} else if (!strcmp(a, "--start-frame2") && v) {
 			p.startFrame2 = atoi(v); ++i;
+		} else if (!strcmp(a, "--id3") && v) {
+			p.id3 = atoi(v); ++i;
+		} else if (!strcmp(a, "--start-frame3") && v) {
+			p.startFrame3 = atoi(v); ++i;
 		} else {
 			usage(argv[0]);
 			return 1;
