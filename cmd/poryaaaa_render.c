@@ -832,6 +832,7 @@ static void print_usage(const char *prog)
         "                              position in SoundMain's MPlayMain chain; --cry\n"
         "                              plays on cry0 unless told otherwise)\n"
         "  --psg-log <file>            log every PSG register write with its CPU cycle\n"
+        "                              (also with --midi)\n"
         "  --seq-log <file>            log each frame's modeled CgbSound entry cycle\n"
         "\n"
         "Loop options (when MIDI contains '[' / ']' text events):\n"

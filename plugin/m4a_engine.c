@@ -2043,9 +2043,18 @@ static void m4a_pwm_tick(M4AEngine *engine)
         if (pattern->numSteps == 0)
             continue;
 
-        /* Move to the next step once the per-step counter expires.  The note's
-         * first duty cycle (pattern step 0) is set at note-on, mirroring the
-         * SOUND_CHANNEL_SF_START branch of the GBA's process routine. */
+        /* A note CgbSound starts this frame: MPlayProcessPulseWidthMod's
+         * SOUND_CHANNEL_SF_START branch -- pattern step 0, the counter
+         * reloaded, no decrement (it runs before CgbSound since slice 4, so
+         * START is still set here; note-on already chose step 0). */
+        if (ch->status & CHN_START) {
+            track->pwmStep = 0;
+            track->pwmSpeedCounter = track->pwmSpeed;
+            ch->dutyCycle = pattern->duty[0];
+            continue;
+        }
+
+        /* Move to the next step once the per-step counter expires. */
         if (--track->pwmSpeedCounter > 0)
             continue;
 

@@ -7179,7 +7179,8 @@ portamento and PWM stay after CgbSound.  `cmd/poryaaaa_render.c`:
 end; the song path's code unchanged).  No flag; `m4a_plugin.c` unchanged
 (it gets the order through the engine).
 
-**Step 3, the unit test** (`test_lfo_cgbsound_order`, 6 assertions): a
+**Step 3, the unit test** (`test_lfo_cgbsound_order`, 6 assertions at the
+slice commit, 12 after the review below): a
 sq1 note with LFOS 40 / MOD 24 through the plugin's calls
 (`m4a_engine_set_tempo_bpm`, no grid), latched and not: vibrato (MODT 0)
 -- after each of 90 frames NR13 / NR14 hold the channel's frequency (72
@@ -7201,19 +7202,30 @@ regressions over 1 dB on both (lfo-grid -> lfo-order, aligned ->
 lfo-order-aligned).  The rows that moved (every other row byte-identical
 to its slice 3b WAV, both pairs):
 
-| test | grid null / worst1s (lfo-grid) | aligned null / worst1s (aligned) | PSG writes vs `--song` (grid form) |
+| test | grid null / worst1s (lfo-grid) | aligned null / worst1s (aligned) | PSG writes vs `--song` (grid form, review-corrected) |
 |------|-------------------------------:|---------------------------------:|------------------------------------|
-| lfo_psg | -17.8 / -16.1 (+0.4 / +2.3), lag 0.0 (21.6) | -2.0 / 0.2 (0.2 / 1.0) | 265 of 265 matched, all on their frame (before: 182 matched, 92 one frame late) |
-| mus_littleroot | -14.7 / -10.4 (-10.3 / -6.3) | 2.2 / 4.0 (2.1 / 4.0) | 1181 of 1181, all on their frame (before: 984, 96 one late, more 3 .. 50 off) |
-| mus_weather_groudon | -2.8 / 0.3 (-1.1 / 2.9), lag -14.3, drift -0.6 | -1.5 / 3.1 (-2.4 / 2.1) | 2825 of 2825, all on their frame (before: 2692, 396 one late) |
-| mus_mt_chimney | -3.2 / -0.2 (-3.6 / -0.2) | 1.7 / 3.7 (1.7 / 3.7) | 4235 of 4235, all on their frame (before: 2929, 251 one late, more up to 233 off) |
-| mus_rg_vs_trainer | -5.0 / -0.2 (-5.1 / -0.4) | 2.3 / 3.9 (2.3 / 3.9) | 4228 of 4274; on their frame up to frame 905, then 30 one early and 8 six early (before: from 1031) |
+| lfo_psg | -17.8 / -16.1 (+0.4 / +2.3), lag 0.0 (21.6) | -2.0 / 0.2 (0.2 / 1.0) | 265 of 265, all on their frame: 99 / 99 frames' write lists equal (before: 6 of 123 frames equal) |
+| mus_littleroot | -14.7 / -10.4 (-10.3 / -6.3) | 2.2 / 4.0 (2.1 / 4.0) | 1181 of 1181, all on their frame: 333 / 333 frames equal |
+| mus_weather_groudon | -2.8 / 0.3 (-1.1 / 2.9), lag -14.3, drift -0.6 | -1.5 / 3.1 (-2.4 / 2.1) | 2825 of 2825, all on their frame: 550 / 550 frames equal |
+| mus_mt_chimney | -3.2 / -0.2 (-3.6 / -0.2) | 1.7 / 3.7 (1.7 / 3.7) | 4235 of 4235, all on their frame: 746 / 746 frames equal |
+| mus_rg_vs_trainer | -5.0 / -0.2 (-5.1 / -0.4) | 2.3 / 3.9 (2.3 / 3.9) | equal through MIDI frame 903; MIDI frames 904 .. 944 differ (30 writes one early, 8 six early, 1 late), equal again from 945 to the window's end (before: off from frame 903, on 11 of the 79 frames 903 .. 1030, wholly from 1031) |
 
 ("PSG writes vs `--song`": `--psg-log` of the grid-form MIDI render and
 of the `--song` render, 20 s for the songs, 3 s for lfo_psg, matched as
-(register, value) sequences; the cycle offsets of the matched writes are
-the CgbSound entry's: lfo_psg -830 / -960 on its LFO frames, -3673 on
-frame 3, sq1 unchanged at -472 .. -2667.)
+(register, value) sequences and, since the review, frame by frame (each
+frame's ordered write list against the same frame of `--song`): a
+sequence match is fair only where everything matches -- on the old logs
+difflib paired repetitive vibrato writes 8 .. 33 frames apart and scored
+a one-frame move as a delete plus an insert, so the commit's "before"
+counts are dropped from the table.  In every equal frame all writes share
+one cycle offset, the CgbSound entry's: lfo_psg -830 / -960 on its LFO
+frames, -3673 on frame 3; sq1 unchanged at -472 .. -2667; on the songs
+the commonest per write and per frame is -48, mt_chimney's median frame
+-2290 (-8.4k .. -13k on about 43 heavy frames, frame 3 the largest:
+-24157, littleroot -21293, groudon -9301), groudon's median -1096,
+littleroot's -2171.  lfo_psg's -17.8 is at the harness's 2-sample lag
+(about 700 cycles, near its entry offset); at lag 0 against `--song` it
+is -11.4.)
 
 **Which predictions held.**
 
@@ -7233,24 +7245,119 @@ frame 3, sq1 unchanged at -472 .. -2667.)
    On littleroot, groudon and mt_chimney the MIDI path's PSG writes are
    now the `--song` render's register for register and frame for frame:
    what is left on their PSG side is the CgbSound entry alone.
-   mt_chimney's null reads 0.4 dB shallower (-3.6 -> -3.2) with every
-   write on its frame and its differing samples against `--song` down
-   (913310 -> 908585): the entry's cycle offsets, not the order.
-   rg_vs_trainer departs on frame 905, the two-tick-frame MOD 0 -> 4 of
-   frame 903 (slice 3b, recorded).  Groudon's drift -0.6 and lag -14.3
-   are its usual uncorrelated readings.
-5. *The aligned pair moves on the same rows*: held (lfo_psg -2.0, the
-   songs' nulls within 0.9 dB; the aligned LFO grid is not the ROM's).
+   mt_chimney's null reads 0.4 dB shallower (-3.6 -> -3.2; also against
+   its own `--song` render) with every write on its frame and its
+   differing samples against `--song` down (913310 -> 908585):
+   presumably the entry's cycle offsets, which now sit on writes that
+   used to be a frame away; nothing here isolates it.
+   rg_vs_trainer departs from MIDI frame 904 to 944, after the
+   two-tick-frame MOD 0 -> 4 of frame 903 on track 8 (a
+   `voice_programmable_wave_alt`; slice 3b, recorded), and is equal
+   again after.  **Drift 0.0 did not hold on groudon** (-0.6; lag -14.3),
+   the uncorrelated pure-PSG song whose tempo-grid readings were -0.5 /
+   -14.3.
+5. *The aligned pair moves on the same rows*: held (lfo_psg -2.0; the
+   songs' nulls within 1 dB -- groudon's 0.97 worse, 0.03 under
+   compare_reports' threshold, its worst1s 1.02, which the tool does not
+   gate; lags and drifts moved too: littleroot lag 16.7 -> 50.2, groudon
+   55.7 -> 40.2, mt_chimney drift 4.6 -> 4.2; the aligned LFO grid is not
+   the ROM's).
 
 **What is left on the PSG side of the midi path** (against `--song`):
 the CgbSound entry (`cgbEntryCycles` fixed at the one-track no-tick
 value, where the ROM's moves with MPlayMain's work: -464 .. -2667 cycles
-on the micro rows, -830 / -960 on lfo_psg's LFO frames, thousands on the
-songs: mt_chimney's commonest -8942 .. -13055), now the only difference in the PSG writes of every PSG micro
-row and of littleroot, groudon and mt_chimney in their windows; the
-two-tick-frame interleave on rg_vs_trainer (from frame 905) and vs_wild.
+on the micro rows, -830 / -960 on lfo_psg's LFO frames, -48 .. -24157
+on the songs), now the only difference in the PSG writes of the logged
+rows -- sq1, lfo_psg, and littleroot, groudon and mt_chimney in their
+windows (the other PSG micro rows not logged here); the two-tick-frame
+interleave on rg_vs_trainer (MIDI frames 904 .. 944).  vs_wild's
+second-tick MODs are on PCM tracks: a PCM-side residual, not this list's.
 The entry is the next lever (the order makes its measurement clean: the
 write logs differ in cycles only).
+
+**The midi baseline** is now the lfo-order pair
+(`2026-10-25_midi-path-lfo-order.json` / `-lfo-order-latch.json`, the
+runner's default); `-lfo-order-aligned` / `-lfo-order-aligned-latch` are
+the `--no-gba-tempo-grid` reference.  The lfo-grid and aligned pairs are
+history (the plugin-wide order moved the aligned rows too).
+
+**Code review of slice 4 (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: the new order against SoundMain, MPlayMain,
+CgbSound / CgbModVol and the portamento / PWM sources ccd2ad2e /
+11f0b446 / d9bda100a5, the sequencer path, PCM, the plugin, the
+`--psg-log` addition; reviewer 2: every number of this section
+recomputed from the WAVs, reports and write logs with its own per-frame
+matching, the unit test assertion by assertion, the docs).
+
+Confirmed: the frame order is the game's for the LFO and portamento (a
+note's start frame now carries that frame's LFO step and its first glide
+step, as CgbSound's start reads the pass's values; a tremolo step's
+NR12 / retrigger and the square-1 sweep restart in the step's frame);
+c15's decrement at the tick's top instead of CgbSound's is cosmetic
+(nothing reads it in between); the sequencer path runs every statement
+in the old order; PCM is unchanged (the mixer runs after the tick); the
+table, pass counts, latch identity, moved rows (5 per form), first
+differences and the 1851 count.
+
+*Acted on* (gated together, the PWM change being opt-in and off in the
+harness and the rest text or tests: claim_check 59 diffed, 0 moved,
+57/66, 0 regressions, every row 0.0, 0 field differences on 66 rows;
+unit 1858/1858, blip 49112/0, songs 561/561; the four midi runs 0 field
+differences on 44 rows against the lfo-order baselines and every WAV
+byte-identical to the slice commit's; poryaaaa and poryaaaa-standalone
+build):
+
+- *PWM one frame early* (reviewer 1, a regression of this slice).
+  MPlayProcessPulseWidthMod (d9bda100a5 m4a.c 1125-1134) handles a
+  channel with SF_START by resetting step / counter and duty[0] and
+  `continue` -- no decrement in the start frame.  `m4a_pwm_tick` had no
+  such branch; behind CgbSound START was already cleared, so the timing
+  matched by accident, and in front of it every step came a frame early
+  (speed 1: duty[0] never sounded).  Now the same branch.  New assertions:
+  pattern 1 at speed 1 and 2, NR11 after each frame = step floor(f / S)
+  (12 / 6 frames off on the slice commit's engine, 0 now, 0 on the old
+  order too); `test_pwm`'s expectations moved to the source's ticks (the
+  duty variable now changes before the tick's CgbSound, the chip sees the
+  same frames as before the slice).
+- *The tremolo assertion was weaker than its message* (reviewer 2): "an
+  NR12 write in a stepping frame" caught only 18 of the 72 late writes.
+  Its message now says what it checks, and a stronger check is added:
+  the same note through the MIDI path (with the grid's seed and held
+  TEMPO, the renderer's calls) and through a sequencer song (the ROM's
+  order, byte-checked by the harness) leave the same NR12 / NR13 / NR14
+  after every one of 90 frames, vibrato and tremolo (73 / 74 frames
+  differ on the old order).  Written first with the MIDI engine booted
+  without its output, which put its note three frames later on a
+  different c15 phase (an envelope volume of 17 wrapping NR12 at frame
+  26 looked like an engine divergence); booted as the renderer does, 0
+  frames differ.
+- *Usage text* (reviewer 1 and 2): `--psg-log` says it also works with
+  `--midi`.
+- *Docs* (reviewer 2, and one of mine): the table's "before" sequence
+  counts (difflib artifacts) replaced by per-frame equality; rg_vs_trainer
+  departs on MIDI frames 904 .. 944 only (not "from 905" / "before: from
+  1031"); the songs' entry offsets (commonest -48, not "-8942 ..
+  -13055"); groudon's aligned null 0.97 dB worse, not "within 0.9";
+  groudon's drift 0.0 did not hold; mt_chimney's attribution is
+  "presumably"; vs_wild's interleave is PCM-side; lfo_psg's -17.8 is at a
+  2-sample lag (-11.4 at lag 0); the midi baseline named; and "the only
+  difference in every PSG micro row" was mine and unverified (two micro
+  rows logged).  The commit message's "-aligned, -aligned-latch" are the
+  `-lfo-order-aligned*` files.
+
+*Recorded, not acted on:* PWM sets MO_DUTY on every step where the source
+only does when the duty changes (a same-duty NRx1 rewrite reloads the
+length counter), and writes NRx1 before the pitch block where the source
+writes it after NRx4 -- both pre-existing, opt-in; portamento applies to
+every channel of the track and `find_track_square_channel` to any square
+of it, where the source uses `track->chan`'s chain -- pre-existing,
+opt-in; the MIDI path's fixed `cgbEntryCycles` (the next slice);
+`--seq-log` is ignored on `--midi`; the MIDI path's `--psg-log` fopen is
+unchecked (as the song path's; the callback guards a NULL file); the
+sequencer part of the unit test is a guard only (its `if (seq)` branch
+has nothing to do); the skill still names the tempo-grid pair as the
+midi baseline and the LFO grid as slice 3b's (stale since 3b, left to the
+user), and could mention `--psg-log` with `--midi`.
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 

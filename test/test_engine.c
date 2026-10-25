@@ -1091,16 +1091,20 @@ static void test_pwm(void)
     ASSERT_EQ(sq->dutyCycle, 0, "pwm: note starts on pattern step 0");
     ASSERT_EQ(engine.tracks[0].pwmStep, 0, "pwm: note resets pattern step");
 
-    /* speed=2: duty holds for one tick, then advances each second tick. */
-    advance_frames(&engine, 1, outL, outR);  /* tick 1 */
-    ASSERT_EQ(sq->dutyCycle, 0, "pwm: duty holds during speed countdown");
+    /* speed=2: the start frame (tick 1) only starts the effect (the SF_START
+     * branch, no countdown); then the duty advances every second tick, before
+     * that tick's CgbSound, so step k is written on tick 1 + 2k. */
+    advance_frames(&engine, 1, outL, outR);  /* tick 1: the note's start frame */
+    ASSERT_EQ(sq->dutyCycle, 0, "pwm: the start frame keeps step 0");
     advance_frames(&engine, 1, outL, outR);  /* tick 2 */
-    ASSERT_EQ(sq->dutyCycle, 1, "pwm: duty advances to step 1");
+    ASSERT_EQ(sq->dutyCycle, 0, "pwm: duty holds during speed countdown");
     advance_frames(&engine, 1, outL, outR);  /* tick 3 */
+    ASSERT_EQ(sq->dutyCycle, 1, "pwm: duty advances to step 1");
     advance_frames(&engine, 1, outL, outR);  /* tick 4 */
-    ASSERT_EQ(sq->dutyCycle, 2, "pwm: duty advances to step 2");
     advance_frames(&engine, 1, outL, outR);  /* tick 5 */
+    ASSERT_EQ(sq->dutyCycle, 2, "pwm: duty advances to step 2");
     advance_frames(&engine, 1, outL, outR);  /* tick 6 */
+    advance_frames(&engine, 1, outL, outR);  /* tick 7 */
     ASSERT_EQ(sq->dutyCycle, 0, "pwm: pattern wraps back to step 0");
 
     /* Disabling the effect (PWMS 0) restores the voice's default duty cycle. */
@@ -6292,6 +6296,12 @@ static void lfo_order_log_cb(void *user, uint32_t reg, uint32_t value)
     if (reg == PSG_REG_NR14) log->nr14 = value;
 }
 
+static void lfo_order_nr11_cb(void *user, uint32_t reg, uint32_t value)
+{
+    if (reg == PSG_REG_NR11)
+        *(uint32_t *)user = value;
+}
+
 /* One frame: past the next SoundMain and its CgbSound writes (well inside
  * the frame: CgbSound's writes end a few thousand cycles after its entry). */
 static void lfo_order_frame(M4AEngine *e, float *outL, float *outR)
@@ -6351,12 +6361,96 @@ static void test_lfo_cgbsound_order(void)
                     bad += log.nr12Writes == writes;    /* the tremolo step written this frame */
                 }
             }
-            snprintf(msg, sizeof(msg), "%s%s: every LFO step reaches the square in its own frame's CgbSound"
-                     " (%d modM changes in 90 frames, %d frames late)",
-                     modT ? "tremolo" : "vibrato", q ? " latched" : "", changes, bad);
+            snprintf(msg, sizeof(msg), modT ? "tremolo%s: an NR12 write in every frame whose LFO step changes modM"
+                                            " (%d modM changes in 90 frames, %d frames without)"
+                                          : "vibrato%s: NR13 / NR14 hold the channel frequency after every frame"
+                                            " (%d modM changes in 90 frames, %d frames late)",
+                     q ? " latched" : "", changes, bad);
             ASSERT(bad == 0 && changes > 20, msg);
             m4a_engine_destroy(&engine);
         }
+    }
+
+    /* Against the sequencer path (the ROM's order, byte-checked by the
+     * harness): the same note through the MIDI path on the grid (MPlayStart's
+     * seed at the origin, the TEMPO held to the next add) and through a song
+     * starting on frame 3 leave the same NR12 / NR13 / NR14 values after every
+     * frame -- a tremolo step's volume and a vibrato step's pitch in the frame
+     * of the step. */
+    for (int modT = 0; modT < 2; modT++) {
+        char text[512];
+        snprintf(text, sizeof(text),
+                 "\t.byte\tTEMPO , 60\n\t.byte\t\tVOICE , 0\n\t.byte\t\tVOL   , 127\n"
+                 "\t.byte\t\tMODT  , %d\n\t.byte\t\tLFOS  , 40\n\t.byte\t\tMOD   , 24\n"
+                 "\t.byte\t\tTIE   , Cn3 , v127\n\t.byte\tW96\n\t.byte\tEOT\n\t.byte\tFINE\n", modT);
+        M4ASong *refSong = seq_song(text);
+        ASSERT(refSong != NULL, "reference song parses");
+        if (!refSong) continue;
+        static M4AEngine pair[2];
+        M4ASequencer refSeq;
+        LfoOrderLog plog[2] = { { 0 }, { 0 } };
+        for (int k = 0; k < 2; k++) {
+            m4a_engine_init(&pair[k], 48000.0f);
+            m4a_engine_set_voicegroup(&pair[k], voices);
+            pair[k].psg[0].writeLog = lfo_order_log_cb;
+            pair[k].psg[0].writeLogUser = &plog[k];
+            m4a_engine_boot(&pair[k], true);   /* output kept: sample s is the renderer's sample s */
+        }
+        m4a_sequencer_init(&refSeq, &pair[1]);
+        m4a_sequencer_start(&refSeq, refSong);                /* first tick on frame 3 */
+        int s0 = (int)gba_tempo_grid_sample(0, 48000.0);       /* the origin, before frame 3 */
+        float *obuf = malloc(sizeof(float) * (size_t)s0 * 2);
+        m4a_engine_process(&pair[0], obuf, obuf + s0, s0);
+        free(obuf);
+        m4a_engine_start_song_tempo(&pair[0]);
+        m4a_engine_set_tick_tempo(&pair[0], 120);
+        m4a_engine_program_change(&pair[0], 0, 0);
+        m4a_engine_cc(&pair[0], 0, 0x16, (uint8_t)modT);
+        m4a_engine_cc(&pair[0], 0, 0x15, 40);
+        m4a_engine_cc(&pair[0], 0, 0x1, 24);
+        m4a_engine_note_on(&pair[0], 0, 60, 127);
+        int bad = 0, changes = 0;
+        for (int f = 0; f < 90; f++) {
+            uint32_t before = plog[1].nr12 | plog[1].nr13 << 8 | plog[1].nr14 << 16;
+            for (int k = 0; k < 2; k++)
+                lfo_order_frame(&pair[k], outL, outR);
+            changes += (plog[1].nr12 | plog[1].nr13 << 8 | plog[1].nr14 << 16) != before;
+            bad += plog[0].nr12 != plog[1].nr12 || plog[0].nr13 != plog[1].nr13 || plog[0].nr14 != plog[1].nr14;
+        }
+        snprintf(msg, sizeof(msg), "%s: the MIDI path's NR12 / NR13 / NR14 after each frame are the sequencer's"
+                 " (%d frames changed, %d differ)", modT ? "tremolo" : "vibrato", changes, bad);
+        ASSERT(bad == 0 && changes > 8, msg);
+        m4a_sequencer_detach(&refSeq);
+        for (int k = 0; k < 2; k++)
+            m4a_engine_destroy(&pair[k]);
+        m4a_song_free(refSong);
+    }
+
+    /* PWM before CgbSound (opt-in): pattern 1 (duty 2, 1, 0) at speed S --
+     * MPlayProcessPulseWidthMod skips the start frame, so step k is in NR11
+     * from frame F + k * S, F the note's start frame (S = 1: duty 2 still
+     * sounds in the start frame). */
+    for (int speed = 1; speed <= 2; speed++) {
+        M4AEngine engine;
+        engine_init_booted(&engine, 48000.0f);
+        m4a_engine_set_voicegroup(&engine, voices);
+        m4a_engine_set_pwm_enabled(&engine, true);
+        uint32_t nr11 = 0xFFFF;
+        engine.psg[0].writeLog = lfo_order_nr11_cb;
+        engine.psg[0].writeLogUser = &nr11;
+        m4a_engine_program_change(&engine, 0, 0);
+        m4a_engine_cc(&engine, 0, 0x19, (uint8_t)speed);
+        m4a_engine_cc(&engine, 0, 0x17, 1);
+        m4a_engine_note_on(&engine, 0, 60, 127);
+        static const uint8_t duty1[3] = { 2, 1, 0 };
+        int bad = 0;
+        for (int f = 0; f < 12; f++) {
+            lfo_order_frame(&engine, outL, outR);
+            bad += (nr11 >> 6) != duty1[(f / speed) % 3];
+        }
+        snprintf(msg, sizeof(msg), "PWM speed %d: step k in NR11 from frame F + k x %d (%d frames off)", speed, speed, bad);
+        ASSERT(bad == 0, msg);
+        m4a_engine_destroy(&engine);
     }
 
     /* The sequencer path: the same vibrato from a song, unchanged order. */
