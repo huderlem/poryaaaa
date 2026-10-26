@@ -223,7 +223,9 @@ video starts at line 126; m4aSoundInit writes SOUNDCNT_X 0x8F @5720,
 SOUNDCNT_H 0xA90E @5737, SOUNDBIAS_H 0x40 @5760, DMA on @15873, timer on
 @39794; MPlayExtender's PSG writes @39875–39935 (NR52 0x8F, NR50/51 0,
 NR12/22/42 = 8, NR14/24/44 = 0x80, NR30 = 0, NR50 = 0x77); DMA off @41238,
-timer off @47452, DMA on @47893, timer on @320682.  IME is set at 323299,
+timer off @47452, DMA on @47893, timer on @320682 (the HQ-mixer test ROM's
+cycles, replayed when `engine->hqMixer` is set: `docs/HQ-MIXER-ACCURACY.md`,
+appendix B).  IME is set at 323299,
 after frame 1's VBlank, so the first handled interrupts are frame 2's:
 VSync at line 150 + 164 (DMA restart + 250), SoundMain at line 160 + 197.
 There is no frame-1 SoundMain.  The song's first MPlayMain is frame 3's.

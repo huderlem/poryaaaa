@@ -355,7 +355,8 @@ enum {
 /* MPlayExtender's PSG setup (m4a.c) is ten register writes measured between
  * cycles 39875 and 39935; they are spread evenly over that span.  Its
  * 16-bit SOUNDCNT_L = 0 is two byte writes at one cycle. */
-static const struct { int64_t cycle; int action; uint32_t reg; uint8_t value; } sBootTable[] = {
+typedef struct { int64_t cycle; int action; uint32_t reg; uint8_t value; } BootStep;
+static const BootStep sBootTableVanilla[] = {
     { 5720,   BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F }, /* SoundInit: SOUNDCNT_X */
     { 5737,   BOOT_FIFO_RESET, 0, 0 },
     { 5760,   BOOT_SOUNDBIAS, 0, 0 },
@@ -377,7 +378,43 @@ static const struct { int64_t cycle; int action; uint32_t reg; uint8_t value; } 
     { 47893,  BOOT_DMA_ON_2, 0, 0 },
     { 320682, BOOT_TIMER_ON_2, 0, 0 },
 };
-#define BOOT_TABLE_LEN ((int)(sizeof(sBootTable) / sizeof(sBootTable[0])))
+/* The HQ-mixer test ROM (docs/HQ-MIXER-ACCURACY.md, appendix B, measured
+ * with mgba_probe 2026-10-26): m4aSoundInit's CpuCopy32 of the larger
+ * mixer moves SoundInit's block +2080 cycles; the IWRAM copy being the
+ * next thing, SampleFreqSet's first pass and MPlayExtender land 8 cycles
+ * earlier (39794 -> 39786, 39875..39935 -> 39867..39927, 41238 -> 41230,
+ * 47452 -> 47444, 47893 -> 47885); the final timer-0 start, frame 1's
+ * VCOUNT 159 wait, 4 cycles later (320682 -> 320686).  Everything from
+ * frame 2's VSync on is identical to vanilla. */
+static const BootStep sBootTableHq[] = {
+    { 7800,   BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F }, /* SoundInit: SOUNDCNT_X */
+    { 7817,   BOOT_FIFO_RESET, 0, 0 },
+    { 7840,   BOOT_SOUNDBIAS, 0, 0 },
+    { 17953,  BOOT_DMA_ON, 0, 0 },
+    { 39786,  BOOT_TIMER_ON, 0, 0 },
+    { 39867,  BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F }, /* MPlayExtender */
+    { 39873,  BOOT_PSG_WRITE, PSG_REG_NR50, 0x00 },
+    { 39873,  BOOT_PSG_WRITE, PSG_REG_NR51, 0x00 },
+    { 39879,  BOOT_PSG_WRITE, PSG_REG_NR12, 0x08 },
+    { 39885,  BOOT_PSG_WRITE, PSG_REG_NR22, 0x08 },
+    { 39891,  BOOT_PSG_WRITE, PSG_REG_NR42, 0x08 },
+    { 39897,  BOOT_PSG_WRITE, PSG_REG_NR14, 0x80 },
+    { 39903,  BOOT_PSG_WRITE, PSG_REG_NR24, 0x80 },
+    { 39909,  BOOT_PSG_WRITE, PSG_REG_NR44, 0x80 },
+    { 39915,  BOOT_PSG_WRITE, PSG_REG_NR30, 0x00 },
+    { 39921,  BOOT_PSG_WRITE, PSG_REG_NR50, 0x77 },
+    { 41230,  BOOT_DMA_OFF, 0, 0 },
+    { 47444,  BOOT_TIMER_OFF, 0, 0 },
+    { 47885,  BOOT_DMA_ON_2, 0, 0 },
+    { 320686, BOOT_TIMER_ON_2, 0, 0 },
+};
+#define BOOT_TABLE_LEN ((int)(sizeof(sBootTableVanilla) / sizeof(sBootTableVanilla[0])))
+_Static_assert(sizeof(sBootTableHq) == sizeof(sBootTableVanilla), "the two boot tables hold the same steps");
+
+static const BootStep *boot_table(const M4AEngine *engine)
+{
+    return engine->hqMixer ? sBootTableHq : sBootTableVanilla;
+}
 
 static int64_t frame_start(int frame)
 {
@@ -446,9 +483,10 @@ static void psg_write_both(M4AEngine *engine, uint32_t reg, uint8_t value)
 static void boot_action(M4AEngine *engine, int step)
 {
     M4AGbaAudio *g = &engine->gba;
-    switch (sBootTable[step].action) {
+    const BootStep *b = &boot_table(engine)[step];
+    switch (b->action) {
     case BOOT_PSG_WRITE:
-        psg_write_both(engine, sBootTable[step].reg, sBootTable[step].value);
+        psg_write_both(engine, b->reg, b->value);
         break;
     case BOOT_FIFO_RESET: m4a_gba_fifo_reset(g); break;
     case BOOT_SOUNDBIAS:  m4a_gba_write_soundbias_resolution(g, 1); break;
@@ -537,11 +575,12 @@ static void psg_frame_cb(void *user, int64_t timestamp)
 static void run_until(M4AEngine *engine, int64_t until)
 {
     M4AGbaAudio *g = &engine->gba;
+    const BootStep *table = boot_table(engine);
     for (;;) {
         int64_t next = engine->nextVSync < engine->nextSoundMain ? engine->nextVSync
                                                                  : engine->nextSoundMain;
-        if (engine->bootStep < BOOT_TABLE_LEN && sBootTable[engine->bootStep].cycle < next)
-            next = sBootTable[engine->bootStep].cycle;
+        if (engine->bootStep < BOOT_TABLE_LEN && table[engine->bootStep].cycle < next)
+            next = table[engine->bootStep].cycle;
         if (next > until) {
             m4a_gba_run(g, until);
             return;
@@ -551,7 +590,7 @@ static void run_until(M4AEngine *engine, int64_t until)
          * before executing it.  A frame's register writes may already have
          * carried `now` past `next`; m4a_gba_run then does nothing. */
         m4a_gba_run(g, next);
-        while (engine->bootStep < BOOT_TABLE_LEN && sBootTable[engine->bootStep].cycle == next) {
+        while (engine->bootStep < BOOT_TABLE_LEN && table[engine->bootStep].cycle == next) {
             boot_action(engine, engine->bootStep);
             engine->bootStep++;
         }
@@ -683,6 +722,14 @@ void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode)
                          GBA_PCM_DMA_BUF_SIZE);
     m4a_gba_dma_enable(g);
     m4a_gba_timer_enable(g);
+}
+
+void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on)
+{
+    /* The boot table is replayed by m4a_engine_boot; the mixer selection
+     * that later steps add (docs/HQ-MIXER-ACCURACY.md, section 5) reads
+     * the flag each frame. */
+    engine->hqMixer = on;
 }
 
 void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm)

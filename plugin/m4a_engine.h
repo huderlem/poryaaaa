@@ -409,6 +409,13 @@ struct M4AEngine {
      * the timer-driven FIFOs read, so high notes alias as on the GBA.
      * SampleFreqSet's derived numbers follow. */
     uint8_t pcmFreqMode;
+    /* HQ-mixer mode (ipatix's HQ-Mixer rev 4.0 as the pret wiki installs it;
+     * docs/HQ-MIXER-ACCURACY.md).  Off (the default) the engine is the
+     * vanilla pokeemerald engine.  On, m4a_engine_boot replays the HQ test
+     * ROM's boot timeline (the larger IWRAM copy moves m4aSoundInit's
+     * register writes, and the final timer-0 start by +4 cycles); the
+     * mixer itself follows in later steps of that document. */
+    bool hqMixer;
     int32_t pcmSamplesPerVBlank; /* samples mixed per VBlank frame */
     int32_t pcmFreq;             /* SoundInfo.pcmFreq for that count */
     int32_t pcmDivFreq;          /* SoundInfo.divFreq */
@@ -792,6 +799,11 @@ void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode);
  * and the mode whose rate is nearest to `hz` (the default for hz <= 0). */
 int m4a_pcm_freq_mode_hz(int mode);
 int m4a_pcm_freq_mode_from_hz(double hz);
+
+/* HQ-mixer mode (docs/HQ-MIXER-ACCURACY.md, section 5).  Selects the HQ
+ * ROM's boot timeline; call before m4a_engine_boot (the boot replays the
+ * table once).  Off by default. */
+void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on);
 
 /* Set voicegroup (must be loaded by voicegroup_loader) */
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup);

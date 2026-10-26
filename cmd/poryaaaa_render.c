@@ -881,6 +881,8 @@ static void print_usage(const char *prog)
         "  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates\n"
         "                              5734 7884 10512 13379 15768 18157 21024 26758 31536 36314\n"
         "                              40137 42048 (nearest is used; default: 13379)\n"
+        "  --hq-mixer                  ipatix HQ-mixer mode (the pret wiki's HQ mixer; default: the\n"
+        "                              vanilla pokeemerald mixer)\n"
         "  --tail <seconds>            Silence after last event, no loop markers (default: 3.0)\n"
         "\n"
         "Compiled-song options (--song):\n"
@@ -922,6 +924,7 @@ typedef struct {
     int cry2;                    /* --cry2: a second cry's gCryTable index, or -1 */
     int cry2StartFrame;          /* --cry2-start-frame: the VBlank it starts on (its tick on engine frame + 2) */
     bool respectBaseMidiKey, portamento, pwm;
+    bool hqMixer;                /* --hq-mixer: ipatix HQ-mixer mode */
     int maxChannels;
     double sampleRate;
     int pcmFreqMode;
@@ -1063,6 +1066,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
     m4a_engine_set_portamento_enabled(&engine, o->portamento);
     m4a_engine_set_pwm_enabled(&engine, o->pwm);
     m4a_engine_set_pcm_freq_mode(&engine, o->pcmFreqMode);
+    m4a_engine_set_hq_mixer(&engine, o->hqMixer);
 
     M4ASequencer seq, seq2;
     m4a_sequencer_init(&seq, &engine);
@@ -1614,6 +1618,7 @@ int main(int argc, char *argv[])
     int         maxChannels   = 5;
     int         sampleRateHz  = 44100;
     int         pcmFreqMode   = M4A_PCM_FREQ_MODE_DEFAULT; /* SOUND_MODE_FREQ_13379 */
+    bool        hqMixer       = false;  /* --hq-mixer: ipatix HQ-mixer mode */
     double      tailSeconds   = 3.0;
     int         loopCount     = 2;
     bool        extendedClocks = false; /* mid2agb -X: 48 clocks/beat */
@@ -1723,6 +1728,8 @@ int main(int argc, char *argv[])
             if ((int)hz != m4a_pcm_freq_mode_hz(pcmFreqMode))
                 fprintf(stderr, "Note: --pcm-mix-rate %g is not an m4a sound-mode rate; using %d Hz\n",
                         hz, m4a_pcm_freq_mode_hz(pcmFreqMode));
+        } else if (strcmp(argv[i], "--hq-mixer") == 0) {
+            hqMixer = true;
         } else if (strcmp(argv[i], "--psg-log") == 0 && i + 1 < argc) {
             psgLogPath = argv[++i];
         } else if (strcmp(argv[i], "--pcm-log") == 0 && i + 1 < argc) {
@@ -1816,6 +1823,7 @@ int main(int argc, char *argv[])
             .respectBaseMidiKey = respectBaseMidiKey,
             .portamento = portamento, .pwm = pwm, .maxChannels = maxChannels,
             .sampleRate = sampleRate, .pcmFreqMode = pcmFreqMode,
+            .hqMixer = hqMixer,
             .tailSeconds = tailSeconds, .fadeoutSeconds = fadeoutSeconds,
             .totalDurSeconds = totalDurSeconds, .loopCount = loopCount,
             .psgLogPath = psgLogPath,
@@ -2272,6 +2280,7 @@ oom:
     m4a_engine_set_portamento_enabled(&engine, portamento);
     m4a_engine_set_pwm_enabled(&engine, pwm);
     m4a_engine_set_pcm_freq_mode(&engine, pcmFreqMode);
+    m4a_engine_set_hq_mixer(&engine, hqMixer);
     /* --psg-log on the MIDI path too, opened before the boot as the song
      * path does, so the two logs compare line for line (probe_diff.py). */
     if (psgLogPath) {

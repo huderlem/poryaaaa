@@ -637,6 +637,26 @@ numbers (−inf where vanilla is −inf); `probe_diff` 0 moved on the HQ
 logs; the PCM rows' numbers against the HQ ROM move (the timer phase)
 but stay failing until step 4.  Vanilla unchanged.
 
+**Step 3 — done 2026-10-26.**  `engine->hqMixer` (`m4a_engine_set_hq_mixer`,
+`poryaaaa_render --hq-mixer`; nothing in the plugin yet, step 10) selects
+`sBootTableHq` in `m4a_engine.c`: the same twenty steps as the vanilla
+table at the HQ ROM's cycles (SoundInit's block 7800 / 7817 / 7840 /
+17953, SampleFreqSet and MPlayExtender 39786 / 39867–39921 / 41230 /
+47444 / 47885, the final timer-0 enable 320686), MPlayExtender's ten
+writes spread 6 apart from 39867 as the vanilla table spreads them from
+39875.  Nothing else reads the flag yet; the mixer dispatch comes with
+step 4.  Measured: vanilla `claim_check` 0 moved writes on 59 logs, 57/66,
+no row moved against 2026-10-25_cry-over-song-rows (every `-inf` row
+`-inf`); HQ `claim_check --mixer hq` 0 moved writes on the 59 HQ logs,
+17/66 against the before-baseline, the 17 pure-PSG rows `-inf` as they
+already were with the vanilla engine (the boot's PSG writes are the same
+registers and values, only earlier, and the first CgbSound is frame 2's
+on both ROMs: the +4 moves the PCM timer phase only), the PCM rows
+within 0.2 dB (pcm_drum −1.9) of before — the vanilla mixer's output
+against the HQ reference, now on the HQ timer phase — still failing
+until step 4.  Baseline `2026-10-26_hq-boot-table`.  Unit 1907/1907,
+blip 49112/0, songs 561/561.
+
 **Step 4 — the HQ mixer skeleton: downsampler, seed, the `< 1.0` fast
 path.**  `m4a_hq_mixer.c` with the frame structure of section 2, the
 volume formula, `sampleStor`, the noise shaping and saturation, `reverb
