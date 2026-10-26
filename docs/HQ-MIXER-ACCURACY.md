@@ -254,10 +254,26 @@ sample.
 - **Compressed reverse**: blocks decoded in reverse order with the reversed
   store, so the fast loop plays backwards.  The lowest block index is
   `(ptr − advance − 1) >> 6`; in the end frame this is **negative**, and
-  the block address wraps to open bus (`data + 0x21 × 0x3FFFFFxx`) — the
-  decoder reads 0x21 bytes of mgba's open-bus value, and which stack bytes
-  the garbage lands on depends on the clear / decode order.  This is the
-  reversed-cry end frame; measure before porting (step 8).
+  the block address wraps to open bus (`data + 0x21 × 0x3FFFFFxx`).
+  **Measured (step 2(e), `cry_bulbasaur_reverse` frame 50, 88 samples
+  left, advance 176)**: `r9 = (0x58 − 0xB0 − 1) lsr 6 = 0x03FFFFFE`, the
+  buffer is 4 blocks (0x100 bytes), `count − advance < 0` so the top 0x80
+  bytes (the region of blocks 0 and 1, the sample's real first 88 samples)
+  are **cleared**, and the two blocks decoded are the open-bus ones at
+  `data − 0x42 + 0x84000000` = 0x8C0D3DDE and 0x8C0D3DFF, stored reversed
+  into the bottom 0x80 bytes.  The real tail is never decoded: the end
+  frame plays open-bus garbage from read offset 0x28 and then zeros.
+  mgba's open bus for an unmapped address read by ARM code
+  (`GBALoadBad`) is `cpu->prefetch[1]`, the instruction word two ahead of
+  the `ldrb` (`[pc + 8]`), byte-selected by `address & 3`: the three
+  loads of `F_decode_compressed` see the words at `F + 16` (`EA000003`,
+  the `b` to the entry), `F + 20` (`E4D93001`) and `F + 28` (`E0812002`).
+  Decoding the two blocks with that rule and the 256-entry view of the
+  delta table reproduces the probe's buffer dump byte for byte
+  (`tools/hq_decode_check.py`), and the same decoder reproduces the
+  previous frame's real blocks.  The port can
+  therefore reproduce the end frame exactly from the mixer's own code
+  bytes; `pcm_rev` and the reversed cries decide (step 8).
 - **Uncompressed reverse**: words byte-swapped onto the stack, then the fast
   loop; at the end the zero fill and status 0 as above.
 - The stack budget: if `0x03007900 + bytes ≥ sp` the pre-cached paths
@@ -322,7 +338,16 @@ reference → unchanged; else the probe's IO-write log gives the new cycles.
 the instruction stream; the HQ mixer's DMA3 halts and different loop costs
 change when timer-0 overflows land late.  So the set of −inf rows may differ
 from vanilla's, and the floor on songs may sit at a different level.  Not
-modeled, as before; attribute with `.events` slot crossings.
+modeled, as before; attribute with `.events` slot crossings.  **Measured
+(step 2(f))**: the same mechanism at the same scale — timer-0 `max_late`
+10–11 cycles on both ROMs, slot crossings per test of the same order
+(vanilla / HQ: pcm 0 / 1, pcm_cmp 9 / 0, pcm_chord 6 / 0, littleroot
+81 / 56, vs_wild 62 / 59, credits 35 / 73, cry_jynx 19 / 1; the sample and
+PSG-frame events cross nowhere on either).  No DMA3 term: a DMA3 block is
+just another stretch of the instruction stream the timer overflow waits
+out, and the `ENABLE_DMA` variants of step 1 differ only through it (pcm's
+frames 63–68 are the HQ run's one crossing, `first at cycle 17751296`,
+frame 64).
 
 **Not output-neutral: `ENABLE_DMA`** (measured in step 1).  The DMA3 copy
 and the CPU copy read the same bytes, but the two ROMs' references differ:
@@ -334,11 +359,10 @@ of consecutive frames, nothing from the first sample: timing, not
 arithmetic — the DMA3 block halts the CPU for the whole copy, so an mgba
 event that falls inside it (timer-0 overflow, the FIFO DMA) is serviced
 later than it would be under the instruction-granular CPU copy.  This is
-the PCM floor's mechanism at a larger scale, and `ENABLE_DMA 1` is what
-hackers ship, so it is the ground truth; step 2(f) measures the lateness.
-The HQ floor on DirectSound rows may therefore sit nearer the −40 dB gate
-than vanilla's (vs_wild's two variants differ by more than the vanilla
-residual).  The `ENABLE_DMA 0` variant is dropped.
+the PCM floor's mechanism, and `ENABLE_DMA 1` is what hackers ship, so it
+is the ground truth.  Step 2(f) measured it as the ordinary floor (above):
+the HQ ROM's crossings are no more frequent than vanilla's, so the floor
+should sit where vanilla's does.  The `ENABLE_DMA 0` variant is dropped.
 
 ---
 
@@ -571,11 +595,47 @@ late, by how much, and whether the vanilla model's `.events` lateness
 attribution covers it or the HQ timing model needs a DMA3 term.  Done:
 the numbers in a commit and in appendix B here; nothing in the engine yet.
 
-**Step 3 — the boot table** (only if 2(a) moved anything).  Parameterize
-`m4a_engine_boot`'s constants by mixer mode; HQ mode replays the HQ
-timeline.  Measure: the pure-PSG rows (sq1, groudon, se_exp …) with
-`--hq-mixer` reach their vanilla numbers (−inf where vanilla is −inf);
-`probe_diff` 0 moved on the HQ logs.  Vanilla unchanged.
+**Step 2 — done 2026-10-26.**  `tools/probe_corpus.sh` (the 67 probed
+logs from one table: frames, players, cry parameters) run on both ROMs
+into `build/probe-van/` and `build/probe-hq/` with the same probe build;
+`tools/probe_hq_compare.py` compares them.  The probe gained the HQ
+labels (broken at the IWRAM copy like `_081DCFB0`, every register logged,
+`sp` at `SoundMainRAM_Buffer`, the decoded block buffer at
+`C_select_highspeed_codepath_vla_r3`); a vanilla run is byte-identical to
+before.  (a) Boot: m4aSoundInit's register block (SOUNDCNT_X/H, SOUNDBIAS,
+the DMA setup, the first timer on @39794 → 39786, the MPlayExtender
+writes, DMA off, timer off @47452 → 47444, DMA on @47893 → 47885) moves
++2080 then −8; the IRQ enables and the **final timer-0 enable move +4
+(320682 → 320686)**; everything from frame 2's VSync DMA restart
+(@590705) on is identical, cycle for cycle, in all 67 logs.  The on/off
+tick count of the first timer pass is unchanged (7658), so the FIFO's
+stale content is too; the +4 is a timer-0 phase shift against the DAC
+grid — the vanilla precedent moved every DirectSound reference by 6, so
+step 3 is needed.  (b) PSG: every `.frames` write list identical in all 67
+logs.  (c) MPlayMain / CgbSound / VSync / SoundMain entries identical in
+every frame of 66 logs; rg_vs_trainer differs in frames 732–735 only
+(CgbSound entry −95 / +64 / +32 / +127): a DirectSound channel whose sample
+runs out ends in frame 731 under the vanilla mixer (the count path, no
+stamp; MPlayMain's `ClearChain` in 732) and in frame 732 under HQ
+(`C_stop_channel`, 9189 cycles into the mixer; the unlink in 733), a
+second one 734 vs 735 — the mixers end a sample a frame apart, which the
+port reproduces by construction; no PSG write in those frames.  (d) `sp`
+at SoundMainRAM entry 0x03007DD0 (0x03007DB8 in the runs with a second
+cry or a cry over a song: the main thread's call depth when the VBlank
+hits), budget 0x4D0 / 0x4B8 bytes above `stack_boundary`; the stack-skip
+branch never taken (0 of 35 000 channel setups); mixer cost 7683 cycles
+(no channel) to 39874 (littleroot).  (e) The reversed end frame: section
+2, reproduced byte for byte.  (f) The floor: section 3.
+
+**Step 3 — the boot table** (needed: 2(a) moved the final timer-0 enable
+by +4 and the earlier blocks by +2080 / −8).  Parameterize
+`m4a_engine_boot`'s table by mixer mode (the HQ cycles: 7800 / 7817 /
+7840 / 17953, 39786, the MPlayExtender writes 39867–39927, 41230, 47444,
+47885, 320686); HQ mode replays the HQ timeline.  Measure: the pure-PSG
+rows (sq1, groudon, se_exp …) with `--hq-mixer` reach their vanilla
+numbers (−inf where vanilla is −inf); `probe_diff` 0 moved on the HQ
+logs; the PCM rows' numbers against the HQ ROM move (the timer phase)
+but stay failing until step 4.  Vanilla unchanged.
 
 **Step 4 — the HQ mixer skeleton: downsampler, seed, the `< 1.0` fast
 path.**  `m4a_hq_mixer.c` with the frame structure of section 2, the
@@ -636,12 +696,11 @@ time with `claim_check.sh --mixer hq`; then the HQ baseline is final.
   levels and on other rows than vanilla; confirm with `.events`.  Step 1
   showed the DMA3 copies alone move `mus_vs_wild` by −48 dB null / −40 dB
   worst second between the `ENABLE_DMA` variants (section 3), so the HQ
-  floor on DirectSound-heavy rows may touch the gate; step 2(f) decides
-  whether the timing model needs a DMA3 term.
-- **Reversed DPCM end frame**: open-bus block decode (section 2) — a whole
-  block's worth of garbage samples in the last frame of every reversed cry,
-  deterministic in mgba.  Likely a larger residual than vanilla's one
-  sample unless mgba's prefetch value is reproduced; decide in step 8.
+  floor on DirectSound-heavy rows may touch the gate.  Step 2(f) found the
+  same mechanism at the same scale on both ROMs: no DMA3 term.
+- **Reversed DPCM end frame**: two open-bus blocks and the real tail
+  cleared (section 2), reproduced from the mixer's own code bytes; a
+  residual only if step 8 chooses not to port it.
 - **The stack budget** is ROM-dependent (the game's `sp` at the interrupt
   varies); the engine's default is the test ROM's.  Document as a
   limitation; no vanilla corpus row should reach it.
@@ -772,7 +831,17 @@ volume, r12 diff.
   `MPlayMain` 0x08002670 → 0x08002A38, `gCgb3Vol` 0x08002F98 → 0x08003360:
   every symbol after the mixer moves by +0x3C8.
   The HQ ROM's sha256 starts `bf7c9463fc8c` (its reference cache key).
-- Boot timeline of the HQ ROM: *to be filled in step 2(a)*.
+- Boot timeline of the HQ ROM (step 2(a); vanilla → HQ, cycles from
+  reset): SOUNDCNT_X 0x8F 5720 → 7800, SOUNDCNT_H 0xA90E 5737 → 7817,
+  SOUNDBIAS_H 0x40 5760 → 7840, DMA on 15873 → 17953 (+2080: the larger
+  CpuCopy32); timer on 39794 → 39786, MPlayExtender's PSG writes
+  39875–39935 → 39867–39927, DMA off 41238 → 41230, timer off 47452 →
+  47444, DMA on 47893 → 47885 (−8); timer on 320682 → **320686**, DISPSTAT
+  323278 → 323282, IE / IME 323293 / 323299 → 323297 / 323303 (+4); from
+  frame 2's VSync (DMA restart @590705) on, identical.  `sp` at
+  SoundMainRAM entry 0x03007DD0 (0x03007DB8 with a second cry / a cry over
+  a song).  Mixer cost: 7683 cycles with no channel (7 skipped channels
+  and the downsampler), up to 39874 (littleroot).
 
 ## Appendix C: the wiki's tables
 

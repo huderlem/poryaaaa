@@ -228,6 +228,16 @@ ELF and map the CMake target writes are `build/accuracy/rom/accuracy_test.elf`
 exists, do not read symbols from it.)  The map still works for the function
 entries alone.
 
+**The whole corpus**: `test/accuracy/tools/probe_corpus.sh <rom> <syms.nm>
+<out dir> [name ...]` runs the 67 probed logs from one table (frames,
+players, cry parameters); `tools/probe_hq_compare.py <dir a> <dir b>`
+compares two corpora (boot writes, per-frame entries and PSG writes).  The
+HQ-mixer ROM: `build/probe-hq/syms.nm` from its ELF plus the same
+CgbSound_ lines (CgbSound did not move); the probe breaks on the HQ
+mixer's `C_*` / `F_*` labels at the IWRAM copy and logs every register,
+`sp` at SoundMainRAM entry and the decoded DPCM buffer
+(`docs/HQ-MIXER-ACCURACY.md`, step 2).
+
 **Run it**: `build/probe/mgba_probe build/accuracy/rom/accuracy_test.gba
 build/probe/<name>.txt <frames> <type> <id> build/probe/syms.nm`.
 Type 2 = micro-test, id = its line number (from 0) in

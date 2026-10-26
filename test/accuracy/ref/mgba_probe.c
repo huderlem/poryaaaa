@@ -115,6 +115,7 @@ static FILE* gOut;
 static long gFrames;
 struct Sym { uint32_t addr; const char* name; };
 static struct Sym gSyms[256]; static int gNumSyms;
+static int gHqMixer;   /* HQ mixer labels present: log sp at SoundMainRAM_Buffer, the registers at C_* / F_* */
 
 #define MAX_FRAMES 4096
 #define MAX_WRITES 96
@@ -277,6 +278,7 @@ static uint32_t rd32(uint32_t a) { return gCore->busRead32(gCore, a); }
 
 static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struct mDebuggerEntryInfo* info) {
 	int32_t t = mTimingCurrentTime(&gGba->timing);
+	struct ARMCore* cpu = gGba->cpu;
 	unsigned fc = gGba->video.frameCounter;
 	int vc = gGba->video.vcount;
 	int32_t rel;
@@ -300,7 +302,21 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 		} else if (!strcmp(name, "SoundMainRAM_Buffer")) {
 			int c15 = rd8(ADDR_gSoundInfo + O_SoundInfo_c15);
 			fprintf(gOut, " c15=%d", c15);
+			if (gHqMixer) fprintf(gOut, " sp=%08X", cpu->gprs[13]);   /* the HQ mixer's stack budget (stack_boundary 0x03007900) */
 			if (fr) { fr->soundMainRAM = rel; fr->c15After = c15; }
+		} else if (!strncmp(name, "C_", 2) || !strncmp(name, "F_", 2)) {
+			/* HQ mixer labels: every register (the channel in r?, the sample / block pointers, sp) */
+			fprintf(gOut, " r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X r8=%08X r9=%08X r10=%08X r11=%08X r12=%08X sp=%08X lr=%08X",
+			        cpu->gprs[0], cpu->gprs[1], cpu->gprs[2], cpu->gprs[3], cpu->gprs[4], cpu->gprs[5], cpu->gprs[6], cpu->gprs[7],
+			        cpu->gprs[8], cpu->gprs[9], cpu->gprs[10], cpu->gprs[11], cpu->gprs[12], cpu->gprs[13], cpu->gprs[14]);
+			if (!strcmp(name, "C_select_highspeed_codepath_vla_r3")) {
+				/* the decoded DPCM block buffer on the stack: sp .. r10 (the saved sp - 8 of C_data_load_comp_rev) */
+				uint32_t a = cpu->gprs[13], e = cpu->gprs[10];
+				if (e > a && e - a <= 2048) {
+					fprintf(gOut, " buf=");
+					for (uint32_t i = a; i < e; ++i) fprintf(gOut, "%02X", rd8(i));
+				}
+			}
 		} else if (!strcmp(name, "MPlayMain")) {
 			int n = rd8(ADDR_gMPlayInfo_BGM + O_MPlayInfo_trackCount);
 			int tempoC = rd16(ADDR_gMPlayInfo_BGM + O_MPlayInfo_tempoC);
@@ -324,17 +340,14 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 		}
 		if (!strncmp(name, "ply_", 4) && strcmp(name, "ply_note")) {
 			/* (mplayInfo, track): the track's pending flags decide the handler's path */
-			struct ARMCore* cpu = gGba->cpu;
 			fprintf(gOut, " flg=%02X", rd8(cpu->gprs[1]));
 		} else if (!strcmp(name, "ply_note")) {
 			/* (cmd, mplayInfo, track): flags, voice type and the lfoDelay that picks the clear_modM path */
-			struct ARMCore* cpu = gGba->cpu;
 			fprintf(gOut, " flg=%02X vt=%02X lfodl=%02X", rd8(cpu->gprs[2]), rd8(cpu->gprs[2] + 0x24), rd8(cpu->gprs[2] + 0x1B));
 		}
 		if (name[0] == '_' || !strncmp(name, "TrackStop_", 10) || !strncmp(name, "CgbSound_", 9) || !strcmp(name, "CgbModVol") || !strcmp(name, "ply_note") || !strcmp(name, "TrackStop") || !strcmp(name, "ClearChain") || !strcmp(name, "RealClearChain") || !strcmp(name, "TrkVolPitSet")) {
 			/* r5 = track (MPlayMain, ply_note), r4 = channel, r7 = player
 			 * (MPlayMain) / chosen track (ply_note scan), r3 = loop count */
-			struct ARMCore* cpu = gGba->cpu;
 			fprintf(gOut, " r0=%08X r3=%08X r4=%08X r5=%08X r7=%08X r6=%08X", cpu->gprs[0], cpu->gprs[3], cpu->gprs[4], cpu->gprs[5], cpu->gprs[7], cpu->gprs[6]);
 			if (!strcmp(name, "CgbModVol"))        /* r0 = CgbChannel: CgbPan's and the clamp's inputs */
 				fprintf(gOut, " rv=%02X lv=%02X sus=%02X", rd8(cpu->gprs[0] + 2), rd8(cpu->gprs[0] + 3), rd8(cpu->gprs[0] + 6));
@@ -432,7 +445,14 @@ int main(int argc, char** argv) {
 		                       /* SoundMainRAM: the store that ends a DirectSound channel (statusFlags = 0 at m4a_1.s
 		                        * _081DCFB0: a release or pseudo-echo tail reaching 0, or SF_START with SF_STOP), so a
 		                        * channel's death frame can be read from the raw log after its track is gone */
-		                       "_081DCFB0", NULL };
+		                       "_081DCFB0",
+		                       /* ipatix HQ mixer (the MIXER=hq ROM, docs/HQ-MIXER-ACCURACY.md): its labels, broken at the
+		                        * IWRAM copy like _081DCFB0; absent from a vanilla nm listing, so a vanilla run is unchanged */
+		                       "C_channel_state_loop", "C_stop_channel", "C_skip_channel", "C_mixing_setup", "F_decode_compressed",
+		                       "C_data_load_comp_for", "C_data_load_comp_rev", "C_data_load_uncomp_rev", "C_data_load_uncomp_for",
+		                       "C_select_highspeed_codepath", "C_unbuffered_mixing", "C_end_mixing", "C_mixing_end_and_stop_channel",
+		                       "C_setup_fixed_freq_mixing", "C_mixing_epilogue", "C_main_mixer_return", "C_downsampler",
+		                       "C_downsampler_return", "C_setup_synth", "C_select_highspeed_codepath_vla_r3", NULL };
 		while (m && fgets(line, sizeof line, m)) {
 			unsigned long a; char name[128]; char kind;
 			if (sscanf(line, " 0x%lx %127s", &a, name) == 2 || sscanf(line, "%lx %c %127s", &a, &kind, name) == 3) {
@@ -458,7 +478,10 @@ int main(int argc, char** argv) {
 				if (!strcmp(gSyms[i].name, "SoundMainRAM_Buffer")) ramBase = gSyms[i].addr;
 			}
 			for (int i = 0; romBase && ramBase && i < gNumSyms; ++i)
-				if (!strcmp(gSyms[i].name, "_081DCFB0")) gSyms[i].addr = gSyms[i].addr - romBase + ramBase;
+				if (!strcmp(gSyms[i].name, "_081DCFB0") || !strncmp(gSyms[i].name, "C_", 2) || !strncmp(gSyms[i].name, "F_", 2)) {
+					gSyms[i].addr = gSyms[i].addr - romBase + ramBase;
+					gHqMixer = 1;
+				}
 		}
 		if (!playerFound && argc > 7) { fprintf(stderr, "player symbol %s not in %s\n", argv[7], argv[6]); return 1; }
 	}
