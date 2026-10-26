@@ -49,6 +49,15 @@ Steps (all idempotent, cached under --build-dir):
      a cry over it the same way.
   4. metrics.compare on each pair; a table on stdout and a JSON report.
 
+--mixer hq selects the HQ-mixer test ROM (build/accuracy/rom-hq, the same
+sources built with MIXER=hq: ipatix's HQ mixer as the pret wiki installs it,
+docs/HQ-MIXER-ACCURACY.md), its own reference cache and committed set
+(test/accuracy/refs/micro-hq), passes --hq-mixer to poryaaaa_render and
+writes "mixer": "hq" into the report: a separate baseline family
+(baselines/<date>_hq-*.json), never compared against a vanilla one.
+--engine-mixer vanilla|hq overrides what the engine is asked for (the
+default follows --mixer); "engine_mixer" in the report records it.
+
 Typical use (after `make` in test/accuracy/rom and building mgba_render and
 poryaaaa_render):
   tools/accuracy.py --pokeemerald ~/pokeemerald
@@ -74,7 +83,7 @@ ACC_DIR = os.path.dirname(HERE)
 REPO = os.path.dirname(os.path.dirname(ACC_DIR))
 ROM_DIR = os.path.join(ACC_DIR, "rom")
 MICRO_DIR = os.path.join(ROM_DIR, "micro")
-COMMITTED_REFS = os.path.join(ACC_DIR, "refs", "micro")
+COMMITTED_REFS = os.path.join(ACC_DIR, "refs", "micro")          # --mixer hq: refs/micro-hq (set in main)
 
 GBA_CPU_HZ = 16777216
 GBA_CYCLES_PER_FRAME = 280896
@@ -349,6 +358,8 @@ def render_poryaaaa(args, t, overlay, out_dir):
     if t.get("cry") is None and t.get("cry2") is not None:
         # The cry over the SE / song: cry player 0 chained after the song's player (slice 9b-i).
         cmd += ["--cry2", str(t["cry2"]), "--cry2-start-frame", str(t["cry2_start_frame"])]
+    if args.engine_mixer == "hq":
+        cmd.append("--hq-mixer")             # the engine's HQ-mixer mode (docs/HQ-MIXER-ACCURACY.md, section 5)
     cmd += args.poryaaaa_args
     if run(cmd, wav + ".log") != 0:
         raise SystemExit(f"poryaaaa_render failed for {t['name']}, see {wav}.log")
@@ -366,7 +377,11 @@ def fmt(v, width=7):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pokeemerald", default=os.environ.get("POKEEMERALD", os.path.expanduser("~/pokeemerald")))
-    ap.add_argument("--rom", default=None, help="accuracy test ROM (default: build/accuracy/rom or test/accuracy/rom/build)")
+    ap.add_argument("--rom", default=None, help="accuracy test ROM (default: build/accuracy/rom[-hq] or test/accuracy/rom/build[-hq], by --mixer)")
+    ap.add_argument("--mixer", choices=("vanilla", "hq"), default="vanilla",
+                    help="which test ROM: vanilla pokeemerald or the ipatix HQ-mixer build (MIXER=hq); its own reference cache, committed set and baseline family")
+    ap.add_argument("--engine-mixer", choices=("vanilla", "hq"), default=None,
+                    help="what poryaaaa_render is asked for (hq adds --hq-mixer); default: the same as --mixer")
     ap.add_argument("--mgba-render", default=None, help="mgba_render binary (default: build/mgba_render; omit to use committed refs)")
     ap.add_argument("--poryaaaa-render", default=os.path.join(REPO, "build", "poryaaaa_render"))
     ap.add_argument("--build-dir", default=os.path.join(REPO, "build", "accuracy"))
@@ -388,14 +403,20 @@ def main():
     ap.add_argument("--update-refs", action="store_true", help="store micro-test references in test/accuracy/refs/micro")
     ap.add_argument("--committed-refs", action="store_true", help="ignore mgba_render and compare against the committed micro-test references")
     ap.add_argument("--force", action="store_true", help="re-render references even if cached")
-    ap.add_argument("--json", default=None, help="write the report here (default: <build-dir>/report.json)")
+    ap.add_argument("--json", default=None, help="write the report here (default: <build-dir>/report.json, report-hq.json with --mixer hq)")
     ap.add_argument("--label", default="poryaaaa", help="label for the rendering under test in the report")
     ap.add_argument("poryaaaa_args", nargs="*", help="extra arguments passed to poryaaaa_render (after --)")
     args = ap.parse_args()
 
+    global COMMITTED_REFS
+    if args.engine_mixer is None:
+        args.engine_mixer = args.mixer
+    rom_sub = "rom" if args.mixer == "vanilla" else "rom-hq"
+    if args.mixer == "hq":
+        COMMITTED_REFS = os.path.join(ACC_DIR, "refs", "micro-hq")
     if args.rom is None:
-        for cand in (os.path.join(REPO, "build", "accuracy", "rom", "accuracy_test.gba"),
-                     os.path.join(ROM_DIR, "build", "accuracy_test.gba")):
+        for cand in (os.path.join(REPO, "build", "accuracy", rom_sub, "accuracy_test.gba"),
+                     os.path.join(ROM_DIR, "build" if args.mixer == "vanilla" else "build-hq", "accuracy_test.gba")):
             if os.path.exists(cand):
                 args.rom = cand
                 break
@@ -428,7 +449,7 @@ def main():
 
     tests = build_tests(args)
     results = []
-    print(f"ROM: {args.rom}\nmgba: {ver}\nreferences: {ref_dir}\n")
+    print(f"ROM: {args.rom} (mixer {args.mixer}; engine asked for {args.engine_mixer})\nmgba: {ver}\nreferences: {ref_dir}\n")
     hdr = f"{'test':18s} {'lag ms':>7s} {'gain dB':>8s} | {'null':>7s} {'worst1s':>7s} | {'gm null':>7s} {'gm wrst':>7s} | {'ref':>6s} {'test':>6s} | {'drift':>7s} | gate {args.gate:.0f}"
     print(hdr)
     print("-" * len(hdr))
@@ -459,12 +480,13 @@ def main():
           "\n  gm = the same after gain matching; ref / test = RMS level dBFS; drift = lag slope, ms per second (tempo mismatch)")
     print(f"{n_pass}/{len(results)} pass at {args.gate:.0f} dB (raw null depth, full file and worst 1 s window)")
     report = {"rom": args.rom, "mgba": ver, "rate": args.rate, "gate_db": args.gate,
-              "label": args.label, "input": args.input, "results": results}
+              "label": args.label, "input": args.input, "mixer": args.mixer, "engine_mixer": args.engine_mixer,
+              "results": results}
     if args.input == "midi":
         report["midi_quantize"] = bool(args.midi_quantize)   # the midi baseline families
         report["gba_start_delay"] = bool(args.gba_start_delay)
         report["gba_tempo_grid"] = bool(args.gba_tempo_grid)
-    path = args.json or os.path.join(args.build_dir, "report.json")
+    path = args.json or os.path.join(args.build_dir, "report.json" if args.mixer == "vanilla" else "report-hq.json")
     with open(path, "w") as f:
         json.dump(report, f, indent=1)
     print(f"report: {path}")

@@ -5,7 +5,13 @@
 # song table, every vanilla song compiled with mid2agb exactly as the game
 # does) plus the micro-test voicegroup and songs under micro/.
 #
-#   make POKEEMERALD=~/pokeemerald [BUILD=build]
+#   make POKEEMERALD=~/pokeemerald [BUILD=build] [MIXER=vanilla|hq]
+#
+# MIXER=hq builds the same ROM with ipatix's HQ mixer installed the way the
+# pret wiki describes (docs/HQ-MIXER-ACCURACY.md, section 4): hq/m4a_1.s in
+# place of the tree's src/m4a_1.s, the two-line m4a.c change (hq/m4a.c.sed)
+# and the atomic DmaSetUnchecked (hq/include/gba/macro.h first on the
+# include path).  Everything else, AgbMain included, is the vanilla build.
 #
 # Requires: agbcc installed in <pokeemerald>/tools/agbcc, the pokeemerald tools
 # built (mid2agb, gbafix) and libagbsyscall built, arm-none-eabi binutils.
@@ -15,6 +21,7 @@ SHELL := /bin/bash
 
 POKEEMERALD ?= $(HOME)/pokeemerald
 BUILD ?= build
+MIXER ?= vanilla
 
 AGBCC    := $(POKEEMERALD)/tools/agbcc
 PREFIX   ?= arm-none-eabi-
@@ -32,7 +39,19 @@ ABS_ROMDIR := $(abspath .)
 ABS_BUILD  := $(abspath $(BUILD))
 
 ASFLAGS  := -mcpu=arm7tdmi --defsym MODERN=0 -I $(POKEEMERALD) -I $(POKEEMERALD)/sound -I $(ABS_ROMDIR) -I $(ABS_BUILD)
-CPPFLAGS := -iquote $(POKEEMERALD)/include -Wno-trigraphs -DMODERN=0 \
+ifeq ($(MIXER),hq)
+HQ_CPPFLAGS := -iquote $(ABS_ROMDIR)/hq/include
+M4A_1_SRC   := $(ABS_ROMDIR)/hq/m4a_1.s
+M4A_C_SRC   := $(BUILD)/m4a.c
+else ifeq ($(MIXER),vanilla)
+HQ_CPPFLAGS :=
+M4A_1_SRC   := $(POKEEMERALD)/src/m4a_1.s
+M4A_C_SRC   := $(POKEEMERALD)/src/m4a.c
+else
+$(error MIXER must be vanilla or hq)
+endif
+
+CPPFLAGS := $(HQ_CPPFLAGS) -iquote $(POKEEMERALD)/include -Wno-trigraphs -DMODERN=0 \
             -I $(AGBCC)/include -I $(AGBCC) -nostdinc -undef -std=gnu89
 CFLAGS   := -mthumb-interwork -Wimplicit -Wparentheses -Werror -O2 -fhex-asm -g
 LIBS     := -L $(AGBCC)/lib -lgcc -lc -L $(POKEEMERALD)/libagbsyscall -lagbsyscall
@@ -75,7 +94,10 @@ endef
 
 $(BUILD)/main.o: main.c
 	$(call COMPILE_C,$(CC1))
-$(BUILD)/m4a.o: $(POKEEMERALD)/src/m4a.c
+$(BUILD)/m4a.c: $(POKEEMERALD)/src/m4a.c hq/m4a.c.sed
+	@mkdir -p $(@D)
+	sed -f hq/m4a.c.sed $< > $@
+$(BUILD)/m4a.o: $(M4A_C_SRC) $(if $(HQ_CPPFLAGS),hq/include/gba/macro.h)
 	$(call COMPILE_C,$(CC1_OLD))
 $(BUILD)/m4a_tables.o: $(POKEEMERALD)/src/m4a_tables.c
 	$(call COMPILE_C,$(CC1))
@@ -93,7 +115,7 @@ endef
 $(BUILD)/crt0.o: crt0.s
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) -o $@ $<
-$(BUILD)/m4a_1.o: $(POKEEMERALD)/src/m4a_1.s
+$(BUILD)/m4a_1.o: $(M4A_1_SRC)
 	$(call PREPROC_AS,$<)
 $(BUILD)/sound_data.s: sound_data.s accuracy_micro.inc $(BUILD)/micro_song_table.inc
 	@mkdir -p $(@D)

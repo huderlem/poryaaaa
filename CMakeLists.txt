@@ -352,6 +352,21 @@ if(ACCURACY_POKEEMERALD_DIR)
         COMMENT "Accuracy: checking the .s song parser against the ROM"
         VERBATIM
     )
+    # The same ROM with ipatix's HQ mixer installed (docs/HQ-MIXER-ACCURACY.md).
+    set(ACCURACY_ROM_HQ ${CMAKE_BINARY_DIR}/accuracy/rom-hq/accuracy_test.gba)
+    add_custom_target(accuracy_rom_hq
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/accuracy/rom-hq
+        COMMAND $(MAKE) -C ${CMAKE_CURRENT_SOURCE_DIR}/test/accuracy/rom MIXER=hq
+                POKEEMERALD=${ACCURACY_POKEEMERALD_DIR} BUILD=${CMAKE_BINARY_DIR}/accuracy/rom-hq
+        COMMENT "Building the HQ-mixer accuracy test ROM with agbcc"
+        VERBATIM
+    )
+    add_custom_target(accuracy_song_tests_hq
+        COMMAND $<TARGET_FILE:poryaaaa_song_tests> ${CMAKE_BINARY_DIR}/accuracy/rom-hq
+        DEPENDS accuracy_rom_hq poryaaaa_song_tests
+        COMMENT "Accuracy: checking the .s song parser against the HQ ROM"
+        VERBATIM
+    )
 endif()
 
 if(ACCURACY_POKEEMERALD_DIR AND ACCURACY_MGBA_DIR)
@@ -364,6 +379,20 @@ if(ACCURACY_POKEEMERALD_DIR AND ACCURACY_MGBA_DIR)
                 --build-dir ${CMAKE_BINARY_DIR}/accuracy
         DEPENDS accuracy_rom accuracy_song_tests mgba_render poryaaaa_render
         COMMENT "Accuracy: rendering references with mgba and comparing poryaaaa"
+        USES_TERMINAL
+        VERBATIM
+    )
+    add_custom_target(accuracy_hq
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/test/accuracy/tools/accuracy.py
+                --mixer hq
+                --pokeemerald ${ACCURACY_POKEEMERALD_DIR}
+                --rom ${ACCURACY_ROM_HQ}
+                --mgba-render $<TARGET_FILE:mgba_render>
+                --poryaaaa-render $<TARGET_FILE:poryaaaa_render>
+                --build-dir ${CMAKE_BINARY_DIR}/accuracy
+                --json ${CMAKE_BINARY_DIR}/accuracy/report-hq.json
+        DEPENDS accuracy_rom_hq accuracy_song_tests_hq mgba_render poryaaaa_render
+        COMMENT "Accuracy (HQ mixer): rendering references with mgba and comparing poryaaaa --hq-mixer"
         USES_TERMINAL
         VERBATIM
     )

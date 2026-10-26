@@ -1,0 +1,78 @@
+ROM: /home/huderlem/m4a_plugin/build/accuracy/rom-hq/accuracy_test.gba (mixer hq; engine asked for vanilla)
+mgba: mGBA 0.10.5+m4a_blip
+references: /home/huderlem/m4a_plugin/build/accuracy/refs/bf7c9463fc8c-mGBA_0.10.5+m4a_blip
+
+test                lag ms  gain dB |    null worst1s | gm null gm wrst |    ref   test |   drift | gate -40
+------------------------------------------------------------------------------------------------------------
+sq1                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -16.8  -16.8 |       - | PASS
+sq1_env                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.3  -18.3 |       - | PASS
+sq1_sweep              0.0      0.0 |    -inf    -inf |    -inf    -inf |  -17.0  -17.0 |       - | PASS
+sq1_alt                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -16.8  -16.8 |       - | PASS
+sq2                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.1  -18.1 |       - | PASS
+sq2_alt                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.1  -18.1 |       - | PASS
+wave                   0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.8  -19.8 |       - | PASS
+wave_alt               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.8  -19.8 |       - | PASS
+noise                  0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.0  -20.0 |       - | PASS
+noise7                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.5  -18.5 |       - | PASS
+pcm                    0.3     -0.2 |   -14.6   -11.1 |   -14.7   -11.2 |  -21.4  -21.4 |       - | FAIL
+pcm_hi                -5.7     -0.4 |   -11.4   -10.4 |   -11.5   -10.6 |  -20.9  -20.9 |       - | FAIL
+pcm_adsr               0.1     -0.1 |   -18.0    -3.5 |   -18.0    -3.5 |  -29.9  -29.9 |       - | FAIL
+pcm_drum               0.0     -0.0 |   -27.5   -26.6 |   -27.6   -26.7 |  -22.0  -21.9 |       - | FAIL
+pcm_cmp                0.1     -0.1 |   -16.6   -14.4 |   -16.6   -14.5 |  -27.2  -27.1 |       - | FAIL
+pcm_reverb             0.3     -0.4 |    -7.6    -6.0 |    -7.7    -6.1 |  -20.6  -21.0 |       - | FAIL
+pcm_chord              0.2     -0.6 |   -13.0   -11.5 |   -13.5   -12.0 |  -14.6  -14.2 |       - | FAIL
+pcm_bass               0.1      0.1 |   -24.8   -18.6 |   -24.9   -18.6 |  -25.1  -25.2 |       - | FAIL
+pan                    0.2     -0.0 |   -18.5   -17.4 |   -18.5   -17.4 |  -19.5  -19.5 |       - | FAIL
+vol                    0.3      0.0 |   -24.0   -11.5 |   -24.0   -11.5 |  -25.2  -25.3 |       - | FAIL
+vel                    0.3      0.0 |   -23.8   -13.7 |   -23.8   -13.8 |  -26.5  -26.5 |       - | FAIL
+bend                   0.2     -0.2 |   -14.9   -12.9 |   -14.9   -13.0 |  -20.2  -20.2 |       - | FAIL
+lfo_vib                0.3     -0.1 |   -17.8   -13.4 |   -17.9   -13.5 |  -20.1  -20.1 |       - | FAIL
+lfo_trem               0.3     -0.0 |   -17.9   -13.4 |   -17.9   -13.4 |  -20.1  -20.1 |       - | FAIL
+lfo_pan                0.3     -0.0 |   -17.9   -13.4 |   -18.0   -13.4 |  -20.1  -20.1 |       - | FAIL
+lfo_delay              0.3     -0.1 |   -25.6   -23.5 |   -25.7   -23.5 |  -21.1  -21.0 |       - | FAIL
+lfo_psg                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -17.1  -17.1 |       - | PASS
+tune                   0.3     -0.1 |   -25.0   -23.5 |   -25.0   -23.6 |  -21.6  -21.6 |       - | FAIL
+tune_psg               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.0  -18.0 |       - | PASS
+psg_mix                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -15.2  -15.2 |       - | PASS
+pcm_psg                0.0     -0.7 |    -7.8    -7.0 |    -7.9    -7.0 |  -13.2  -13.3 |       - | FAIL
+mus_littleroot         0.1     -0.2 |    -9.9    -8.7 |    -9.9    -8.7 |  -23.4  -23.7 |     0.0 | FAIL
+mus_weather_groudon     0.0      0.0 |    -inf    -inf |    -inf    -inf |  -31.1  -31.1 |     0.0 | PASS
+mus_vs_wild            0.1     -0.4 |    -9.9    -8.1 |    -9.9    -8.2 |  -20.8  -20.9 |     0.0 | FAIL
+mus_mt_chimney         0.0     -0.6 |    -8.2    -6.1 |    -8.3    -6.2 |  -23.4  -23.5 |     0.0 | FAIL
+mus_rg_vs_trainer      0.0     -0.6 |    -8.5    -7.2 |    -8.6    -7.3 |  -19.5  -19.6 |     0.0 | FAIL
+mus_vs_trainer         0.1     -0.2 |    -9.9    -9.1 |   -10.0    -9.1 |  -20.1  -20.4 |     0.0 | FAIL
+mus_credits            0.1     -0.1 |    -9.3    -6.2 |    -9.3    -6.3 |  -22.6  -23.0 |    -0.0 | FAIL
+se_exp                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -24.8  -24.8 |       - | PASS
+se_faint               0.0     -1.5 |    -4.9     1.0 |    -5.2     0.7 |  -29.8  -29.9 |       - | FAIL
+se_contest_place       0.1     -0.3 |   -10.5     0.3 |   -10.5     0.3 |  -26.8  -26.9 |       - | FAIL
+se_truck_unload        0.0      0.0 |    -inf    -inf |    -inf    -inf |  -39.2  -39.2 |       - | PASS
+se_low_health          0.0      0.0 |    -inf    -inf |    -inf    -inf |  -24.0  -24.0 |       - | PASS
+se_rain_stop           0.1     -1.4 |    -4.8     0.6 |    -5.1     0.4 |  -41.1  -41.3 |       - | FAIL
+cry_pidgey             0.1     -0.0 |   -15.4   -15.4 |   -15.4   -15.4 |  -33.3  -33.4 |       - | FAIL
+cry_bulbasaur          0.1      0.0 |   -18.6   -17.3 |   -18.6   -17.3 |  -28.0  -28.1 |       - | FAIL
+cry_wailord            0.1      0.1 |   -20.9   -10.2 |   -20.9   -10.2 |  -22.3  -22.4 |       - | FAIL
+cry_jynx               0.1     -0.0 |   -15.3   -14.6 |   -15.3   -14.6 |  -26.1  -26.2 |       - | FAIL
+cry_jynx_faint         0.1     -0.1 |   -12.9   -12.4 |   -13.0   -12.4 |  -25.6  -25.7 |       - | FAIL
+cry_bulbasaur_howl     0.1      0.1 |   -20.6   -20.2 |   -20.6   -20.2 |  -25.3  -25.4 |       - | FAIL
+cry_pidgey_quiet       0.1      0.0 |   -15.2   -15.2 |   -15.2   -15.2 |  -35.8  -36.0 |       - | FAIL
+cry_jynx_faint_full     0.1     -0.1 |   -12.9   -12.4 |   -13.0   -12.4 |  -25.6  -25.7 |       - | FAIL
+cry_wailord_doubles     0.1      0.1 |   -19.9    -4.3 |   -19.9    -4.3 |  -29.3  -29.4 |       - | FAIL
+cry_pidgey_roar2       0.1     -0.0 |   -16.4   -16.4 |   -16.4   -16.4 |  -33.6  -33.6 |       - | FAIL
+cry_bulbasaur_reverse     0.1      0.0 |   -11.2    -2.2 |   -11.2    -2.2 |  -27.7  -28.1 |       - | FAIL
+cry_jynx_growl1        0.1      0.0 |   -16.2   -15.7 |   -16.2   -15.8 |  -36.7  -36.8 |       - | FAIL
+cry_pidgey_echo_start     0.1     -0.0 |    -9.0    -2.7 |    -9.0    -2.7 |  -35.6  -36.2 |       - | FAIL
+cry_bulbasaur_encounter     0.1      0.1 |   -19.4   -13.5 |   -19.4   -13.4 |  -28.6  -28.8 |       - | FAIL
+cry_jynx_echo_end      0.1      0.1 |   -15.7   -15.1 |   -15.7   -15.1 |  -28.2  -28.4 |       - | FAIL
+cry_pidgey_echo_start_chorus     0.1     -0.1 |    -6.6    -1.1 |    -6.6    -1.1 |  -32.3  -33.2 |       - | FAIL
+cry_jynx_high_pitch     0.1      0.1 |   -16.3    -3.4 |   -16.3    -3.3 |  -28.9  -29.0 |       - | FAIL
+cry_wailord_high_pitch     0.1      0.2 |   -21.4     0.6 |   -21.6     0.7 |  -25.3  -25.4 |       - | FAIL
+cry_second_bulbasaur_pidgey     0.1      0.0 |   -17.5   -17.1 |   -17.5   -17.1 |  -28.7  -28.8 |       - | FAIL
+cry_second_jynx_wailord     0.1      0.0 |   -18.5    -6.7 |   -18.5    -6.7 |  -22.0  -22.1 |       - | FAIL
+cry_over_se            0.0     -0.3 |   -11.1    -9.2 |   -11.1    -9.3 |  -23.5  -23.5 |       - | FAIL
+cry_over_bgm           0.1     -0.1 |   -10.2    -9.3 |   -10.2    -9.3 |  -22.7  -23.1 |       - | FAIL
+
+columns: lag = alignment applied to the test render; gain = least-squares gain match (dB);
+  null / worst1s = RMS(ref - test) / RMS(ref) in dB over the file and the worst 1 s window (gate uses these);
+  gm = the same after gain matching; ref / test = RMS level dBFS; drift = lag slope, ms per second (tempo mismatch)
+17/66 pass at -40 dB (raw null depth, full file and worst 1 s window)
+report: /home/huderlem/m4a_plugin/build/accuracy/report-hq.json

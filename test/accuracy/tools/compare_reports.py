@@ -26,8 +26,13 @@ def main():
     ap.add_argument("after")
     ap.add_argument("--threshold", type=float, default=1.0, help="dB of worsening that counts as a regression")
     a = ap.parse_args()
-    before = {r["name"]: r for r in json.load(open(a.before))["results"]}
-    after = {r["name"]: r for r in json.load(open(a.after))["results"]}
+    rb, ra = json.load(open(a.before)), json.load(open(a.after))
+    for key in ("input", "mixer"):       # the baseline families: song / midi input, vanilla / hq test ROM
+        vb, va = rb.get(key, "song" if key == "input" else "vanilla"), ra.get(key, "song" if key == "input" else "vanilla")
+        if vb != va:
+            raise SystemExit(f"refusing to compare reports of different {key} ({vb} vs {va}): separate baseline families")
+    before = {r["name"]: r for r in rb["results"]}
+    after = {r["name"]: r for r in ra["results"]}
     regressions = 0
     print(f"{'test':18s} {'null before':>11s} {'after':>7s} {'delta':>7s} | {'worst before':>12s} {'after':>7s} | {'drift b/a':>13s} | note")
     for name in list(before) + [n for n in after if n not in before]:
