@@ -7200,6 +7200,65 @@ static void test_two_tick_interleave_midi_path(void)
         }
     }
 
+    /* E: two tracks, events of both in both ticks of a frame (the ROM runs
+     * each track's tick, LFO step included, before the next track's; the
+     * engine every track's tick-n events, then every step): track 0's MOD
+     * from 0 at second tick 24 after track 1's note at tick 23; track 1's
+     * note at second tick 43 after track 0's at 42.  F: a frame of three
+     * ticks (TEMPO 320, ticks 30 .. 32 on frame 18), a MOD from 0 in the
+     * third: two boundaries before it. */
+    {
+        static const char *two =
+            "\t.byte\tKEYSH , t_key+0\n\t.byte\tTEMPO , 240*t_tbs/2\n\t.byte\t\tVOICE , 2\n"
+            "\t.byte\t\tVOL   , 127*t_mvl/mxv\n\t.byte\t\tPAN   , c_v+0\n\t.byte\t\tLFOS  , 40\n"
+            "\t.byte\t\tN96   , Cn3 , v127\n\t.byte\tW24\n"
+            "\t.byte\t\tMOD   , 30\n\t.byte\tW18\n"                         /* tick 24 */
+            "\t.byte\t\tN03   , Dn3 \n\t.byte\tW03\n"                       /* tick 42 */
+            "\t.byte\tW48\n\t.byte\tW03\n\t.byte\tFINE\n"
+            "t_2:\n\t.byte\t\tVOICE , 2\n\t.byte\t\tVOL   , 127*t_mvl/mxv\n\t.byte\t\tPAN   , c_v+0\n"
+            "\t.byte\t\tLFOS  , 22\n\t.byte\t\tMOD   , 4\n\t.byte\t\tN96   , En3 , v127\n\t.byte\tW23\n"
+            "\t.byte\t\tN03   , Fn3 \n\t.byte\tW03\n"                       /* tick 23 */
+            "\t.byte\tW17\n\t.byte\t\tN03   , Gn3 \n\t.byte\tW03\n"        /* tick 43 */
+            "\t.byte\tW48\n\t.byte\tW02\n\t.byte\tFINE\n"
+            "\t.align\t2\nt:\n\t.byte\t2, 0, t_pri, t_rev\n\t.word\tt_grp\n\t.word\tt_1\n\t.word\tt_2\n";
+        static const CgbEntryEvent evTwo[] = {
+            { 0, 'p', 1, 2, 0 }, { 0, 'c', 1, 7, 127 }, { 0, 'c', 1, 10, 64 }, { 0, 'c', 1, 0x15, 40 },
+            { 0, 'n', 1, 60, 127 },
+            { 0, 'p', 2, 2, 0 }, { 0, 'c', 2, 7, 127 }, { 0, 'c', 2, 10, 64 }, { 0, 'c', 2, 0x15, 22 },
+            { 0, 'c', 2, 1, 4 }, { 0, 'n', 2, 64, 127 },
+            { 23, 'n', 2, 65, 127 }, { 24, 'c', 1, 1, 30 }, { 26, 'n', 2, 65, 0 },
+            { 42, 'n', 1, 62, 127 }, { 43, 'n', 2, 67, 127 }, { 45, 'n', 1, 62, 0 }, { 46, 'n', 2, 67, 0 },
+            { 96, 'n', 1, 60, 0 }, { 96, 'e', 1, 0, 0 }, { 96, 'n', 2, 64, 0 }, { 96, 'e', 2, 0, 0 },
+        };
+        char three[2048];
+        snprintf(three, sizeof(three),
+                 "%s\t.byte\tKEYSH , t_key+0\n\t.byte\tTEMPO , 320*t_tbs/2\n\t.byte\t\tVOICE , 2\n"
+                 "\t.byte\t\tVOL   , 127*t_mvl/mxv\n\t.byte\t\tPAN   , c_v+0\n\t.byte\t\tLFOS  , 40\n"
+                 "\t.byte\t\tN96   , Cn3 , v127\n\t.byte\tW24\n\t.byte\tW08\n"
+                 "\t.byte\t\tMOD   , 30\n\t.byte\tW64\n\t.byte\tFINE\n%s",   /* tick 32 */
+                 seq_song_header, seq_song_footer);
+        static const CgbEntryEvent evThree[] = {
+            { 0, 'p', 1, 2, 0 }, { 0, 'c', 1, 7, 127 }, { 0, 'c', 1, 10, 64 }, { 0, 'c', 1, 0x15, 40 },
+            { 0, 'n', 1, 60, 127 }, { 32, 'c', 1, 1, 30 }, { 96, 'n', 1, 60, 0 }, { 96, 'e', 1, 0, 0 },
+        };
+        char twoText[4096];
+        snprintf(twoText, sizeof(twoText), "%s%s", seq_song_header, two);
+        for (int q = 0; q < 2; q++) {
+            int firstBad, sounding;
+            bool seqClean;
+            int bad = batch_pair(twoText, voices, evTwo, (int)(sizeof(evTwo) / sizeof(evTwo[0])), 240, q == 1,
+                                 120, &firstBad, &sounding, &seqClean);
+            snprintf(msg, sizeof(msg), "E: two tracks' events in both ticks of a frame%s (%d frames differ, first %d)",
+                     q ? ", latched" : "", bad, firstBad);
+            ASSERT(bad == 0 && seqClean, msg);
+            bad = batch_pair(three, voices, evThree, (int)(sizeof(evThree) / sizeof(evThree[0])), 320, q == 1,
+                             100, &firstBad, &sounding, &seqClean);
+            snprintf(msg, sizeof(msg), "F: a MOD from 0 in the third tick of a three-tick frame%s (%d frames differ, first %d)",
+                     q ? ", latched" : "", bad, firstBad);
+            ASSERT(bad == 0 && seqClean, msg);
+        }
+    }
+
     /* A sequencer-driven engine ignores the boundary, latched or not. */
     {
         char one[2048];

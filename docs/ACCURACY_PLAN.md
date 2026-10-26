@@ -8230,7 +8230,10 @@ MIDI path 132 (tri -4, modM -1): the first difference on 904, ch2 (track
 tick 1080 (clear_modM resets lfoSpeedC on both).  vs_wild (LFOS 18, MOD
 5): one step 18 -> modM 1, two 36 -> modM 2, different at once (frame
 903); the same on frames 972 and 1073 (MOD 0 -> 5 in a second tick
-again), each run ended by the next MOD 0.
+again).  The runs are 903 .. 927, 972 .. 991 and 1073 .. 1086 against
+MOD 0s on 922, 986 and 1087 (rg_vs_trainer: MOD 0 on 945, the run to
+950): a releasing channel keeps its last frequency a few frames past the
+MOD 0 (corrected in review: "each run ended by the next MOD 0").
 
 *The corpus scan* (every MIDI row, its MIDI walked on the grid in its
 window: tempoI from the first MTrk's tempos, mid2agb's clocks, each event
@@ -8238,17 +8241,22 @@ on its tick's frame and its tick's index in the frame; per MTrk and
 channel the MOD / LFOS / LFODL / MODT state, LFOS 22 at a track's start):
 the micro rows are at 120 BPM (no frame holds two ticks); two-tick frames
 in littleroot, groudon, mt_chimney, credits (60 s), se_faint,
-se_contest_place, se_truck_unload, se_low_health: none; vs_wild 368,
-rg_vs_trainer 176, vs_trainer 384, se_exp 109, se_rain_stop 56.  An
-LFO-state command or a note on a modulated track in a later tick of a
-frame: vs_wild 9 -- MOD 0 -> 5 on ROM frames 903 (tracks 0, 1), 972 (0,
-1), 1073 (1), 1197 (0, 1; past the 20 s window's 1194 logged frames),
-MOD 5 -> 0 on 793 and 1151 (track 1, no effect by the last bullet);
-rg_vs_trainer 2 -- MOD 0 -> 4 on 903 (tracks 0, 7); none in vs_trainer,
-se_exp, se_rain_stop (no MOD in their windows).  No note on a modulated
-track and no LFOS / LFODL / MODT falls in a later tick anywhere in the
-corpus.  (Slice 3b counted vs_wild's 7 MOD 0 -> 5; the two 5 -> 0 are
-the other two.)
+se_contest_place, se_truck_unload, se_low_health: none; vs_wild 365,
+rg_vs_trainer 174, vs_trainer 381, se_exp 105, se_rain_stop 54 (the
+window is the logged frames, ROM frames up to 1194 for the 20 s songs --
+`--pcm-log` holds 1193, 2 .. 1194 -- 179 for se_exp, 119 for
+se_rain_stop; no three-tick frame anywhere).  An LFO-state command or a
+note on a modulated track in a later tick of a frame: vs_wild 7 -- MOD 0
+-> 5 on ROM frames 903 (tracks 0, 1), 972 (0, 1), 1073 (1), MOD 5 -> 0 on
+793 and 1151 (track 1, no effect by the last bullet); rg_vs_trainer 2 --
+MOD 0 -> 4 on 903 (tracks 0, 7); none in vs_trainer (its track 1 sets
+LFOS 20 and MOD 7 / 6 / 0 in the window and plays notes while modulated,
+all in a frame's first tick), se_exp, se_rain_stop (no MOD).  No note on
+a modulated track and no LFOS / LFODL / MODT falls in a later tick
+anywhere in the corpus.  (Written first on a window 9 .. 12 frames
+longer: 368 / 176 / 384 / 109 / 56, and vs_wild 9 with a MOD 0 -> 5 on
+frame 1197, past the render; corrected in review.  Slice 3b's 7 counted
+1197 and not the two 5 -> 0.)
 
 **The design.**  A new engine entry point,
 `m4a_engine_tick_boundary(engine)`: "the frame's next song tick starts
@@ -8275,7 +8283,9 @@ the first; each step then runs where `_081DD938` runs it relative to the
 commands, and the per-track equivalence above makes the global order
 the ROM's state.  The gate walk (`_081DD892`) of tick n + 1 is not
 moved: on the MIDI path note ends are events, already in tick order, and
-no LFO step reads a channel.  The flag drop and the delay countdown
+no LFO step reads a channel -- unlatched; latched, a note-off that finds
+its channel still START gets gate 1 (slice 1's one-tick note) whichever
+tick it is in, the review's item below.  The flag drop and the delay countdown
 follow from the order, unchanged code.
 
 *Predictions* (grid form; latched = unlatched):
@@ -8353,7 +8363,8 @@ before as the gap table; after, 0 differing frames on both rows; every
 frame's PSG write list equal with every write on its cycle (vs_wild 1116,
 rg_vs_trainer 4274 = 4132 + the 40 frames' 142).  The MIDI path's own PSG
 logs before -> after: vs_wild byte-identical, rg_vs_trainer changed on
-exactly frames 904 .. 944.  **All 44 grid WAVs are now their `--song`
+40 frames of 904 .. 944 (all but 931; corrected in review from
+"exactly frames 904 .. 944").  **All 44 grid WAVs are now their `--song`
 renders sample for sample** (slice 6: 42).
 
 **Which predictions held.**  1: held.  2: held.  3: held, both rows, every
@@ -8379,6 +8390,77 @@ before the frame's gate walk when unlatched (the walk reads no LFO
 state); a host calling the boundary more often than the frame has ticks
 gets the extra steps (the renderer's walker and the engine's accumulator
 agree, slice 3b).
+
+**Code review of slice 7 (2026-10-26).**  Two independent read-only
+reviews (reviewer 1: the change against MPlayMain's tick loop, the LFO
+step, ply_note's flag drop and LFO-delay restart, clear_modM, ply_fine
+and the VOLCHG / PITCHG pass in m4a_1.s, the sequencer port, the latch,
+the grid walker, the renderer's dispatch loop, the plugin and the
+timing-only sequencer; reviewer 2: every number of this section
+recomputed from its own renders of all 44 rows on every path, its own
+channel-dump / PSG-log comparison, its own SMF parser and grid walk, the
+nulls from the WAVs, the unit test run and read assertion by assertion,
+the docs).
+
+Confirmed: the ROM's order (per track: walk, START, commands, `wait--`,
+the step; the pass once) and the sequencer port's; the global order's
+equivalence (a step reads and writes only its own track; another
+track's note changes channel links only; the engine's handlers write only
+their track); one step per tick, each between its ticks' events, latched
+and unlatched, through a queue overflow, a panic, a latch flip, the held
+TEMPO, start_song_tempo; the walker's index (first tick, a TEMPO at the
+placed tick, the fade query, a repeated clock, a frozen grid), the
+per-sample counter, loop passes, track ends, dropped events, no grid; the
+only caller the renderer, the `--song` / `--cry` paths, the timing-only
+sequencer and the plugin unchanged; every bullet of step 1, the
+mechanism arithmetic of both rows, the gap table's frames, fields and
+counts, the frame contents; all 44 grid WAVs equal to `--song` and to the
+latched form, every PSG log byte-identical to `--song`, every field of
+the four saved reports reproduced, the per-row table; unit 1903/1903, the
+cases' texts against their events, the 240-BPM tick frames, D's ticks
+14 / 43 / 72 / 78; the failure frames of the old order (from a model).
+
+*Acted on* (docs and the test; the engine and the renderer unchanged):
+
+- *The scan's window* (reviewer 2): the counts were taken 9 .. 12 frames
+  past the logged frames: 365 / 174 / 381 / 105 / 54 and vs_wild 7, not
+  368 / 176 / 384 / 109 / 56 and 9 (re-run with the window fixed: the
+  same).  Corrected in step 1.
+- *vs_trainer sets MOD* (reviewer 2): LFOS 20 / MOD 7, 6, 0 on its track
+  1 and notes while modulated, all in first ticks, so prediction 4's
+  "no track with mod set" is wrong for it (held for its stated outcome;
+  the prediction is kept as written).  Corrected in step 1.
+- *"Exactly frames 904 .. 944"* (reviewer 2): 40 frames of that span,
+  931 unchanged; and the runs outlive the MOD 0s by up to 5 frames.
+  Corrected.
+- *The gate walk sentence* (reviewer 1): true unlatched only; see the
+  recorded item below.  Corrected.
+- *The test's reach* (both): one track per case, no three-tick frame.
+  Two cases added: E, two tracks with events of both in both ticks of a
+  frame (track 0's MOD from 0 at second tick 24 after track 1's note at
+  23, track 1's note at second tick 43 after track 0's at 42); F, TEMPO
+  320, a MOD from 0 in the third tick of the three-tick frame 18 (two
+  boundaries).  Latched and not; on the old order E fails 105 frames from
+  18, F 83 from 18.  Unit **1907/1907** (1903 + 4).
+
+Gate after the fixes: claim_check 59 diffed, 0 moved, 57/66, 0
+regressions, no row moved; unit 1907/1907, blip 49112/0, songs 561/561;
+the four midi runs 0 field differences on 44 rows against the interleave
+set, every WAV byte-identical.
+
+*Recorded, not acted on* (no corpus row reaches them): latched, a note
+whose note-off falls in a later tick of its own frame (an N01 at tick n
+with n + 1 in the same frame) gets gate 1 and sounds one frame, where
+the ROM's tick-n+1 walk sets STOP and SoundMainRAM kills it unheard; the
+queue's boundaries would let the drain tell the two apart (reviewer 1;
+latched = unlatched on all 44 rows; the reverse, a same-tick note-off
+with the next tick in the next frame, is slice 6's zero-length item);
+the renderer's per-sample counter and the per-event index are covered by
+the harness rows, not by a unit test (`batch_pair` applies the rule
+itself); a host sending more boundaries than the frame has ticks gets
+extra steps (the walker and the accumulator agree, slice 3b; not checked
+without `--gba-start-delay` either); slice 3a's "only three songs have
+two-tick frames" predates the SE rows (history).
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
