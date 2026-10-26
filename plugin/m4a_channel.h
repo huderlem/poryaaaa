@@ -17,7 +17,7 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume);
 void m4a_cgb_channel_start(M4ACGBChannel *ch);                  /* flag CHN_START */
 /* `cursor` is the CPU cycle at which CgbSound reaches this channel; on return
  * it is the cycle at which it moves to the next one.  Register writes are
- * placed at the measured offsets inside that span (docs/ACCURACY_PLAN.md). */
+ * placed at the measured offsets inside that span (docs/ACCURACY.md, appendix A). */
 void m4a_cgb_channel_tick(M4ACGBChannel *ch, uint8_t c15, M4APsg *psg, M4AGbaAudio *gba,
                           int64_t *cursor);
 void m4a_cgb_osc_off(M4ACGBChannel *ch, M4APsg *psg, M4AGbaAudio *gba, int64_t *cursor); /* CgbOscOff */

@@ -339,7 +339,7 @@ def render_poryaaaa(args, t, overlay, out_dir):
         if t["extended"]:
             cmd.append("--extended-clocks")
         if args.midi_quantize:
-            cmd.append("--quantize")         # the MIDI event latch (plan, milestone 5)
+            cmd.append("--quantize")         # the MIDI event latch (docs/ACCURACY.md, "Entry points and the frame latch")
         if args.gba_start_delay:
             cmd.append("--gba-start-delay")  # MIDI time 0 where the ROM starts the song (slice 2a)
         if args.gba_tempo_grid:

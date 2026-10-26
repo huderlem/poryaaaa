@@ -64,20 +64,23 @@ For each claim, in order of expected impact:
 1. Apply it alone.  Rebuild `poryaaaa_render` and `poryaaaa_unit_tests`.
 2. `test/accuracy/tools/accuracy.py`, then `compare_reports.py <current
    baseline> build/accuracy/report.json`.  Every `-inf` must stay `-inf`.
-3. Regression: revert; record it in the plan as rejected by measurement
-   with the numbers.  Neutral and source-verified: adopt, say
-   harness-neutral in the plan.  Improvement: adopt and record the numbers.
+3. Regression: revert; record it in the commit message as rejected by
+   measurement with the numbers.  Neutral and source-verified: adopt, say
+   harness-neutral there.  Improvement: adopt and record the numbers.
+   Whatever changes how the engine works goes into `docs/ACCURACY.md`.
 4. A claim about code outside the stock paths (an extension such as the
    Golden Sun synths, a fallback, a GUI path) is harness-neutral by
    construction; its gate is a unit test that would have caught it.  Write
    that test with the fix.
 5. Claims you decide not to act on (cosmetic, malformed-data edge cases,
-   unmeasurable memory reads) go in the plan too, in one paragraph, so the
-   next review does not re-raise them.
+   unmeasurable memory reads) go in the review commit's message, in one
+   paragraph; one that is a lasting limitation goes into `docs/ACCURACY.md`'s
+   "Known residuals and limitations", so the next review does not re-raise
+   it.
 
 Then refresh the baseline from a full default harness run, re-run
 `poryaaaa_unit_tests`, `poryaaaa_blip_tests` and `poryaaaa_song_tests
-build/accuracy/rom`, and commit the fixes, the plan paragraph and the
+build/accuracy/rom`, and commit the fixes, the doc changes and the
 baseline together.
 
 ## What past reviews got wrong, so you check it

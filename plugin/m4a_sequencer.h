@@ -18,7 +18,7 @@
  * in the same frame clears those flags, so older notes on the track keep the
  * previous volume until the next change.
  *
- * Milestone 1 of docs/ACCURACY_PLAN.md: CLI and harness only.
+ * See docs/ACCURACY.md, "Sequencer (MPlayMain)".
  */
 
 #include "m4a_engine.h"

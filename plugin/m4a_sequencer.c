@@ -236,8 +236,7 @@ static inline uint8_t next_byte(M4ASequencer *s, M4ASeqTrack *t)
 
 /* The timing model's M4A_CYC_* handler costs are ROM-song measurements; a
  * song whose data the ROM keeps in IWRAM (the cry song) saves
- * M4A_CYC_ROM_BYTE per song-data byte the handler reads (plan, "SoundMain
- * timing probe, step 5").  Negative: the correction for n reads. */
+ * M4A_CYC_ROM_BYTE per song-data byte the handler reads (docs/ACCURACY.md, appendix A).  Negative: the correction for n reads. */
 static inline int ram_bytes(const M4ASequencer *s, int n)
 {
     return (s->song && s->song->dataInRam) ? -n * M4A_CYC_ROM_BYTE : 0;
@@ -848,8 +847,8 @@ static void ply_note(M4ASequencer *s, int i, uint8_t cmd)
      * unlinks the channel from whichever track still chains it, through
      * channel->track, with that chain's prev / next (RealClearChain): a
      * channel of this player's own track as before, and a channel another
-     * chained player's track holds -- the cross-player steal of plan step
-     * 12 (a cry over music, frame 62: the cry's ply_note takes a releasing
+     * chained player's track holds -- the cross-player steal (docs/ACCURACY.md,
+     * "Players and chaining"; a cry over music, frame 62: the cry's ply_note takes a releasing
      * BGM channel, NOTE_UNLINK_11 66 + CHAIN_EMPTY 4 = 70) -- is unlinked
      * from that owner's chain at once, so the owner's next walk sees one
      * channel fewer and never meets it as dead.  The same-player path is
@@ -1260,7 +1259,7 @@ void m4a_sequencer_frame(M4ASequencer *s)
      * MPlayMain's control flow; the sum is published as cycles from the
      * SoundMain entry.  A lone player: its entry (the deeper players'
      * paused costs), its body, its exit (the outer players' idle costs and
-     * the tail).  A chain (plan, "Engine: two cry players"): the deepest
+     * the tail).  A chain (docs/ACCURACY.md, "Players and chaining"): the deepest
      * member's entry, each member's body in MPlayOpen order from the
      * previous member's _081DDA6C -- a playing member costs its head
      * (M4A_CYC_MP_SE_HEAD 142) and body, a paused one its idle 63 -- and
@@ -1274,7 +1273,7 @@ void m4a_sequencer_frame(M4ASequencer *s)
         /* players between the two in the chain, none of them attached:
          * paused, M4A_CYC_MP_IDLE each (none between the cry players; the
          * three SE players between BGM and cry 0, SE2 / SE3 between SE1
-         * and cry 0 -- plan step 12's 1007 + (79 + body) per playing
+         * and cry 0 -- the chain rule 1007 + (79 + body) per playing
          * player) */
         cyc(o, (o->player - last->player - 1) * M4A_CYC_MP_IDLE);
         frame_body(o);
@@ -1407,8 +1406,7 @@ int m4a_sequencer_set_player(M4ASequencer *s, int player)
      * each outer player resumes at the deeper player's _081DDA6C.  With the
      * other players paused, the deeper ones cost M4A_CYC_MP_PAUSED (BGM) and
      * M4A_CYC_MP_IDLE each, and the outer ones unwind M4A_CYC_MP_IDLE each
-     * before the M4A_CYC_MP_TAIL to CgbSound.  Measured (plan, "milestone 4
-     * slice 1"): _081DD9BC at 716 / 779 / 842 / 905, _081DDA6C -> CgbSound
+     * before the M4A_CYC_MP_TAIL to CgbSound.  Measured (docs/ACCURACY.md, appendix A): _081DD9BC at 716 / 779 / 842 / 905, _081DDA6C -> CgbSound
      * 370 / 307 / 244 / 181 for BGM / SE1 / SE2 / SE3; every paused frame
      * 1007 whichever player is selected.  Cry 0 (step 5, four cries): body
      * at SE3's _081DDA6C 826, _081DD9BC 968, exit 118; cry 1 by the same

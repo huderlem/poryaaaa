@@ -12,7 +12,7 @@
  * (clock 16777216 Hz, level deltas stamped at a clock that advances one DAC
  * interval per sample, a frame every 2048 cycles).  Both sides of the null
  * test then share one bit-exact resampler and the harness measures only the
- * GBA-side model (docs/ACCURACY_PLAN.md, output-stage decision 2026-10-24).
+ * GBA-side model (docs/ACCURACY.md, "Ground truth and the metric").
  * --native-resampler writes mgba's own blip_buf output (the sinc kernel on
  * desktop builds) instead, for listening checks.  The two modes report
  * different --version strings so the harness caches their references apart.

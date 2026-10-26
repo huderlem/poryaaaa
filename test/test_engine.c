@@ -2793,7 +2793,7 @@ static void test_pcm_dpcm(void)
  * across the block boundary), and the walk ends through the count path
  * at sample 0 whose look-behind is "block -1" (the port decodes a zero
  * block there; the GBA's address wraps out of the cartridge space -- see
- * docs/ACCURACY_PLAN.md, probe step 8). */
+ * docs/ACCURACY.md, "Known residuals and limitations"). */
 static void test_pcm_dpcm_reverse_walk(void)
 {
     printf("Testing the reversed DPCM walk (REV | CMP)...\n");
@@ -3067,7 +3067,7 @@ static void test_mixer_arithmetic(void)
 
 
 /* ------------------------------------------------------------------------
- * Song parser and sequencer (milestone 1 of docs/ACCURACY_PLAN.md)
+ * Song parser and sequencer (docs/ACCURACY.md, "Sequencer (MPlayMain)")
  * ------------------------------------------------------------------------ */
 
 static M4ASong *parse_song_text(const char *text)
@@ -4144,7 +4144,7 @@ static void test_midi_path_modt_tune_lfodl(void)
 
 /* The music players' positions in SoundMain's MPlayMain chain and their
  * track counts (m4a_sequencer_set_player), against the SE probes of
- * milestone 4 slice 1 (build/probe/se_*.txt; docs/ACCURACY_PLAN.md).  With
+ * milestone 4 slice 1 (build/probe/se_*.txt; docs/ACCURACY.md, appendix A).  With
  * the other players paused, mgba puts _081DD9BC at 716 / 779 / 842 / 905
  * and _081DDA6C -> CgbSound at 370 / 307 / 244 / 181 for BGM / SE1 / SE2 /
  * SE3, and CgbSound at 1007 on every frame where the selected player is
@@ -4610,7 +4610,7 @@ static void test_sequencer_xrele(void)
 
 /* One cry, frame by frame, against its probe: Cry_Pidgey (gCryTable 15,
  * 1902 DPCM samples at 10512 Hz) on cry player 0, build/probe/cry_pidgey.txt
- * (plan, "SoundMain timing probe, step 5").  The engine's mixer plays a
+ * (docs/ACCURACY.md, appendix A).  The engine's mixer plays a
  * stand-in sample of the same length and rate, so the channel dies on the
  * same frame as mgba's (14) and the tick's chain walk, the EOT at tick 141
  * (frame 143, the sample long gone) and the finished tick follow. */
@@ -4816,7 +4816,7 @@ static void test_sequencer_xcmd_0D(void)
     free(wd);
 }
 
-/* ply_endtie's walk cost by chain state (plan, probe step 6): +28 when the
+/* ply_endtie's walk cost by chain state (docs/ACCURACY.md, appendix A): +28 when the
  * first chained channel holds the key (measured on cry_jynx_faint's EOT
  * frame: 82 against the empty chain's 54), +18 est. per channel passed
  * over.  Three songs that differ only in the EOT's key, two live channels
@@ -5026,7 +5026,7 @@ static void test_pcm_release_envelope(void)
 
 /* cry_jynx_faint_full (gCryTable 123 with CRY_MODE_FAINT complete: pitch
  * 14440, length 140, release 200) against build/probe/cry_jynx_faint_full.txt
- * (plan, "SoundMain timing probe, step 7"): the sequencer frames are
+ * (docs/ACCURACY.md, "Cries"): the sequencer frames are
  * cry_jynx_faint's (the EOT at 143 finds the chained channel, 1928; FINE
  * unlinks it), and the channel then releases on its own, 18 mixed passes
  * on frames 143..160 and the stop on 161 (the probe's _081DCFB0 stamp). */
@@ -5247,7 +5247,7 @@ static void test_sequencer_cry_two_tracks(void)
     free(wd);
 }
 
-/* cry_bulbasaur_encounter's probe (plan, "SoundMain timing probe, step 9"):
+/* cry_bulbasaur_encounter's probe (docs/ACCURACY.md, "Cries"):
  * the two-track cry on cry player 0.  CgbSound entry (cycles from VBlank
  * line 160): 6792 on frame 3 (the start tick with two tracks and two
  * ply_notes), 1932 with both channels alive, 2025 on frame 47 (the faster
@@ -5333,7 +5333,7 @@ static void test_sequencer_cycles_cry_encounter_chorus(void)
     free(wd);
 }
 
-/* cry_jynx_high_pitch's probe (plan, "SoundMain timing probe, step 10"):
+/* cry_jynx_high_pitch's probe (docs/ACCURACY.md, "Cries"):
  * CRY_MODE_HIGH_PITCH whole (length 50, release 200, pitch 15800, chorus
  * 20, volume 90) on Cry_Jynx, the first EOT that finds a live channel on
  * each of the cry player's two chains.  CgbSound entry (cycles from VBlank
@@ -5428,8 +5428,7 @@ static void test_sequencer_cycles_cry_high_pitch_two_chain(void)
     free(wd);
 }
 
-/* Two cry players on one frame (plan, "SoundMain timing probe, step 11" and
- * "Engine: two cry players"): the first cry on cry player 0 from frame 3,
+/* Two cry players on one frame (docs/ACCURACY.md, "Players and chaining"): the first cry on cry player 0 from frame 3,
  * a second at the defaults started on VBlank F (its tick on frame F + 2)
  * on cry player 1 -- SetPokemonCryTone's first free player -- whose
  * MPlayMain body runs after cry 0's on the same frame.  The engine's
@@ -5595,8 +5594,7 @@ static void test_sequencer_cycles_two_cries(void)
         run_two_cries(&runs[i]);
 }
 
-/* A cry over a sound effect and over music (plan, probe step 12 / slice
- * 9b-i): cry player 0 chained after the song's player -- SE1 (3 tracks) ->
+/* A cry over a sound effect and over music (docs/ACCURACY.md, "Players and chaining"): cry player 0 chained after the song's player -- SE1 (3 tracks) ->
  * cry 0 on engine tracks 3..4, BGM (10) -> cry 0 on 10..11 -- with the
  * paused players between them (SE2 / SE3; SE1 / SE2 / SE3) charged by the
  * chain, so every frame is 1007 + (79 + body) per playing player.  The
@@ -5836,7 +5834,7 @@ static void test_sequencer_cycles_cry_over_song(void)
     m4a_engine_destroy(&engine);
 }
 
-/* The MIDI event latch (plan, milestone 5 slice 1): with quantizeEvents the
+/* The MIDI event latch (docs/ACCURACY.md, "Entry points and the frame latch"): with quantizeEvents the
  * entry points queue and the queue drains at the top of the next tick after
  * the gate walk; off, they apply at once. */
 static int latch_hook_started = -1;
@@ -5856,8 +5854,8 @@ static void latch_hook(M4AEngine *e, void *user)
  * frame before frame 3's SoundMain, the ROM's first song tick.  That rests on
  * the dispatch granularity: after the kept boot and O samples the machine
  * must be past frame 2's SoundMain and short of frame 3's, so an event
- * dispatched there is applied by the first tick, latched or not (plan,
- * milestone 5 slice 2a).
+ * dispatched there is applied by the first tick, latched or not (docs/ACCURACY.md,
+ * the renderer's "as the game" mode).
  */
 static void test_gba_start_delay_origin(void)
 {
@@ -5924,7 +5922,7 @@ static void test_gba_start_delay_origin(void)
  * TEMPO), a tick each time tempoC reaches 150, a TEMPO changing only the next
  * frame's add; grid frame 0 is frame 3.  The event is dispatched at the last
  * sample a blip frame before that frame's SoundMain, the --gba-start-delay
- * origin's rule at every frame (plan, milestone 5 slice 3a).  Without the
+ * origin's rule at every frame (docs/ACCURACY.md, the renderer's "as the game" mode).  Without the
  * flag the renderer passes the grid NULL and every exact sample through.
  */
 static void test_gba_tempo_grid(void)
@@ -6154,8 +6152,7 @@ static void lfo_grid_walker(const int *tempoTick, const uint32_t *tempoUs, int n
  * frame counting from the next frame's add (ply_tempo runs after
  * _081DD86C's add).  Without the two calls the accumulator runs as before:
  * from the boot's tick, the tempo added on the frame it is dispatched
- * before.  A sequencer-driven engine ignores both (plan, milestone 5 slice
- * 3b).
+ * before.  A sequencer-driven engine ignores both (docs/ACCURACY.md, the renderer's "as the game" mode).
  */
 static void test_engine_lfo_grid(void)
 {
@@ -6318,8 +6315,8 @@ static void lfo_order_frame(M4AEngine *e, float *outL, float *outR)
  * Without a sequencer the frame's LFO steps (and portamento, PWM) run before
  * CgbSound, as MPlayMain does in SoundMain: a square's vibrato pitch set by a
  * frame's LFO step is in NR13 / NR14 after that frame's CgbSound, and a
- * tremolo step's volume change is written (NR12) in the same frame (plan,
- * milestone 5 slice 4; before it, one frame later).  The sequencer path,
+ * tremolo step's volume change is written (NR12) in the same frame (docs/ACCURACY.md,
+ * "Rules for every source").  The sequencer path,
  * whose MPlayMain runs in the frame hook, was already in this order.
  */
 static void test_lfo_cgbsound_order(void)
@@ -6610,7 +6607,7 @@ static int cgb_entry_pair(const char *text, const ToneData *voices, const CgbEnt
 }
 
 /*
- * The CgbSound entry on the MIDI path (plan, milestone 5 slice 5): with a
+ * The CgbSound entry on the MIDI path (docs/ACCURACY.md, the renderer's "as the game" mode): with a
  * timing-only sequencer over the song mid2agb makes of the MIDI (here the
  * song's text itself), the MIDI path's CgbSound starts on the cycle the
  * sequencer path's does and its PSG writes land on the same cycles, frame
@@ -6935,8 +6932,7 @@ static int batch_pair(const char *text, const ToneData *voices, const CgbEntryEv
 }
 
 /*
- * Per-tick command batching and ply_fine on the MIDI path (plan, milestone 5
- * slice 6): a VOL / PAN / BEND before a note in the same tick reaches only
+ * Per-tick command batching and ply_fine on the MIDI path (docs/ACCURACY.md, "Rules for every source"): a VOL / PAN / BEND before a note in the same tick reaches only
  * the new note (ply_note drops the track's pending VOLCHG / PITCHG), a
  * releasing note keeps its old value until the next change; a VOL on a tick
  * without a note reaches every channel of the track (the frame's pass); a
@@ -7076,8 +7072,7 @@ static void test_tick_batching_midi_path(void)
 }
 
 /*
- * The two-tick-frame LFO interleave on the MIDI path (plan, milestone 5
- * slice 7): in a frame with two song ticks MPlayMain runs tick n's commands
+ * The two-tick-frame LFO interleave on the MIDI path (docs/ACCURACY.md, the renderer's "as the game" mode): in a frame with two song ticks MPlayMain runs tick n's commands
  * and each track's LFO step before tick n + 1's commands.  With the
  * renderer's tick boundaries (m4a_engine_tick_boundary, batch_pair) the same
  * material through the MIDI path and a sequencer song leaves every channel

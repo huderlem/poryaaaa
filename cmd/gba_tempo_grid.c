@@ -1,6 +1,6 @@
 /*
  * gba_tempo_grid - the ROM's song-tick grid for poryaaaa_render --midi
- * (see gba_tempo_grid.h; plan, milestone 5 slice 3a).
+ * (see gba_tempo_grid.h; docs/ACCURACY.md, the renderer's "as the game" mode).
  */
 #include <math.h>
 #include "m4a_engine.h"

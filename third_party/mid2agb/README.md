@@ -4,7 +4,7 @@ pokeemerald's `tools/mid2agb` (commit 962442a51e25cb8d5c1c11460d42e0b3325059b4,
 MIT, see LICENSE) as a library for `poryaaaa_render --gba-tempo-grid`, which
 converts the MIDI it plays to the song bytes the ROM would play, for the
 SoundMain timing model's CgbSound entry on the MIDI path
-(docs/ACCURACY_PLAN.md, "Milestone 5 slice 5").
+(docs/ACCURACY.md, the renderer's "as the game" mode).
 
 Changes from upstream, each marked `poryaaaa` in the source:
 

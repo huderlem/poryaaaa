@@ -1,6 +1,6 @@
 /*
  * gba_tempo_grid - the ROM's song-tick grid for poryaaaa_render --midi
- * (--gba-tempo-grid; plan, milestone 5 slice 3a).
+ * (--gba-tempo-grid; docs/ACCURACY.md, the renderer's "as the game" mode).
  *
  * MPlayMain adds tempoI to tempoC once per frame and plays one tick of every
  * track while tempoC >= 150, subtracting 150 each time (m4a_1.s _081DD86C ..

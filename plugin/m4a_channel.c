@@ -218,8 +218,7 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
  * advances by the cost of each segment of the C code's control flow, as
  * measured in mgba between breakpoints placed on the compiled function
  * (test/accuracy/ref/mgba_probe.c CgbSound_* labels; tables from
- * test/accuracy/tools/probe_cgb.py; docs/ACCURACY_PLAN.md "SoundMain timing
- * probe, step 3").  The hardware is run up to each write (m4a_gba_run) and
+ * test/accuracy/tools/probe_cgb.py; docs/ACCURACY.md, appendix A).  The hardware is run up to each write (m4a_gba_run) and
  * the write is preceded by the DAC catch-up mgba performs in GBAAudioSample
  * (m4a_gba_catch_up), so a level change lands on the same 65536 Hz slot it
  * does in mgba.  The segment costs are the CGB_CYC_* constants below, named

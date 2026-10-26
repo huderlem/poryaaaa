@@ -23,7 +23,7 @@
  * (mgba_render's --id2 / --start-frame2; start frame 0 = none); the
  * seventeenth and eighteenth start a third cry the same way (mgba_render's
  * --id3 / --start-frame3; with both cry players busy SetPokemonCryTone
- * replaces the player with the larger clock, plan step 13).  Filter FIFO
+ * replaces the player with the larger clock; docs/ACCURACY.md, "Cries").  Filter FIFO
  * writes (040000A0/A4) out of the log to
  * see the rest.  `player` (eighth argument, default gMPlayInfo_BGM) names
  * the MusicPlayerInfo symbol whose track flags and tempoC the `.frames`

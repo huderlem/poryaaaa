@@ -4,7 +4,7 @@ Compares a rendering under test against an mgba reference at the same sample
 rate: time-aligns the two by cross-correlation, then reports the RMS of the
 difference relative to the reference, in dB, over the whole file and over the
 worst one-second window (the perceptual-null criterion from
-docs/ACCURACY_PLAN.md). Metrics are computed twice: raw, and after a single
+docs/ACCURACY.md). Metrics are computed twice: raw, and after a single
 least-squares gain match (reported separately so scale errors can be told
 apart from waveform errors; the gate uses the raw numbers).
 """

@@ -295,7 +295,7 @@ if(UNIX AND NOT APPLE)
     endforeach()
 endif()
 
-# ---- Accuracy harness (optional; see docs/ACCURACY_PLAN.md, test/accuracy/README.md) ----
+# ---- Accuracy harness (optional; see docs/ACCURACY.md, test/accuracy/README.md) ----
 # Enabled only when the pokeemerald tree (with agbcc and its tools built) and an
 # mgba source tree with build/libmgba-static.a are provided:
 #   cmake -B build -DACCURACY_POKEEMERALD_DIR=~/pokeemerald -DACCURACY_MGBA_DIR=~/mgba

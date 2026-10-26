@@ -960,7 +960,7 @@ static void psg_log_cb(void *user, uint32_t reg, uint32_t value)
  * track (the engine's: the sequencer's track on --song, the SMF track on
  * --midi), velocity, envelope volume, right / left volume (ChnVolSetAsm),
  * envelope right / left and frequency.  For comparing the two paths frame
- * by frame (plan, milestone 5 slice 6). */
+ * by frame (docs/ACCURACY.md, "Probe and debug logs"). */
 static FILE *sPcmLog;
 static void pcm_log_cb(M4AEngine *engine, void *user)
 {
@@ -1097,7 +1097,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
         printf("  Second cry: StartCry on VBlank %d (its first tick on engine frame %d), cry player 1 if the first still plays\n",
                startFrame2, startFrame2 + 2);
     } else if (song2) {
-        /* A cry over a sound effect or a song (plan, step 12): cry player 0
+        /* A cry over a sound effect or a song (docs/ACCURACY.md, "Players and chaining"): cry player 0
          * chained after the song's player -- BGM (10 tracks) -> cry 0 on
          * engine tracks 10..11, SE1 (3) -> cry 0 on 3..4 -- its body after
          * the song's on the same frame, the paused players between them
@@ -1422,7 +1422,7 @@ static int cmp_render_event_pos(const void *a, const void *b)
 
 /*
  * --gba-tempo-grid: the song mid2agb makes of the MIDI, for the CgbSound
- * entry (plan, milestone 5 slice 5).  A timing-only sequencer runs MPlayMain over
+ * entry (docs/ACCURACY.md, the renderer's "as the game" mode).  A timing-only sequencer runs MPlayMain over
  * it cost for cost and publishes the entry; the MIDI path plays the events
  * as before.  Options: -E (the MIDI path's notes end at their note-off, an
  * exact gate), -X with --extended-clocks, -V with --song-volume; the
@@ -1455,7 +1455,7 @@ static M4ASong *load_timing_song(const char *midiPath, bool extendedClocks, int 
  * past sample s's cycle, since m4a_engine_process runs it until the blip
  * holds the samples; an event at MIDI time 0 must still precede that
  * SoundMain, so the origin is the last sample a blip frame before it
- * (2522 at 48 kHz, dispatched at cycle 882538; plan, milestone 5 slice 2a).
+ * (2522 at 48 kHz, dispatched at cycle 882538; docs/ACCURACY.md, the renderer's "as the game" mode).
  * ROM_FIRST_TICK_CYCLE is in gba_tempo_grid.h.
  */
 static uint64_t gba_start_delay_samples(double sampleRate)
@@ -2312,7 +2312,7 @@ oom:
     /* Keep the boot's output so MIDI and compiled-song renders of the same
      * material line up with each other and with an emulator recording. */
     m4a_engine_boot(&engine, true);
-    /* The frame latch (plan, milestone 5): events wait for the next tick. */
+    /* The frame latch (docs/ACCURACY.md, "Entry points and the frame latch"): events wait for the next tick. */
     m4a_engine_set_quantize_events(&engine, quantize);
     if (quantize)
         printf("MIDI events latched to the VBlank tick (--quantize)\n");
@@ -2373,7 +2373,7 @@ oom:
 
         samplePos = evPos;
         /* A later tick of the frame: MPlayMain runs each earlier tick's LFO
-         * steps before this tick's commands (plan, milestone 5 slice 7). */
+         * steps before this tick's commands (docs/ACCURACY.md, the renderer's "as the game" mode). */
         if (evPos != boundarySample) {
             boundarySample = evPos;
             boundariesSent = 0;

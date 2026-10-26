@@ -190,8 +190,7 @@ typedef struct {
     uint8_t priority;
     uint8_t currentProgram; /* last program_change index (0-127) */
     ToneData currentVoice;  /* current instrument */
-    /* Per-tick command batching on the MIDI path (plan, milestone 5 slice
-     * 6): a VOL / PAN / BEND / BENDR / TUNE / MODT / clear_modM and an LFO
+    /* Per-tick command batching on the MIDI path (docs/ACCURACY.md, "Rules for every source"): a VOL / PAN / BEND / BENDR / TUNE / MODT / clear_modM and an LFO
      * step only flag the track, as ply_vol & co. do -- its pending
      * MPT_FLG_VOLCHG / PITCHG (M4A_TRK_VOLCHG / PITCHG).  A note that takes
      * a channel drops them (ply_note's flags &= 0xF0); MPlayMain's VOLCHG /
@@ -548,24 +547,23 @@ struct M4AEngine {
      * CgbSound entry this frame.  The sequencer's frame hook sets it from
      * the work MPlayMain did (M4A_CYC_* below), a timing-only sequencer's
      * (m4a_sequencer_init_timing) from the work MPlayMain would do for its
-     * song; without either the steady one-track value applies.  See docs/ACCURACY_PLAN.md,
-     * "SoundMain timing probe". */
+     * song; without either the steady one-track value applies.  See docs/ACCURACY.md,
+     * "SoundMain timing model". */
     int32_t cgbEntryCycles;
     int64_t soundMainStamp;      /* cycle of the current SoundMain (-1 outside one) */
     };
 
 /*
  * SoundMain timing model, measured in mgba 0.10.5 on the accuracy test ROM
- * (test/accuracy/ref/mgba_probe.c; docs/ACCURACY_PLAN.md, "SoundMain timing
- * probe").  Cycles relative to the start of VBlank line 160 unless noted.
+ * (test/accuracy/ref/mgba_probe.c; docs/ACCURACY.md, "SoundMain timing
+ * model" and appendix A).  Cycles relative to the start of VBlank line 160 unless noted.
  */
 #define M4A_CYC_SOUNDMAIN_ENTRY    197   /* SoundMain entered (m4aSoundMain +185) */
 #define M4A_CYC_CGB_ENTRY_PAUSED   1007  /* CgbSound entry, BGM player paused */
 #define M4A_CYC_CGB_ENTRY_BASE     1396  /* CgbSound entry, playing, no tempo tick ... */
 #define M4A_CYC_PER_TRACK          6     /* ... + 6 per existing track */
 /*
- * MPlayMain, segment by segment (docs/ACCURACY_PLAN.md, "SoundMain timing
- * probe, step 3": every number is the measured delta between two of
+ * MPlayMain, segment by segment (docs/ACCURACY.md, appendix A: every number is the measured delta between two of
  * m4a_1.s's labels; "est." marks a path the corpus never took, estimated
  * from the neighbouring measured path and the instruction difference).
  * The sequencer (m4a_sequencer.c) sums these while it runs MPlayMain's
@@ -578,7 +576,7 @@ struct M4AEngine {
  * SE2, SE3 and the cry players unwind.  With the other players paused, a
  * player p (gMPlayTable index) starts its body at the deeper player's
  * _081DDA6C: BGM at its entry 566, SE1 at 637, SE2 at 700, SE3 at 763
- * (docs/ACCURACY_PLAN.md, "milestone 4 slice 1": measured on the SE corpus,
+ * (docs/ACCURACY.md, appendix A: measured on the SE corpus,
  * every frame).  m4a_sequencer_set_player derives the per-player values. */
 #define M4A_CYC_MP_BGM_ENTRY       566   /* BGM MPlayMain entry (first entry 291, five idle entries 55 apart) */
 #define M4A_CYC_MP_HEAD            150   /* BGM: entry -> FadeOutBody 96 -> _081DD9BC 54 */
@@ -590,7 +588,7 @@ struct M4AEngine {
 #define M4A_CYC_MP_EXIT            (5 * M4A_CYC_MP_IDLE + M4A_CYC_MP_TAIL)   /* BGM: 370 */
 /* The cry players (gPokemonCryMusicPlayers, two tracks each) follow SE3 in
  * the chain: cry 0 starts its body at SE3's _081DDA6C 826 and exits in
- * 63 + 55 = 118, measured on four cries (plan, "step 5"); cry 1 (entry
+ * 63 + 55 = 118, measured on four cries (docs/ACCURACY.md, appendix A); cry 1 (entry
  * 889, exit 55) follows from the same rule, unmeasured. */
 #define M4A_CYC_TICK_ALL_DONE      24    /* _081DD9A4 -> _081DDA6C when no track exists any more (clock++, status = PAUSE) */
 /* The VOLCHG/PITCHG pass over the player's trackCount tracks (also the
@@ -661,7 +659,7 @@ struct M4AEngine {
 /* Song data in IWRAM (gPokemonCrySongs: the cry song, M4ASong.dataInRam):
  * every song-data byte MPlayMain reads costs this less than from ROM
  * (WS0 3/1 with prefetch).  Measured on seven label pairs, ROM song vs
- * cry (plan, "SoundMain timing probe, step 5"): the command fetch 21 / 14,
+ * cry (docs/ACCURACY.md, appendix A): the command fetch 21 / 14,
  * ply_vol 89 / 82, ply_pan 91 / 84, ply_voice 184 / 177, ply_goto 110 / 82
  * (four bytes), ply_xcmd -> sub-handler 61 / 54, ply_note with key and
  * velocity 114 / 93 (three reads).  The M4A_CYC_* handler costs are ROM
@@ -847,7 +845,7 @@ void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex);
  * silences: the events after it in the same frame keep their order. */
 void m4a_engine_all_sound_off(M4AEngine *engine);
 
-/* The MIDI event latch (plan, milestone 5): on, the event entry points
+/* The MIDI event latch (docs/ACCURACY.md, "Entry points and the frame latch"): on, the event entry points
  * queue and the queue drains at the top of the next tick, after the gate
  * walk and before the CgbSound passes, the LFO and the mixer's envelope
  * step -- the frame edge a GBA note can start on.  A latched note-off that
@@ -923,7 +921,7 @@ void m4a_engine_set_song_volume(M4AEngine *engine, uint8_t volume);
  * (24 ticks per quarter note at ~59.7 Hz VBlank gives BPM ≈ tempoI). */
 void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm);
 
-/* poryaaaa_render --gba-tempo-grid (plan, milestone 5 slice 3b): the LFO
+/* poryaaaa_render --gba-tempo-grid (docs/ACCURACY.md, the renderer's "as the game" mode): the LFO
  * clock on the ROM's tick grid.  start_song_tempo is MPlayStart's seed
  * (tempoI 150, tempoC 0, nothing held), called at the song's origin before
  * frame 3's SoundMain; set_tick_tempo is a TEMPO played in the coming tick
@@ -932,7 +930,7 @@ void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm);
  * sequencer drives the engine; the plugin uses set_tempo_bpm. */
 void m4a_engine_start_song_tempo(M4AEngine *engine);
 void m4a_engine_set_tick_tempo(M4AEngine *engine, uint16_t tempoI);
-/* poryaaaa_render --gba-tempo-grid (plan, milestone 5 slice 7): the frame's
+/* poryaaaa_render --gba-tempo-grid (docs/ACCURACY.md, the renderer's "as the game" mode): the frame's
  * next song tick starts here.  In a frame with two ticks MPlayMain runs tick
  * n's commands and each track's LFO step before tick n + 1's commands; the
  * host calls this between the two ticks' events, and the LFO step of the

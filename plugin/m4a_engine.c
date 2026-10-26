@@ -330,7 +330,7 @@ static ToneData *resolve_voice(ToneData *voice, uint8_t key)
  * 124773 + (k - 1) * 280896 cycles.  m4aSoundInit's own register writes
  * (SoundInit, two SampleFreqSet passes that each wait for line 159) and the
  * first interrupt the game catches (frame 2's) are replayed by
- * m4a_engine_boot from the same measurements; see docs/ACCURACY_PLAN.md.
+ * m4a_engine_boot from the same measurements; see docs/ACCURACY.md, "mgba's audio path".
  */
 #define FRAME1_START        124773
 #define VSYNC_FRAME_OFFSET  (150 * GBA_CYCLES_PER_LINE + 250)
@@ -1529,7 +1529,7 @@ static inline void refresh_volumes(M4AEngine *engine, M4ATrack *track, int track
 /* MPlayMain's VOLCHG / PITCHG pass (_081DD9C8 .. _081DDA62) for the MIDI
  * path: after the frame's ticks, each flagged track's TrkVolPitSet, then
  * ChnVolSetAsm (VOLCHG) and the frequency (PITCHG) on every channel it
- * still owns, releasing ones included (plan, milestone 5 slice 6). */
+ * still owns, releasing ones included (docs/ACCURACY.md, "Rules for every source"). */
 static void track_change_pass(M4AEngine *engine)
 {
     for (int i = 0; i < MAX_TRACKS; i++) {
@@ -2187,7 +2187,7 @@ void m4a_engine_tick(M4AEngine *engine)
     /* The rest of MPlayMain without a sequencer: the frame's LFO steps
      * (tempo loop), the VOLCHG / PITCHG pass, then portamento and PWM, all
      * before CgbSound as in SoundMain, so a CGB pitch / volume / duty they
-     * set is written by this frame's CgbSound (plan, milestone 5 slice 4). */
+     * set is written by this frame's CgbSound (docs/ACCURACY.md, "Rules for every source"). */
     if (!seq)
         mplay_main_tail(engine);
 

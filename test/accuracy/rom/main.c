@@ -89,7 +89,7 @@ static void StartCry(u16 index, s8 pan, u8 volume, s16 pitch, u16 length, u8 rel
  * steady-state loop: mgba's ordering of a timer-0 overflow against the DAC
  * slot it coincides with depends on the timer's start cycle, and two extra
  * prologue instructions (6 cycles before m4aSoundInit) once moved every
- * DirectSound reference (plan, probe step 11). */
+ * DirectSound reference (docs/ACCURACY.md, "Working rules": the ROM boot-path rule). */
 static void StartTest(void)
 {
     u32 frame;

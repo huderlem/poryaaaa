@@ -7,8 +7,15 @@ description: Run and interpret the poryaaaa-vs-mgba null-test harness (test/accu
 
 Ground truth is mgba 0.10.5 playing a test ROM built from pokeemerald's m4a
 engine; poryaaaa renders the same material and `test/accuracy/tools/accuracy.py`
-reports the null depth. Plan and decisions: `docs/ACCURACY_PLAN.md` (treat
-as settled). Details: `test/accuracy/README.md`.
+reports the null depth. How the harness and the engine work, the rules
+behind each port and the known residuals: `docs/ACCURACY.md` (treat as
+settled; the old engineering log `docs/ACCURACY_PLAN.md` is in git history
+up to 8654e9c). Details: `test/accuracy/README.md`.
+
+**Where results go.**  A durable fact (a mechanism, a measured constant,
+a rule, a limitation) is written into `docs/ACCURACY.md` in its place;
+the change's measurements, predictions and rejected or not-acted-on
+claims go in the commit message.
 
 ## Run
 
@@ -28,79 +35,39 @@ test/accuracy/tools/accuracy.py --committed-refs   # no mgba build needed, micro
 build/poryaaaa_song_tests build/accuracy/rom       # .s parser vs ROM, byte for byte
 ```
 
-`--input song` (default since the sequencer milestone) plays
+`--input song` (the default) plays
 `build/accuracy/rom/{micro,songs}/<name>.s` through `poryaaaa_render --song`,
 so poryaaaa and mgba consume byte-identical song data; `--input midi` plays
 the MIDI with the mid2agb options as flags (cries and the cry-over rows are
-skipped: no MIDI).  `--midi-quantize` adds `poryaaaa_render --quantize`,
-the MIDI event latch (milestone 5 slice 1: note on / off, CC, program,
-bend, XCMD applied at the top of the next VBlank tick, in arrival order,
-after the gate walk; a note-off latched into the same frame as its note-on
-gives the GBA's one-tick note).  Every midi run passes `poryaaaa_render
---gba-start-delay` (slice 2a; the renderer's own default is off, and
-`--no-gba-start-delay` runs the harness without it): MIDI time 0 where
-the ROM starts the song, frame 3's SoundMain (883882 cycles), every event dispatched 2522 samples
-later at 48 kHz -- the last sample a blip frame (2048 cycles) before that
-SoundMain, since the machine sits up to a blip frame past a sample's cycle
-when the sample is dispatched; the nominal 2529 would start every first
-note on frame 4.  It also passes `poryaaaa_render --gba-tempo-grid`
-(slice 3a, the renderer's default off; `--no-gba-tempo-grid` leaves it
-out): each MIDI tick on the frame MPlayMain's tempoC / 150 plays it.
+skipped: no MIDI).  Every midi run passes `--gba-start-delay` and
+`--gba-tempo-grid` (the renderer's "as the game" mode: MIDI time 0 on
+frame 3's SoundMain, each tick on the ROM's tempoC / 150 frame, plus what
+that mode brings -- the LFO clock on the grid, the timing-only sequencer's
+CgbSound entry, track ends, tick boundaries); `--no-gba-start-delay` /
+`--no-gba-tempo-grid` leave them out, and `--midi-quantize` adds
+`--quantize`, the frame latch.  How each of these works:
+`docs/ACCURACY.md`, "The MIDI path".
+
 **The midi-input reports are their own baseline family**
-(`baselines/<date>_midi-path-*.json`, the report's `"input"` field says
-`midi`; `"midi_quantize"`, `"gba_start_delay"` and `"gba_tempo_grid"` say
-which form).  **The midi baseline is the interleave set** (slice 7):
+(`baselines/<date>_midi-path-*.json`; the report's `"input"`,
+`"midi_quantize"`, `"gba_start_delay"` and `"gba_tempo_grid"` fields say
+which form).  The current midi baseline is the interleave set:
 `2026-10-26_midi-path-interleave.json` / `-interleave-latch.json` for the
 runner's default (43/44), `-interleave-aligned` / `-interleave-aligned-latch`
-for `--no-gba-tempo-grid` (12/44); the earlier `midi-path-start`,
-`-aligned`, `-tempo-grid`, `-lfo-grid`, `-lfo-order`, `-cgb-entry` and
-`-batching` sets are history.  Never compare a midi
-report against a song-input baseline with `compare_reports.py`, and
-never save a midi run as the song-input baseline.  What the MIDI path's
-flags remove: the time origin (`--gba-start-delay`; without it an event
-lands 3 .. 4 frames early) and the tempo grid (`--gba-tempo-grid`:
-every tick on the ROM's tempoC / 150 frame, drift 0.0 on the songs but
-groudon, which does not correlate; slice 3b also puts the engine's own
-LFO clock on that grid -- a TEMPO counts from the next frame's add, as
-ply_tempo's -- which needs the start delay too).  Without a sequencer the
-engine runs the frame's LFO steps, portamento and PWM before CgbSound,
-as SoundMain does (slice 4, the plugin included).  With
-`--gba-tempo-grid` the renderer also converts the MIDI with mid2agb
-itself (`third_party/mid2agb`, `-E`, text identical to the harness's
-`.s` on all 560 MIDIs) and runs a **timing-only sequencer**
-(`m4a_sequencer_init_timing`) over that song: MPlayMain cost for cost on
-the MIDI engine's channel liveness, published as the CgbSound entry --
-the ROM's on every frame of all 44 rows (slice 5); `--player` and
-`--seq-log` then apply on `--midi` too (entry_diff etc. read it).
-Without the grid (the aligned pair, the plugin, by decision) the entry
-stays the fixed one-track no-tick value.  The engine batches a tick's
-commands as MPlayMain does, for every source, the plugin included
-(slice 6): a VOL / PAN / BEND / BENDR / TUNE / MODT / clear_modM / LFO
-step only flags the track (`M4ATrack.chgFlags`), a note that takes a
-channel drops the flags (ply_note's `flags &= 0xF0`), and the frame's
-VOLCHG / PITCHG pass (`track_change_pass`, after the LFO steps) applies
-what is left to every channel the track owns; the renderer ends each
-track where mid2agb writes FINE (`m4a_engine_track_end`: the later of
-the MTrk's and the first MTrk's end-of-track, songs without a loop
-only).  In a frame with two ticks the ROM steps tick n's LFO before tick
-n + 1's commands: with the grid the renderer sends
-`m4a_engine_tick_boundary` before the first event of each later tick of
-a frame (the walker's `gba_tempo_grid_tick_in_frame`), which runs that
-step among the events, latched like them (slice 7; the plugin never
-calls it, by decision: it cannot know a frame's ticks).  What is left,
-each against the row's own `--song` render: all 44 grid WAVs are that
-render sample for sample, every PSG write of every row on its `--song`
-cycle, register and value; se_rain_stop fails at its `--song` value
-(1c).
-`--pcm-log <file>` dumps every DirectSound channel after each SoundMain
-(status, keys, track, velocity, envelope, volumes, frequency) on both
-paths: compare the two renders frame by frame and channel by channel,
-without the track number (the paths number tracks differently).  `--psg-log` works
-with `--midi`:
-log both renders and compare them **frame by frame** (each frame's
-ordered (register, value) list); a whole-log sequence match pairs
-repetitive vibrato writes frames apart.  Plan, "Milestone 5 slice 1"
-through "slice 7".
+for `--no-gba-tempo-grid` (12/44); older `midi-path-*` sets are history.
+Never compare a midi report against a song-input baseline with
+`compare_reports.py`, and never save a midi run as the song-input
+baseline.  In the default form every grid WAV is its row's `--song`
+render sample for sample; the aligned pair (no grid) is the stand-in for
+the plugin and differs from the ROM by design.
+
+Debugging a MIDI-path row: render it both ways with `--pcm-log` (every
+DirectSound channel after each SoundMain) and `--psg-log` (both work on
+`--midi`; `--seq-log` too under the grid) and compare the logs **frame by
+frame** -- each frame's ordered (register, value) list, then the cycles
+in the equal frames; PCM channel by channel without the track number (the
+paths number tracks differently).  A whole-log sequence match pairs
+repetitive vibrato writes frames apart.
 
 Output: a table on stdout and `build/accuracy/report.json`. poryaaaa WAVs and
 logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-mgba>/`.
@@ -115,7 +82,7 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
   much better than raw, the error is a level offset, not a waveform error.
 - `lag ms`: alignment applied to poryaaaa's render, chosen as the lag with
   the deepest raw null among the envelope-correlation estimate and the top
-  waveform cross-correlation peaks. Since the output stage (milestone 2)
+  waveform cross-correlation peaks. Since the output stage became cycle-based
   it is 0.0 ms on every test and song: the engine reproduces the ROM's
   start-up timing itself. A nonzero lag now means the waveforms do not
   correlate (e.g. a pure-PSG song whose CgbSound write timing is off);
@@ -125,7 +92,7 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
   test -- unless the song does not correlate at all (null around 0 dB, e.g.
   pure-PSG mus_weather_groudon today), in which case the drift is noise.
 - `ref` / `test`: RMS level in dBFS. A constant offset across all tests is
-  the output-scale problem, see the plan.
+  the output-scale problem (`docs/ACCURACY.md`: there is no gain knob).
 
 ## Workflow for an engine change
 
@@ -134,20 +101,20 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
 2. Make the change, rebuild `poryaaaa_render`, run again.
 3. `test/accuracy/tools/compare_reports.py test/accuracy/baselines/<latest>.json build/accuracy/report.json`
    flags regressions over 1 dB.
-4. When a milestone lands (and again after its review fixes, so the next
+4. When a change lands (and again after its review fixes, so the next
    agent's "reproduces exactly" check holds), save both the report and the
-   table, then record the numbers in the plan's status section.
+   table, and give the numbers in the commit message.
    `report.json` is whatever the **last** run wrote, so run the default
    harness immediately before copying (a `--tests` or `--input midi` run
    in between produces a two-test or a midi-input baseline; this happened
    once):
    ```sh
    test/accuracy/tools/accuracy.py > /tmp/full.txt
-   cp build/accuracy/report.json test/accuracy/baselines/<date>_<milestone>.json
+   cp build/accuracy/report.json test/accuracy/baselines/<date>_<name>.json
    grep -vE '^columns|^  null|^  gm|^report' /tmp/full.txt \
-       > test/accuracy/baselines/<date>_<milestone>.txt
+       > test/accuracy/baselines/<date>_<name>.txt
    test/accuracy/tools/compare_reports.py test/accuracy/baselines/<previous>.json \
-       test/accuracy/baselines/<date>_<milestone>.json   # sanity: all 38 rows present
+       test/accuracy/baselines/<date>_<name>.json   # sanity: every row present
    ```
 
 ## Testing a review claim or a constant change
@@ -167,11 +134,11 @@ candidate:
    affected tests; the harness is insensitive to writes that repeat a
    register's value, the diff is not.
 4. Regression: revert and record the claim as "rejected by measurement" in
-   the plan with the numbers. Neutral but source-verified (e.g. an ordering
+   the commit message with the numbers. Neutral but source-verified (e.g. an ordering
    rule read from mgba): adopt and say it was harness-neutral.
 5. A claim that improves most tests but costs one `-inf` is **wrong**, not
    "mostly right": the -inf tests are the ones whose data you can check
-   byte for byte.  The mixer milestone's look-ahead byte did exactly this
+   byte for byte.  The mixer port's look-ahead byte once did exactly this
    (12 tests gained 6 dB, pcm_adsr and pcm_bass lost -inf) because the rule
    was reasoned from the converter's source instead of read from the ROM;
    the ROM gave the right rule in one step (next section).
@@ -198,8 +165,8 @@ Micro-voice symbols are in `test/accuracy/rom/accuracy_micro.inc`
 (`DirectSoundWaveData_*`, `Cry_*`, `ProgrammableWaveData_*`).  Do this
 *before* editing the loader; it is six lines and replaces a harness
 round-trip.  What the ROM holds for the look-ahead byte, the DPCM block
-tails and the headers is recorded in docs/ACCURACY_PLAN.md ("Done: engine
-milestone 3").
+tails and the headers is in `docs/ACCURACY.md` ("Mixer", "Samples and the
+voicegroup loader").
 
 
 ## PSG write timing: probe, log, diff
@@ -240,7 +207,7 @@ cat >> build/probe/syms.nm <<'EOF2'
 EOF2
 ```
 (addresses of the 2026-10-25 ROM with the third-cry parameters, CgbSound
-at 0x80010ac: slice 10a's StartTest grew main.c by 0x30 bytes and every ROM
+at 0x80010ac: the third-cry StartTest grew main.c by 0x30 bytes and every ROM
 symbol from AgbMain on moved by +0x30 with the bodies unchanged -- the
 2026-10-25 ROM with the second-cry parameters had CgbSound at 0x800107c and
 each label 0x30 lower, the one with the cry chorus parameter 0x800103c, the
@@ -255,7 +222,7 @@ cycles and, through mgba's ordering of a timer overflow against the DAC
 slot it coincides with, every DirectSound reference -- while the probe's
 `.frames` and lateness stayed put.  Before the harness, render pcm,
 pcm_cmp and cry_bulbasaur with `mgba_render` on the new ROM and `cmp` them
-against the current references (plan, probe step 11).  The
+against the current references (`docs/ACCURACY.md`, "Working rules").  The
 ELF and map the CMake target writes are `build/accuracy/rom/accuracy_test.elf`
 / `.map`; `test/accuracy/rom/build/` is only a stale hand build if it
 exists, do not read symbols from it.)  The map still works for the function
@@ -333,8 +300,8 @@ delta is that handler plus MPlayMain's dispatch of the next command, so it
 is the right per-command cost; the last delta before CgbSound also holds
 MPlayMain's tail. Write offsets inside CgbSound are read from a frame where
 the channel is the first active one (subtract the 120 prologue and 41 per
-inactive channel before it). Record every new number in the plan's probe
-section before using it, and never fit a constant to the harness.
+inactive channel before it). Record every new number in `docs/ACCURACY.md`
+(appendix A) before using it, and never fit a constant to the harness.
 
 Never run `--update-refs` to make numbers better. References change only
 when the ROM changes (micro MIDIs, `accuracy_micro.inc`, ROM sources) or
@@ -385,8 +352,8 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   argument (`symbol[N]` = N * 0x40 past the symbol) makes the `.frames`
   summary read that player, `probe_mplay.py --player CRY1` prints its run.
   Frame with both playing = 1007 + (79 + body) per playing player, cry 1's
-  body after cry 0's (plan, step 11).  poryaaaa: `poryaaaa_render --cry N
-  --cry2 M --cry2-start-frame F` (slice 8b-i: a second sequencer chained
+  body after cry 0's (`docs/ACCURACY.md`, "Players and chaining").  poryaaaa: `poryaaaa_render --cry N
+  --cry2 M --cry2-start-frame F` (a second sequencer chained
   after cry 0's, on engine tracks 2..3, its own template copy and
   voicegroup, the first free cry player, both busy refused); one
   `--seq-log` carries both players and `entry_diff` / `cmd_diff` /
@@ -394,8 +361,8 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   engine index, 2 / 3 for cry 1).  The two probed runs are `--cry 0
   --cry2 15 --cry2-start-frame 20` (3 s, `cry_second_bulbasaur_pidgey`)
   and `--cry 123 --cry2 381 --cry2-start-frame 60` (4 s,
-  `cry_second_jynx_wailord`), the corpus entries of the same names
-  (slice 8b-ii): a cry entry's optional `"id2"` / `"start_frame2"` pair
+  `cry_second_jynx_wailord`), the corpus entries of the same names:
+  a cry entry's optional `"id2"` / `"start_frame2"` pair
   (both or neither, as `mgba_render` names them) is the second cry's
   gCryTable index at the defaults and the VBlank it starts on; the runner
   passes `--id2 N --start-frame2 F` to `mgba_render` and `--cry2 N
@@ -409,14 +376,14 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   running the second-cry block after its type switch: `build/probe/
   cry_over_se.txt` (se_exp + Cry_Bulbasaur from VBlank 30, no steal) and
   `cry_over_bgm.txt` (mus_littleroot + Cry_Bulbasaur from VBlank 60: the
-  cry steals a releasing BGM channel on frame 62), plan step 12.  poryaaaa
+  cry steals a releasing BGM channel on frame 62).  poryaaaa
   plays them with `poryaaaa_render --song build/accuracy/rom/songs/se_exp.s
   --player se1 --cry2 0 --cry2-start-frame 30` / `--song .../mus_littleroot.s
-  --cry2 0 --cry2-start-frame 60` (slice 9b-i: cry player 0 chained after
+  --cry2 0 --cry2-start-frame 60` (cry player 0 chained after
   the song's player, BGM -> cry 0 on engine tracks 10..11 / SE1 -> cry 0 on
   3..4, the steal unlinking the owner's chain at once; `--seq-log` /
   `--psg-log` and the diff tools as for two cries).  Their `songs.json`
-  rows are `cry_over_se` / `cry_over_bgm` (slice 9b-ii): an `"se"` /
+  rows are `cry_over_se` / `cry_over_bgm`: an `"se"` /
   `"song"` entry carrying the same `"id2"` / `"start_frame2"` pair plus
   `"song"` naming the SE / song it plays (`"se_exp"` / `"mus_littleroot"`;
   the entry is named after its probe log), both 3 s; the runner appends
@@ -439,9 +406,9 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   `cry_third_alone_jynx_wailord.txt` / `_p1`): cry player 0 is replaced,
   Jynx cut on VBlank 60, Bulbasaur's start tick on frame 62 takes Jynx's
   channel 0 free (`SCAN_FREE` 14, body 2991 as a lone cry's, the frame
-  4666 = 1007 + (79 + 2991) + (79 + 510)); plan step 13.  poryaaaa does
-  not play it yet (`--cry2` while both are busy is refused; `--cry3` is
-  slice 10b).  No `songs.json` row; `claim_check.sh` skips the
+  4666 = 1007 + (79 + 2991) + (79 + 510)).  poryaaaa does
+  not play it (`--cry2` while both are busy is refused; there is no
+  `--cry3`).  No `songs.json` row; `claim_check.sh` skips the
   `cry_third_*` logs by the `cry_` rule.
   Optional `"pitch"`, `"pan"`, `"volume"`, `"length"`, `"release"`,
   `"chorus"` keys (SetPokemonCryPitch / Panpot / Volume / Length / Release
@@ -449,7 +416,7 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   `src/sound.c` as whole modes, never invented ones; a nonzero chorus
   makes the cry song two tracks on the cry player -- the second track's
   TUNE = (chorus + TUNE) & 0x7F, the game's u32 192 is the s8 -64 -- and
-  the frame skeleton is the two-track one of plan step 9: start 6792,
+  the frame skeleton is the two-track one: start 6792,
   1932 with both channels alive, +93 on each unlink tick and -20 per dead
   track, the EOT 2360 on two empty chains and 2596 with a live channel on
   each chain, step 10) go to both renderers
@@ -472,7 +439,7 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
   sample, whose look-behind is "block -1": the GBA reads open bus there
   (mgba: the IWRAM Unk2 prefetch word, decoding to 38) and the port a
   zero block, so a one-sample run at a reversed cry's end is that
-  look-behind, not the decode (plan, probe step 8).
+  look-behind, not the decode (`docs/ACCURACY.md`, "Known residuals").
 
 ## Debugging a single test
 
@@ -518,7 +485,7 @@ PCM LSB is about 192 in the int16 output):
   of `build/probe/<test>.txt.events`; `C / 16777216` is the time of the
   first error run.  pcm_cmp has 9 such crossings, pcm_chord 6, pcm 0 (and
   pcm is -inf).  This floor is about -55 dB on the micro-tests and is the
-  deferred item 1c in the plan; nothing in the engine fixes it.
+  PCM floor in `docs/ACCURACY.md`; nothing in the engine fixes it.
 - **A run of about 64 PCM samples at a note start**: one DPCM block, i.e.
   the decoder or the block data.
 - **A run of one or two samples at the end of a sample or at every loop

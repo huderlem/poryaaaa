@@ -1,14 +1,14 @@
 # poryaaaa accuracy harness
 
 Null-tests poryaaaa against mgba 0.10.5 playing the same compiled song data,
-per `docs/ACCURACY_PLAN.md` (milestone 1). Everything here is optional
+as described in `docs/ACCURACY.md`. Everything here is optional
 tooling; the plugin builds without it.
 
 ## Layout
 
 | Path | What |
 |------|------|
-| `rom/` | Standalone GBA test ROM: pokeemerald's `m4a.c`/`m4a_1.s`/`m4a_tables.c` built with agbcc, the full vanilla sound data and song table, the game's sound-mode init (`m4aSoundInit`, VCOUNT-150 `m4aSoundVSync`, VBLANK `m4aSoundMain`), plus the micro-test voicegroup (`accuracy_micro.inc`) and songs (`micro/*.mid`, compiled by mid2agb with the options in `micro/micro.cfg`). A parameter block tagged `PORYACC1` at ROM offset 0xC0 (`struct AccParams`, 28 bytes: type, cry volume, id, cry pitch, cry pan, start frame, cry length, cry release, cry chorus, second cry id, second cry start frame, a padding byte, third cry id, third cry start frame, 1 reserved) selects what to play (song/SE id, cry index, or micro index, plus the cry's `SetPokemonCry*` values, and optionally a second and a third cry at `PlayCryInternal`'s CRY_MODE_NORMAL defaults started on later VBlanks while the first plays -- `mgba_render --id2 N --start-frame2 F`, `--id3 N --start-frame3 F`, 0 = none; with both cry players busy the ROM's `SetPokemonCryTone` replaces the one with the larger clock, plan step 13); the harness patches it, so one build serves every test. `AgbMain` must stay textually identical when the block grows (the second and third cries' waits live in `StartTest`): two extra prologue instructions moved the timer-0 start by 6 cycles and every DirectSound reference with it (plan, probe step 11). |
+| `rom/` | Standalone GBA test ROM: pokeemerald's `m4a.c`/`m4a_1.s`/`m4a_tables.c` built with agbcc, the full vanilla sound data and song table, the game's sound-mode init (`m4aSoundInit`, VCOUNT-150 `m4aSoundVSync`, VBLANK `m4aSoundMain`), plus the micro-test voicegroup (`accuracy_micro.inc`) and songs (`micro/*.mid`, compiled by mid2agb with the options in `micro/micro.cfg`). A parameter block tagged `PORYACC1` at ROM offset 0xC0 (`struct AccParams`, 28 bytes: type, cry volume, id, cry pitch, cry pan, start frame, cry length, cry release, cry chorus, second cry id, second cry start frame, a padding byte, third cry id, third cry start frame, 1 reserved) selects what to play (song/SE id, cry index, or micro index, plus the cry's `SetPokemonCry*` values, and optionally a second and a third cry at `PlayCryInternal`'s CRY_MODE_NORMAL defaults started on later VBlanks while the first plays -- `mgba_render --id2 N --start-frame2 F`, `--id3 N --start-frame3 F`, 0 = none; with both cry players busy the ROM's `SetPokemonCryTone` replaces the one with the larger clock); the harness patches it, so one build serves every test. `AgbMain` must stay textually identical when the block grows (the second and third cries' waits live in `StartTest`): two extra prologue instructions moved the timer-0 start by 6 cycles and every DirectSound reference with it (`docs/ACCURACY.md`, "Working rules"). |
 | `ref/mgba_render.c` | Headless reference renderer linked against `libmgba-static.a`: patches the parameter block, runs N frames from reset, writes 16-bit stereo WAV at the requested rate (48 kHz by default). Deterministic: no user config, idle-loop detection off, unity master volume. The raw DAC stream (`mAVStream.postAudioFrame`, 65536 Hz) is resampled with the engine's own `plugin/m4a_blip.c` so both sides share one bit-exact resampler; `--native-resampler` writes mgba's blip_buf (sinc) output instead. The two modes report different `--version` strings and are cached apart. |
 | `tools/metrics.py` | Alignment (energy-envelope cross-correlation, then sample-level refinement) and the null-depth metrics: RMS of the difference relative to the reference in dB over the whole file and the worst 1 s window, raw and after a least-squares gain match, plus per-segment lag drift (tempo mismatch). |
 | `tools/accuracy.py` | Runner: builds an overlay project for poryaaaa's voicegroup loader, renders references (cached by ROM hash + mgba version), renders poryaaaa (`--input song`, the default: the compiled `.s` from the ROM build through `poryaaaa_render --song`, byte-identical to what mgba plays; `--input midi`: the MIDI with the mid2agb options mapped to CLI flags), compares, prints a table and writes `report.json`. |
@@ -46,8 +46,8 @@ build/poryaaaa_song_tests build/accuracy/rom        # parser vs ROM, byte for by
 The sequencer (`plugin/m4a_sequencer.c`, a port of MPlayMain) plays the
 compiled song inside poryaaaa's VBlank tick, so with `--input song` the
 only differences left between the two renders are in synthesis: the mixer
-and output stage (milestones 2 and 3).  `--input midi` keeps the plugin's
-MIDI path measurable (milestone 5 compares the two); `--midi-quantize`
+and output stage.  `--input midi` keeps the plugin's
+MIDI path measurable; `--midi-quantize`
 adds `poryaaaa_render --quantize`, the MIDI event latch (every event
 applied in the next VBlank tick after the gate walk, in arrival order,
 where MPlayMain runs a track's commands).  Every midi run passes
@@ -58,18 +58,16 @@ sample a blip frame before that SoundMain), so tick n plays on the frame
 the compiled song's would at the exact MIDI tempo.  The renderer's own
 default is off (the first note at output time 0, which is what a user
 rendering a MIDI wants); `--no-gba-start-delay` runs the harness that way.
-Every midi run also passes `poryaaaa_render --gba-tempo-grid` (slice 3a;
-the renderer's own default is off, `--no-gba-tempo-grid` runs the harness
+Every midi run also passes `poryaaaa_render --gba-tempo-grid` (the renderer's own default is off, `--no-gba-tempo-grid` runs the harness
 without it): each MIDI tick moves from its exact-tempo time to the frame MPlayMain plays it on --
 tempoC += tempoI once per frame (MPlayStart's 150 before the first TEMPO,
 mid2agb's tempoI = 2 x floor(BPM x tbs / 2) from the first MTrk's tempo
 events), a tick each time tempoC reaches 150 -- dispatched at the last
 sample a blip frame before that frame's SoundMain; with the start delay
 every tick lands on the ROM's frame and the songs' 0.46 % drift is gone.
-A midi-input report (`"input": "midi"`; `"midi_quantize"` true / false,
-absent in reports written before slice 1; `"gba_start_delay"` true /
-false, absent in the reports written before slice 2a, which all ran
-without it; `"gba_tempo_grid"` likewise from slice 3a) is a separate
+A midi-input report (`"input": "midi"`; `"midi_quantize"` true / false;
+`"gba_start_delay"` and `"gba_tempo_grid"` likewise; each is absent in
+reports older than the option) is a separate
 baseline family,
 `baselines/<date>_midi-path-*.json`; it is never compared against a
 song-input baseline.
@@ -119,7 +117,7 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   eighth argument `gPokemonCryMusicPlayers[1]` selects (`symbol[N]` = N *
   0x40 past the symbol); `probe_mplay.py --player CRY1` prints its run.
   poryaaaa plays the same with `poryaaaa_render --cry N --cry2 M
-  --cry2-start-frame F` (slice 8b-i: the second cry's template copy on cry
+  --cry2-start-frame F` (the second cry's template copy on cry
   player 1, a second sequencer chained after cry 0's on engine tracks
   2..3, its MPlayMain body after cry 0's on the same frame; the first free
   cry player by `SetPokemonCryTone`'s rule, both busy refused); one
@@ -145,17 +143,16 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   `build/probe/cry_third_jynx_wailord_bulbasaur.txt` / `_p1` (Jynx, Wailord
   from VBlank 20, Bulbasaur from VBlank 60; twin
   `cry_third_alone_jynx_wailord.txt`) replaces cry player 0 and restarts it
-  on frame 62 taking Jynx's channel 0 free (plan step 13, slice 10a; ground
-  truth only -- poryaaaa's `--cry3` is slice 10b).
+  on frame 62 taking Jynx's channel 0 free (ground truth only: poryaaaa refuses a
+  third cry while both cry players are busy).
   `--id2 / --start-frame2` (and the probe's fifteenth / sixteenth
   arguments) also start that cry over a `--type song` run -- an SE or a
   song -- with no ROM change, since `StartTest` runs the second-cry block
   after its type switch: the probe logs `build/probe/cry_over_se.txt`
   (se_exp, Cry_Bulbasaur from VBlank 30) and `cry_over_bgm.txt`
-  (mus_littleroot, from VBlank 60) are plan step 12 (slice 9a, ground
-  truth only; the cry over music steals a releasing BGM channel on its
+  (mus_littleroot, from VBlank 60) are the ground truth (the cry over music steals a releasing BGM channel on its
   start frame).  poryaaaa plays the same with `poryaaaa_render --song <.s>
-  [--player bgm|se1|se2|se3] --cry2 N --cry2-start-frame F` (slice 9b-i: cry
+  [--player bgm|se1|se2|se3] --cry2 N --cry2-start-frame F` (cry
   player 0 chained after the song's player -- BGM -> cry 0 on engine tracks
   10..11, SE1 -> cry 0 on 3..4 -- its body after the song's on the same
   frame, the cross-player steal unlinking the stolen channel from the
@@ -163,7 +160,7 @@ Outputs land in `build/accuracy/`: `refs/<romhash-mgba>/` (reference WAVs),
   entries cry_over_se (`"song": "se_exp"`, id2 0, start_frame2 30, 3 s) and
   cry_over_bgm (`"song": "mus_littleroot"`, id2 0, start_frame2 60, 3 s;
   the cry's EOT on frame 202 is past the row), named after the probe logs,
-  with `"song"` naming the SE / song the entry plays (slice 9b-ii: the
+  with `"song"` naming the SE / song the entry plays (the
   runner adds `--cry2 N --cry2-start-frame F` after `--player`, the
   reference frame count stays 182, `--input midi` skips them, and
   `claim_check.sh` resolves a `cry_over_*` probe log against its entry and
