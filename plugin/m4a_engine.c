@@ -491,6 +491,8 @@ static void sound_main(M4AEngine *engine)
     m4a_sound_main_ram(engine, offset, counter);
     if (engine->frameEndHook)
         engine->frameEndHook(engine, engine->frameEndHookUser);
+    if (engine->frameLogHook)
+        engine->frameLogHook(engine, engine->frameLogHookUser);
 }
 
 /* PSG level at one DAC slot, in mgba's PSG units before the SOUNDCNT_H
@@ -747,6 +749,7 @@ static void apply_event(M4AEngine *engine, const M4AQueuedEvent *ev)
     case M4A_EV_PROGRAM:  m4a_engine_program_change(engine, ev->track, ev->a); break;
     case M4A_EV_BEND:     m4a_engine_pitch_bend(engine, ev->track, ev->bend); break;
     case M4A_EV_XCMD:     m4a_engine_xcmd(engine, ev->track, ev->a, ev->b); break;
+    case M4A_EV_TRACK_END: m4a_engine_track_end(engine, ev->track); break;
     default: break;
     }
 }
@@ -1085,29 +1088,34 @@ static void portamento_note_started(M4AEngine *engine, M4ATrack *track,
 /*
  * Note On
  */
-static void clear_mod_m(M4AEngine *engine, M4ATrack *track, int trackIndex);
-
 /* ply_note, after a channel has been taken: the LFO delay restarts for the
  * new note (lfoDelayC = lfoDelay) and, when a delay is set, clear_modM zeroes
  * the LFO output so the note starts unmodulated.  Returns true when keyM /
  * pitM changed and note keys must be recomputed. */
-static bool note_on_restart_lfo_delay(M4AEngine *engine, M4ATrack *track, int trackIndex)
+static bool note_on_restart_lfo_delay(M4ATrack *track)
 {
     track->lfoDelayC = track->lfoDelay;
     if (track->lfoDelay == 0)
         return false;
-    if (engine->externalSequencer) {
-        /* clear_modM only flags the track; ply_note then drops the flags
-         * (flags &= 0xF0), so older channels keep their LFO-offset pitch and
-         * any pending VOL/PAN/BEND until the next change.  Only the new
-         * note's keyM/pitM see the recentred LFO. */
-        track->modM = 0;
-        track->lfoSpeedC = 0;
-        m4a_track_vol_pit_set(track);
-    } else {
-        clear_mod_m(engine, track, trackIndex);
-    }
+    /* clear_modM only flags the track; ply_note then drops the flags
+     * (flags &= 0xF0, note_took_channel), so older channels keep their
+     * LFO-offset pitch and any pending VOL/PAN/BEND until the next change.
+     * Only the new note's keyM/pitM see the recentred LFO. */
+    track->modM = 0;
+    track->lfoSpeedC = 0;
+    m4a_track_vol_pit_set(track);
     return true;
+}
+
+/* The end of ply_note for a note that took a channel: TrkVolPitSet ran for
+ * it, and the track's pending VOLCHG / PITCHG are dropped (flags &= 0xF0),
+ * so the channels it already had keep their values until the next change.
+ * A rejected note (_081DDCEA) leaves the flags alone.  A note brings a
+ * finished track back. */
+static void note_took_channel(M4ATrack *track)
+{
+    track->chgFlags = 0;
+    track->finished = false;
 }
 
 /* Final keys for a note: the played key plus the track's keyM transposition,
@@ -1217,7 +1225,7 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
         }
 
         /* A dropped note never got this far on the GBA. */
-        if (!shadow && note_on_restart_lfo_delay(engine, track, trackIndex))
+        if (!shadow && note_on_restart_lfo_delay(track))
             note_on_keys(engine, track, useKey, pcmBaseAdjust, &finalKey, &pcmKey, &pcmFinalKey);
 
         /* Portamento legato: CGB tone types share one channel slot, so a
@@ -1306,8 +1314,10 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
 
         /* A dropped note never sounded on the GBA, so it must not become the
          * start key of a later portamento glide. */
-        if (!shadow)
+        if (!shadow) {
             portamento_note_started(engine, track, trackIndex, ch->key);
+            note_took_channel(track);
+        }
         return (int)(TOTAL_PCM_CHANNELS + (ch - engine->cgbChannels));
     } else {
         /* PCM DirectSound channel */
@@ -1338,7 +1348,7 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
         }
 
         /* A dropped note never got this far on the GBA. */
-        if (!shadow && note_on_restart_lfo_delay(engine, track, trackIndex))
+        if (!shadow && note_on_restart_lfo_delay(track))
             note_on_keys(engine, track, useKey, pcmBaseAdjust, &finalKey, &pcmKey, &pcmFinalKey);
 
         ch->midiKey = key;
@@ -1410,8 +1420,10 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
 
         /* A dropped note never sounded on the GBA, so it must not become the
          * start key of a later portamento glide. */
-        if (!shadow)
+        if (!shadow) {
             portamento_note_started(engine, track, trackIndex, ch->key);
+            note_took_channel(track);
+        }
         return (int)(ch - engine->pcmChannels);
     }
 }
@@ -1517,6 +1529,26 @@ static inline void refresh_volumes(M4AEngine *engine, M4ATrack *track, int track
     apply_track_volumes(engine, track, trackIndex);
 }
 
+/* MPlayMain's VOLCHG / PITCHG pass (_081DD9C8 .. _081DDA58) for the MIDI
+ * path: after the frame's ticks, each flagged track's TrkVolPitSet, then
+ * ChnVolSetAsm (VOLCHG) and the frequency (PITCHG) on every channel it
+ * still owns, releasing ones included (plan, milestone 5 slice 6). */
+static void track_change_pass(M4AEngine *engine)
+{
+    for (int i = 0; i < MAX_TRACKS; i++) {
+        M4ATrack *track = &engine->tracks[i];
+        uint8_t chg = track->chgFlags;
+        if (!chg)
+            continue;
+        track->chgFlags = 0;
+        m4a_track_vol_pit_set(track);
+        if (chg & M4A_TRK_VOLCHG)
+            apply_track_volumes(engine, track, i);
+        if (chg & M4A_TRK_PITCHG)
+            refresh_channel_pitches(engine, track, i);
+    }
+}
+
 void m4a_engine_track_apply(M4AEngine *engine, int trackIndex, bool volume, bool pitch)
 {
     if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
@@ -1529,21 +1561,14 @@ void m4a_engine_track_apply(M4AEngine *engine, int trackIndex, bool volume, bool
         refresh_channel_pitches(engine, track, trackIndex);
 }
 
-/* Mirrors the GBA's clear_modM: zero the LFO accumulator and immediately push
- * the recentered pitch (or volume, for modT 1/2) to every sounding channel on
- * the track.  Without the push, a held note stays offset by the last LFO value
- * until the next pitch/volume event, because m4a_lfo_tick skips tracks whose
- * mod depth is 0. */
-static void clear_mod_m(M4AEngine *engine, M4ATrack *track, int trackIndex)
+/* Mirrors the GBA's clear_modM: zero the LFO accumulator and flag the
+ * recentered pitch (or volume, for modT 1/2) for the frame's pass, which
+ * reaches every channel of the track unless a note drops the flag first. */
+static void clear_mod_m(M4ATrack *track)
 {
     track->lfoSpeedC = 0;
     track->modM = 0;
-    if (track->modT == 0) {
-        m4a_track_vol_pit_set(track);
-        refresh_channel_pitches(engine, track, trackIndex);
-    } else {
-        refresh_volumes(engine, track, trackIndex);
-    }
+    track->chgFlags |= track->modT == 0 ? M4A_TRK_PITCHG : M4A_TRK_VOLCHG;
 }
 
 /* Return the active CGB square channel (sq1/sq2) currently owned by a track,
@@ -1577,7 +1602,7 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
     case 0x1:  /* Mod wheel -> LFO depth */
         track->mod = value;
         if (value == 0)
-            clear_mod_m(engine, track, trackIndex);
+            clear_mod_m(track);
         break;
     case 0x5:  /* Portamento time (PORTAMENTO) -- glide duration in song ticks, 0 = off.
                 * Opt-in: ignored unless the portamento feature is enabled.  Unlike
@@ -1590,11 +1615,11 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
     case 0x7:  /* Volume */
         track->rawVolume = value;
         track->volume = value * engine->songMasterVolume / MAX_SONG_VOLUME;
-        refresh_volumes(engine, track, trackIndex);
+        track->chgFlags |= M4A_TRK_VOLCHG;
         break;
     case 0xA: /* Pan */
         track->pan = (int8_t)(value - 64);
-        refresh_volumes(engine, track, trackIndex);
+        track->chgFlags |= M4A_TRK_VOLCHG;
         break;
     case 0xC:
     case 0xD:
@@ -1608,8 +1633,7 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         break;
     case 0x14: /* Bend range (BENDR) */
         track->bendRange = value;
-        m4a_track_vol_pit_set(track);
-        refresh_channel_pitches(engine, track, trackIndex);
+        track->chgFlags |= M4A_TRK_PITCHG;
         break;
     case 0x15: /* LFO speed (LFOS) */
         /* Mirrors ply_lfos: only a speed of 0 resets the LFO (clear_modM).
@@ -1618,16 +1642,14 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
          * repeating the command) doesn't restart the vibrato each time. */
         track->lfoSpeed = value;
         if (value == 0)
-            clear_mod_m(engine, track, trackIndex);
+            clear_mod_m(track);
         break;
     case 0x16: /* Modulation type (MODT): 0 vibrato, 1 tremolo, 2 auto-pan.
                 * Mirrors ply_modt: a change re-evaluates both volume and pitch
                 * (the LFO output moves from one to the other). */
         if (track->modT != value) {
             track->modT = value;
-            m4a_track_vol_pit_set(track);
-            refresh_channel_pitches(engine, track, trackIndex);
-            refresh_volumes(engine, track, trackIndex);
+            track->chgFlags |= M4A_TRK_VOLCHG | M4A_TRK_PITCHG;
         }
         break;
     case 0x17: { /* Pulse-width mod duty-cycle pattern (PWMC); 0 = disable.
@@ -1684,8 +1706,7 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         break;
     case 0x18: /* Micro tuning (TUNE), c_v-centred like PAN/BEND: mirrors ply_tune. */
         track->tune = (int8_t)(value - 64);
-        m4a_track_vol_pit_set(track);
-        refresh_channel_pitches(engine, track, trackIndex);
+        track->chgFlags |= M4A_TRK_PITCHG;
         break;
     case 0x1A: /* LFO delay (LFODL) in song ticks: mirrors ply_lfodl.  Takes
                 * effect at the next note start, which reloads lfoDelayC. */
@@ -1751,10 +1772,38 @@ void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend)
     /* Scale 14-bit MIDI bend to m4a's -64..+63 range */
     track->bend = (int8_t)(bend >> 7);
 
-    /* Recompute keyM/pitM and push the new pitch into every active channel
-     * on this track, matching MPlayMain's per-tick note re-evaluation. */
-    m4a_track_vol_pit_set(track);
-    refresh_channel_pitches(engine, track, trackIndex);
+    /* ply_bend: PITCHG, for the frame's pass (track_change_pass). */
+    track->chgFlags |= M4A_TRK_PITCHG;
+}
+
+void m4a_engine_track_end(M4AEngine *engine, int trackIndex)
+{
+    if (trackIndex < 0 || trackIndex >= MAX_TRACKS)
+        return;
+    if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_TRACK_END, (uint8_t)trackIndex, 0, 0, 0 }))
+        return;
+
+    /* ply_fine_loop: SF_STOP on each chained channel that is on, then
+     * RealClearChain (channel->track = 0): it releases owned by no track,
+     * so no later VOLCHG / PITCHG pass or LFO step of this track reaches
+     * it.  ply_fine_done: the track's flags = 0 (no LFO step, no pass). */
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
+        M4APCMChannel *ch = &engine->pcmChannels[i];
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
+            ch->status |= CHN_STOP;
+            ch->trackIndex = M4A_NO_TRACK;
+        }
+    }
+    for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
+        M4ACGBChannel *ch = &engine->cgbChannels[i];
+        if ((ch->status & CHN_ON) && ch->trackIndex == trackIndex) {
+            ch->status |= CHN_STOP;
+            ch->trackIndex = M4A_NO_TRACK;
+        }
+    }
+    M4ATrack *track = &engine->tracks[trackIndex];
+    track->chgFlags = 0;
+    track->finished = true;
 }
 
 /*
@@ -1917,7 +1966,7 @@ static void m4a_lfo_tick(M4AEngine *engine)
 {
     for (int i = 0; i < MAX_TRACKS; i++) {
         M4ATrack *track = &engine->tracks[i];
-        if (track->lfoSpeed == 0 || track->mod == 0)
+        if (track->lfoSpeed == 0 || track->mod == 0 || track->finished)
             continue;
 
         if (track->lfoDelayC > 0) {
@@ -1941,36 +1990,10 @@ static void m4a_lfo_tick(M4AEngine *engine)
 
         int8_t newModM = (int8_t)((track->mod * lfoVal) >> 6);
         if (newModM != track->modM) {
+            /* MPlayMain's LFO half only flags the track: PITCHG for
+             * vibrato, VOLCHG for tremolo / autopan, for the frame's pass. */
             track->modM = newModM;
-            m4a_track_vol_pit_set(track);
-
-            /* Update active channels for this track */
-            for (int j = 0; j < TOTAL_PCM_CHANNELS; j++) {
-                M4APCMChannel *ch = &engine->pcmChannels[j];
-                if ((ch->status & CHN_ON) && ch->trackIndex == i) {
-                    chn_vol_set(ch, track);
-                    /* Recalculate frequency for pitch mod (fixed-rate voices
-                     * are immune, as in refresh_channel_pitches) */
-                    if (track->modT == 0 && ch->wav && !(ch->type & VOICE_TYPE_FIX)) {
-                        int32_t finalKey = (int32_t)ch->key + track->keyM;
-                        if (finalKey < 0) finalKey = 0;
-                        ch->frequency = m4a_midi_key_to_freq(ch->wav, (uint8_t)finalKey, track->pitM);
-                    }
-                }
-            }
-            for (int j = 0; j < TOTAL_CGB_CHANNELS; j++) {
-                M4ACGBChannel *ch = &engine->cgbChannels[j];
-                if ((ch->status & CHN_ON) && ch->trackIndex == i) {
-                    cgb_chn_vol_set(ch, track);
-                    /* Tremolo/autopan LFO steps are volume changes (VOLCHG ->
-                     * MO_VOL on the GBA), so they retrigger the square-1
-                     * sweep; vibrato steps are MO_PIT and do not. */
-                    if (track->modT != 0)
-                        ch->modify |= 0x01;
-                    if (track->modT == 0)
-                        cgb_set_pitch(ch, (int32_t)ch->key + track->keyM, track->pitM);
-                }
-            }
+            track->chgFlags |= track->modT == 0 ? M4A_TRK_PITCHG : M4A_TRK_VOLCHG;
         }
     }
 }
@@ -2089,6 +2112,8 @@ static void mplay_main_tail(M4AEngine *engine)
         engine->tempoC -= 150;
         m4a_lfo_tick(engine);
     }
+    /* The VOLCHG / PITCHG pass after the ticks. */
+    track_change_pass(engine);
 
     /* Portamento after the LFO so a glide overrides the pitch the LFO
      * wrote this tick, matching MPlayMain's ordering on the GBA. */

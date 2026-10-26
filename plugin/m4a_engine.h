@@ -190,7 +190,20 @@ typedef struct {
     uint8_t priority;
     uint8_t currentProgram; /* last program_change index (0-127) */
     ToneData currentVoice;  /* current instrument */
+    /* Per-tick command batching on the MIDI path (plan, milestone 5 slice
+     * 6): a VOL / PAN / BEND / BENDR / TUNE / MODT / clear_modM and an LFO
+     * step only flag the track, as ply_vol & co. do -- its pending
+     * MPT_FLG_VOLCHG / PITCHG (M4A_TRK_VOLCHG / PITCHG).  A note that takes
+     * a channel drops them (ply_note's flags &= 0xF0); MPlayMain's VOLCHG /
+     * PITCHG pass after the frame's ticks applies what is left to every
+     * channel the track still owns.  finished: m4a_engine_track_end
+     * (ply_fine) has run, until the track's next note. */
+    uint8_t chgFlags;
+    bool finished;
 } M4ATrack;
+
+#define M4A_TRK_VOLCHG 0x03
+#define M4A_TRK_PITCHG 0x0C
 
 /* PCM Sound Channel */
 typedef struct {
@@ -354,7 +367,8 @@ enum {
     M4A_EV_CC,
     M4A_EV_PROGRAM,
     M4A_EV_BEND,
-    M4A_EV_XCMD
+    M4A_EV_XCMD,
+    M4A_EV_TRACK_END
 };
 typedef struct {
     uint8_t kind;    /* M4A_EV_* */
@@ -522,6 +536,9 @@ struct M4AEngine {
      * sequencer's channel snapshot, m4a_sequencer_init_timing). */
     M4AFrameHook frameEndHook;
     void *frameEndHookUser;
+    /* Debug only (poryaaaa_render --pcm-log): runs after frameEndHook. */
+    M4AFrameHook frameLogHook;
+    void *frameLogHookUser;
 
     /* SoundMain timing model: CPU cycles from the SoundMain entry to the
      * CgbSound entry this frame.  The sequencer's frame hook sets it from
@@ -814,6 +831,11 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
 #define M4A_XCMD_IECL 9 /* pseudo-echo length */
 void m4a_engine_xcmd(M4AEngine *engine, int trackIndex, uint8_t command, uint8_t value);
 void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend);
+/* ply_fine for a track the host knows has ended (poryaaaa_render: the end of
+ * the MIDI track, where mid2agb writes FINE): every channel the track owns
+ * gets SF_STOP and no longer belongs to it, its pending changes are dropped
+ * and its LFO stops, until a later note on it.  Latched like the others. */
+void m4a_engine_track_end(M4AEngine *engine, int trackIndex);
 void m4a_engine_all_notes_off(M4AEngine *engine, int trackIndex);
 /* Silences everything at once and drops the latched events still queued
  * (a host's panic / transport stop must not release queued note-ons at

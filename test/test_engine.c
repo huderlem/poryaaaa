@@ -4088,9 +4088,11 @@ static void test_midi_path_modt_tune_lfodl(void)
     ASSERT_EQ(engine.tracks[0].tune, 63, "TUNE 127 -> +63");
     m4a_engine_cc(&engine, 0, 0x18, 0);
     ASSERT_EQ(engine.tracks[0].tune, -64, "TUNE 0 -> -64");
+    m4a_engine_tick(&engine);             /* the frame's PITCHG pass computes keyM */
     ASSERT_EQ(engine.tracks[0].keyM, -1, "TUNE -64 is one semitone down in keyM");
     ASSERT_EQ(engine.tracks[0].pitM, 0, "TUNE -64 leaves no fine remainder");
     m4a_engine_cc(&engine, 0, 0x18, 64);
+    m4a_engine_tick(&engine);
     ASSERT_EQ(engine.tracks[0].keyM, 0, "TUNE centre");
 
     /* MODT moves the LFO output between pitch and volume. */
@@ -4107,6 +4109,7 @@ static void test_midi_path_modt_tune_lfodl(void)
     ASSERT(ch->frequency != f0, "MODT 0: vibrato moves the pitch");
     ASSERT_EQ(ch->leftVolume, v0, "MODT 0: vibrato leaves the volume alone");
     m4a_engine_cc(&engine, 0, 0x16, 1);   /* MODT tremolo */
+    m4a_engine_tick(&engine);             /* applied by the frame's pass */
     ASSERT_EQ(ch->frequency, f0, "MODT change recomputes pitch without the LFO offset");
     for (int i = 0; i < 20; i++)
         m4a_engine_tick(&engine);
@@ -6510,7 +6513,8 @@ static void cgb_entry_log_cb(void *user, uint32_t reg, uint32_t value)
 
 /* A MIDI-path event for test_cgb_entry_midi_path: at song tick `tick`, on
  * engine track `track`: a note-on (b > 0) / note-off (b == 0) of key a, a CC
- * a = b (kind 'c') or a program change a (kind 'p'). */
+ * a = b (kind 'c'), a program change a (kind 'p'), a bend of c_v+a (kind
+ * 'b') or the track's end, mid2agb's FINE (kind 'e'). */
 typedef struct { int tick; char kind; int track, a, b; } CgbEntryEvent;
 
 static void cgb_entry_dispatch(M4AEngine *e, const CgbEntryEvent *ev)
@@ -6522,6 +6526,8 @@ static void cgb_entry_dispatch(M4AEngine *e, const CgbEntryEvent *ev)
         break;
     case 'c': m4a_engine_cc(e, ev->track, (uint8_t)ev->a, (uint8_t)ev->b); break;
     case 'p': m4a_engine_program_change(e, ev->track, (uint8_t)ev->a); break;
+    case 'b': m4a_engine_pitch_bend(e, ev->track, (int16_t)(ev->a * 128)); break;
+    case 'e': m4a_engine_track_end(e, ev->track); break;
     }
 }
 
@@ -6834,6 +6840,226 @@ static void test_cgb_entry_midi_path(void)
             m4a_song_free(song);
         }
     }
+}
+
+/* The material through both paths, as cgb_entry_pair, compared on the
+ * channels instead: after each of frames 3 .. 2 + nFrames, every real PCM
+ * and CGB channel's status, right / left volume (ChnVolSetAsm), frequency
+ * and envelope.  Returns the differing frames; *firstBad the first, *sounding
+ * the frames with more than one PCM channel on (a releasing note beside a
+ * new one), *seqClean whether the sequencer engine's tracks never took a
+ * pending change or the finished mark. */
+static int batch_pair(const char *text, const ToneData *voices, const CgbEntryEvent *evs, int nEvs,
+                      int tempoI, bool latch, int nFrames, int *firstBad, int *sounding, bool *seqClean)
+{
+    M4ASong *song = parse_song_text(text);
+    if (!song)
+        return -1;
+    static M4AEngine pair[2];
+    M4ASequencer seq;
+    for (int k = 0; k < 2; k++) {
+        m4a_engine_init(&pair[k], 48000.0f);
+        m4a_engine_set_voicegroup(&pair[k], (ToneData *)voices);
+        m4a_engine_boot(&pair[k], true);
+    }
+    m4a_engine_set_quantize_events(&pair[0], latch);
+    m4a_sequencer_init(&seq, &pair[1]);
+    m4a_sequencer_start(&seq, song);                       /* first tick on frame 3 */
+    int s0 = (int)gba_tempo_grid_sample(0, 48000.0);       /* the origin, before frame 3 */
+    float *obuf = malloc(sizeof(float) * (size_t)s0 * 2);
+    m4a_engine_process(&pair[0], obuf, obuf + s0, s0);
+    free(obuf);
+    m4a_engine_start_song_tempo(&pair[0]);
+    m4a_engine_set_tick_tempo(&pair[0], (uint16_t)tempoI);
+
+    int tickFrame[512], nTicks = 0, acc = 0;
+    for (int f = 3; f < 3 + nFrames && nTicks < 512; f++) {
+        acc += f == 3 ? 150 : tempoI;
+        while (acc >= 150 && nTicks < 512) {
+            tickFrame[nTicks++] = f;
+            acc -= 150;
+        }
+    }
+    float outL[1024], outR[1024];
+    int bad = 0, ev = 0;
+    *firstBad = -1;
+    *sounding = 0;
+    *seqClean = true;
+    for (int f = 3; f < 3 + nFrames; f++) {
+        while (ev < nEvs && evs[ev].tick < nTicks && tickFrame[evs[ev].tick] == f)
+            cgb_entry_dispatch(&pair[0], &evs[ev++]);
+        for (int k = 0; k < 2; k++)
+            lfo_order_frame(&pair[k], outL, outR);   /* past frame f's SoundMainRAM */
+        bool same = true;
+        int on = 0;
+        for (int c = 0; c < MAX_PCM_CHANNELS; c++) {
+            const M4APCMChannel *a = &pair[0].pcmChannels[c], *b = &pair[1].pcmChannels[c];
+            same = same && a->status == b->status && a->rightVolume == b->rightVolume
+                && a->leftVolume == b->leftVolume && a->frequency == b->frequency
+                && a->envelopeVolume == b->envelopeVolume
+                && a->envelopeVolumeRight == b->envelopeVolumeRight
+                && a->envelopeVolumeLeft == b->envelopeVolumeLeft;
+            on += (a->status & CHN_ON) != 0;
+        }
+        for (int c = 0; c < MAX_CGB_CHANNELS; c++) {
+            const M4ACGBChannel *a = &pair[0].cgbChannels[c], *b = &pair[1].cgbChannels[c];
+            same = same && a->status == b->status && a->rightVolume == b->rightVolume
+                && a->leftVolume == b->leftVolume && a->frequency == b->frequency
+                && a->envelopeVolume == b->envelopeVolume;
+        }
+        for (int t = 0; t < MAX_TRACKS; t++)
+            *seqClean = *seqClean && pair[1].tracks[t].chgFlags == 0 && !pair[1].tracks[t].finished;
+        *sounding += on > 1;
+        if (!same && *firstBad < 0)
+            *firstBad = f;
+        bad += !same;
+    }
+    m4a_sequencer_detach(&seq);
+    for (int k = 0; k < 2; k++)
+        m4a_engine_destroy(&pair[k]);
+    m4a_song_free(song);
+    return bad;
+}
+
+/*
+ * Per-tick command batching and ply_fine on the MIDI path (plan, milestone 5
+ * slice 6): a VOL / PAN / BEND before a note in the same tick reaches only
+ * the new note (ply_note drops the track's pending VOLCHG / PITCHG), a
+ * releasing note keeps its old value until the next change; a VOL on a tick
+ * without a note reaches every channel of the track (the frame's pass); a
+ * FINE unlinks the releasing note, so neither the FINE tick's VOL nor the
+ * LFO steps after it reach it.  The same material through the MIDI path and
+ * a sequencer song leaves every channel the same after every frame, latched
+ * and not; the sequencer engine never enters the MIDI path's batching state.
+ */
+static void test_tick_batching_midi_path(void)
+{
+    printf("Testing per-tick command batching and ply_fine on the MIDI path...\n");
+    char msg[200];
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    WaveData *wd = seq_test_wave();
+    voices[2].type = VOICE_DIRECTSOUND;
+    voices[2].key = 60;
+    voices[2].wav = wd;
+    voices[2].attack = 0xFF;
+    voices[2].sustain = 0xFF;
+    voices[2].release = 0xF0;               /* a release long enough to overlap the next note */
+
+    char text[4096];
+    snprintf(text, sizeof(text), "%s%s%s", seq_song_header,
+             "\t.byte\tKEYSH , t_key+0\n"
+             "\t.byte\tTEMPO , 120*t_tbs/2\n"
+             "\t.byte\t\tVOICE , 2\n"
+             "\t.byte\t\tVOL   , 127*t_mvl/mxv\n"
+             "\t.byte\t\tPAN   , c_v+0\n"
+             "\t.byte\t\tN12   , Cn3 , v127\n"
+             "\t.byte\tW12\n"
+             "\t.byte\t\tVOL   , 60*t_mvl/mxv\n"     /* tick 12: VOL, then a note, Cn3 releasing */
+             "\t.byte\t\tN12   , Dn3 \n"
+             "\t.byte\tW12\n"
+             "\t.byte\t\tPAN   , c_v+30\n"           /* tick 24: PAN, then a note */
+             "\t.byte\t\tN12   , En3 \n"
+             "\t.byte\tW12\n"
+             "\t.byte\t\tBEND  , c_v+20\n"           /* tick 36: BEND, then a note */
+             "\t.byte\t\tN12   , Fn3 \n"
+             "\t.byte\tW12\n"
+             "\t.byte\t\tVOL   , 100*t_mvl/mxv\n"    /* tick 48: VOL, no note: every channel */
+             "\t.byte\tW12\n"
+             "\t.byte\t\tLFOS  , 40\n"               /* tick 60: vibrato on a new note */
+             "\t.byte\t\tMOD   , 30\n"
+             "\t.byte\t\tN24   , Gn3 \n"
+             "\t.byte\tW24\n"
+             "\t.byte\t\tVOL   , 127*t_mvl/mxv\n"    /* tick 84: the note's end, VOL, FINE */
+             "\t.byte\tFINE\n", seq_song_footer);
+    static const CgbEntryEvent evs[] = {
+        { 0, 'p', 1, 2, 0 }, { 0, 'c', 1, 7, 127 }, { 0, 'c', 1, 10, 64 }, { 0, 'n', 1, 60, 127 },
+        { 12, 'n', 1, 60, 0 }, { 12, 'c', 1, 7, 60 }, { 12, 'n', 1, 62, 127 },
+        { 24, 'n', 1, 62, 0 }, { 24, 'c', 1, 10, 94 }, { 24, 'n', 1, 64, 127 },
+        { 36, 'n', 1, 64, 0 }, { 36, 'b', 1, 20, 0 }, { 36, 'n', 1, 65, 127 },
+        { 48, 'n', 1, 65, 0 }, { 48, 'c', 1, 7, 100 },
+        { 60, 'c', 1, 0x15, 40 }, { 60, 'c', 1, 1, 30 }, { 60, 'n', 1, 67, 127 },
+        { 84, 'n', 1, 67, 0 }, { 84, 'c', 1, 7, 127 }, { 84, 'e', 1, 0, 0 },
+    };
+    const int nEvs = (int)(sizeof(evs) / sizeof(evs[0]));
+    for (int q = 0; q < 2; q++) {
+        int firstBad, sounding;
+        bool seqClean;
+        /* tick 84 is frame 3 + 84 / 0.8 = 108; 80 frames of release after it */
+        int bad = batch_pair(text, voices, evs, nEvs, 120, q == 1, 190, &firstBad, &sounding, &seqClean);
+        snprintf(msg, sizeof(msg), "batching%s: the MIDI path's channels are the sequencer's after every frame"
+                 " 3 .. 192 (%d differ, first %d; %d frames with two notes sounding)",
+                 q ? " latched" : "", bad, firstBad, sounding);
+        ASSERT(bad == 0 && sounding > 40, msg);
+        snprintf(msg, sizeof(msg), "batching%s: the sequencer engine's tracks never take a pending change",
+                 q ? " latched" : "");
+        ASSERT(seqClean, msg);
+    }
+
+    /* Each case alone, latched and not: a note (Cn3, N12), then on tick 12,
+     * while it releases, the case's commands.  A..C and E..F fail on the old
+     * rule (every controller on every channel at once, no FINE); D holds on
+     * both and guards the pass reaching every channel. */
+    static const struct {
+        const char *what, *pre, *cmds;
+        CgbEntryEvent ev[4];
+        int nEv;
+    } cases[] = {
+        { "A: a VOL before a note keeps the releasing note's volume", "",
+          "\t.byte\t\tVOL   , 60*t_mvl/mxv\n\t.byte\t\tN12   , Dn3 \n\t.byte\tW12\n\t.byte\tW48\n\t.byte\tFINE\n",
+          { { 12, 'c', 1, 7, 60 }, { 12, 'n', 1, 62, 127 }, { 24, 'n', 1, 62, 0 }, { 72, 'e', 1, 0, 0 } }, 4 },
+        { "B: a PAN before a note keeps the releasing note's pan", "",
+          "\t.byte\t\tPAN   , c_v+30\n\t.byte\t\tN12   , Dn3 \n\t.byte\tW12\n\t.byte\tW48\n\t.byte\tFINE\n",
+          { { 12, 'c', 1, 10, 94 }, { 12, 'n', 1, 62, 127 }, { 24, 'n', 1, 62, 0 }, { 72, 'e', 1, 0, 0 } }, 4 },
+        { "C: a BEND before a note keeps the releasing note's pitch", "",
+          "\t.byte\t\tBEND  , c_v+20\n\t.byte\t\tN12   , Dn3 \n\t.byte\tW12\n\t.byte\tW48\n\t.byte\tFINE\n",
+          { { 12, 'b', 1, 20, 0 }, { 12, 'n', 1, 62, 127 }, { 24, 'n', 1, 62, 0 }, { 72, 'e', 1, 0, 0 } }, 4 },
+        { "D: a VOL on a tick without a note reaches the releasing note", "",
+          "\t.byte\t\tVOL   , 60*t_mvl/mxv\n\t.byte\tW48\n\t.byte\tFINE\n",
+          { { 12, 'c', 1, 7, 60 }, { 60, 'e', 1, 0, 0 } }, 2 },
+        { "E: the FINE tick's VOL does not reach the releasing note", "",
+          "\t.byte\t\tVOL   , 60*t_mvl/mxv\n\t.byte\tFINE\n",
+          { { 12, 'c', 1, 7, 60 }, { 12, 'e', 1, 0, 0 } }, 2 },
+        { "F: no LFO step reaches the releasing note after FINE",
+          "\t.byte\t\tLFOS  , 40\n\t.byte\t\tMOD   , 30\n",
+          "\t.byte\tFINE\n",
+          { { 12, 'e', 1, 0, 0 } }, 1 },
+    };
+    for (int c = 0; c < (int)(sizeof(cases) / sizeof(cases[0])); c++) {
+        char one[2048];
+        snprintf(one, sizeof(one),
+                 "%s\t.byte\tKEYSH , t_key+0\n"
+                 "\t.byte\tTEMPO , 120*t_tbs/2\n"
+                 "\t.byte\t\tVOICE , 2\n"
+                 "\t.byte\t\tVOL   , 127*t_mvl/mxv\n"
+                 "\t.byte\t\tPAN   , c_v+0\n"
+                 "%s"
+                 "\t.byte\t\tN12   , Cn3 , v127\n"
+                 "\t.byte\tW12\n"
+                 "%s%s", seq_song_header, cases[c].pre, cases[c].cmds, seq_song_footer);
+        CgbEntryEvent ev[12];
+        int n = 0;
+        ev[n++] = (CgbEntryEvent){ 0, 'p', 1, 2, 0 };
+        ev[n++] = (CgbEntryEvent){ 0, 'c', 1, 7, 127 };
+        ev[n++] = (CgbEntryEvent){ 0, 'c', 1, 10, 64 };
+        if (cases[c].pre[0]) {
+            ev[n++] = (CgbEntryEvent){ 0, 'c', 1, 0x15, 40 };
+            ev[n++] = (CgbEntryEvent){ 0, 'c', 1, 1, 30 };
+        }
+        ev[n++] = (CgbEntryEvent){ 0, 'n', 1, 60, 127 };
+        ev[n++] = (CgbEntryEvent){ 12, 'n', 1, 60, 0 };
+        for (int k = 0; k < cases[c].nEv; k++)
+            ev[n++] = cases[c].ev[k];
+        for (int q = 0; q < 2; q++) {
+            int firstBad, sounding;
+            bool seqClean;
+            int bad = batch_pair(one, voices, ev, n, 120, q == 1, 100, &firstBad, &sounding, &seqClean);
+            snprintf(msg, sizeof(msg), "%s%s (%d frames differ, first %d)", cases[c].what,
+                     q ? ", latched" : "", bad, firstBad);
+            ASSERT(bad == 0 && seqClean, msg);
+        }
+    }
+    free(wd);
 }
 
 static void test_event_latch(void)
@@ -7646,6 +7872,7 @@ int main(void)
     test_engine_lfo_grid();
     test_lfo_cgbsound_order();
     test_cgb_entry_midi_path();
+    test_tick_batching_midi_path();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

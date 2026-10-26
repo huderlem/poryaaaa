@@ -180,6 +180,13 @@ typedef struct {
  * carried as a 14-bit value across data0 (low 7 bits) and data1 (high 7).
  */
 #define RENDER_EVT_TEMPO 0x1
+/*
+ * Synthetic RenderEvent type for the end of a MIDI track: mid2agb's FINE
+ * (m4a_engine_track_end), at the later of the MTrk's end-of-track and the
+ * first MTrk's, after every other event of its tick.  Only without a loop
+ * (a looping song's GOTO comes before its FINE).
+ */
+#define RENDER_EVT_TRACK_END 0x2
 
 /* A rendered event with its absolute sample position */
 typedef struct {
@@ -251,7 +258,8 @@ static bool text_is_loop_marker(const uint8_t *buf, uint32_t len, char marker)
  */
 static void parse_track(MidiReader *r, uint32_t trackLen, uint8_t trackIndex,
                          RawEventArray *rawEvents, TempoArray *tempos,
-                         uint64_t *loopStartTick, uint64_t *loopEndTick)
+                         uint64_t *loopStartTick, uint64_t *loopEndTick,
+                         uint64_t *endTick, uint16_t *noteChannels)
 {
     size_t   end           = r->pos + trackLen;
     uint64_t tick          = 0;
@@ -273,6 +281,8 @@ static void parse_track(MidiReader *r, uint32_t trackLen, uint8_t trackIndex,
             if (mr_read_byte(r, &metaType) < 0) break;
             if (mr_read_vlq(r, &metaLen)   < 0) break;
 
+            if (metaType == 0x2F)
+                *endTick = tick;   /* end of track: mid2agb's EndOfTrack time */
             if (metaType == 0x51 && metaLen == 3) {
                 /* Tempo change */
                 uint8_t t0, t1, t2;
@@ -339,6 +349,8 @@ static void parse_track(MidiReader *r, uint32_t trackLen, uint8_t trackIndex,
                 if (mr_read_byte(r, &vel) < 0) goto track_done;
                 RawMidiEvent ev = { tick, chan, trackIndex, vel ? (uint8_t)0x9 : (uint8_t)0x8, data0, vel, 0 };
                 raw_push(rawEvents, ev);
+                if (vel)
+                    *noteChannels |= (uint16_t)(1u << chan);   /* an AGB track (mid2agb: a channel with notes) */
                 break;
             }
             case 0xA: { /* Polyphonic aftertouch — skip */
@@ -374,6 +386,8 @@ static void parse_track(MidiReader *r, uint32_t trackLen, uint8_t trackIndex,
         }
     }
 track_done:
+    if (*endTick == UINT64_MAX)
+        *endTick = tick;
     r->pos = end;
 }
 
@@ -450,6 +464,8 @@ typedef struct {
     int          count;
 } RenderEventArray;
 
+#define MAX_TRACK_ENDS 256
+
 /*
  * Load and parse a Standard MIDI File.
  *
@@ -460,7 +476,9 @@ typedef struct {
  * *loopStartSampleOut / *loopEndSampleOut / *loopStartTickOut /
  * *loopEndTickOut; otherwise UINT64_MAX is written.  The file's ticks per
  * quarter note go to *tpqnOut, and the tempo map to *temposOut (ownership
- * passes to the caller, who must free ->events).
+ * passes to the caller, who must free ->events).  Without a loop, each
+ * MTrk's end (mid2agb's FINE) is a RENDER_EVT_TRACK_END on every channel
+ * it has notes on.
  *
  * Returns NULL on error.
  */
@@ -474,6 +492,8 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
                                      TempoArray *temposOut,
                                      uint16_t *midiFormatOut)
 {
+    RawMidiEvent trackEnds[MAX_TRACK_ENDS];
+    int trackEndCount = 0;
     *loopStartSampleOut = UINT64_MAX;
     *loopEndSampleOut   = UINT64_MAX;
     *loopStartTickOut   = UINT64_MAX;
@@ -534,6 +554,7 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
     TempoArray    tempos       = { NULL, 0, 0 };
     uint64_t      loopStartTick = UINT64_MAX;
     uint64_t      loopEndTick   = UINT64_MAX;
+    uint64_t      firstEndTick  = 0;
 
     /* ---- Parse all tracks ---- */
     for (int t = 0; t < (int)numTracks; t++) {
@@ -546,8 +567,21 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
         uint32_t trackLen;
         if (mr_read_u32_be(&r, &trackLen) < 0) break;
         size_t trackEnd = r.pos + trackLen;
-        parse_track(&r, trackLen, (uint8_t)t, &rawEvents, &tempos, &loopStartTick, &loopEndTick);
+        uint64_t endTick = UINT64_MAX;
+        uint16_t noteChannels = 0;
+        parse_track(&r, trackLen, (uint8_t)t, &rawEvents, &tempos, &loopStartTick, &loopEndTick,
+                    &endTick, &noteChannels);
         r.pos = trackEnd;
+        if (t == 0)
+            firstEndTick = endTick;
+        /* mid2agb's FINE for each AGB track of this MTrk: its events merged
+         * with the first MTrk's, whose end-of-track counts too (MergeEvents
+         * keeps the later EndOfTrack). */
+        uint64_t fine = endTick > firstEndTick ? endTick : firstEndTick;
+        for (int c = 0; c < 16; c++)
+            if ((noteChannels & (1u << c)) && trackEndCount < MAX_TRACK_ENDS)
+                trackEnds[trackEndCount++] = (RawMidiEvent){ fine, (uint8_t)c, (uint8_t)t,
+                                                             RENDER_EVT_TRACK_END, 0, 0, 0 };
     }
 
     free(buf);
@@ -568,6 +602,18 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
     *totalMidiSamples = tick_to_sample(lastTick,
                                         tempos.events, tempos.count,
                                         tpqn, sampleRate);
+
+    /* The track ends (RENDER_EVT_TRACK_END), without a loop only, after every
+     * other event of their tick: appended after the sort, then merged in
+     * by tick (origIndex past the others').  They do not lengthen the
+     * render (lastTick above). */
+    if (trackEndCount > 0 && !(loopStartTick != UINT64_MAX && loopEndTick != UINT64_MAX
+                               && loopEndTick > loopStartTick)) {
+        for (int i = 0; i < trackEndCount; i++)
+            if (raw_push(&rawEvents, trackEnds[i]) != 0)
+                break;
+        qsort(rawEvents.events, (size_t)rawEvents.count, sizeof(RawMidiEvent), cmp_raw_events);
+    }
 
     /* ---- Convert loop marker ticks to sample positions ---- */
     if (loopStartTick != UINT64_MAX)
@@ -836,6 +882,7 @@ static void print_usage(const char *prog)
         "                              position in SoundMain's MPlayMain chain; --cry\n"
         "                              plays on cry0 unless told otherwise)\n"
         "  --psg-log <file>            log every PSG register write with its CPU cycle\n"
+        "  --pcm-log <file>            log every DirectSound channel's state after each SoundMain\n"
         "                              (also with --midi)\n"
         "  --seq-log <file>            log each frame's modeled CgbSound entry cycle\n"
         "\n"
@@ -872,6 +919,7 @@ typedef struct {
     double tailSeconds, fadeoutSeconds, totalDurSeconds;
     int loopCount;
     const char *psgLogPath;      /* --psg-log: every PSG register write with its CPU cycle */
+    const char *pcmLogPath;      /* --pcm-log: the DirectSound channels after each SoundMain */
     const char *seqLogPath;      /* --seq-log: the sequencer's per-frame CgbSound entry cycle */
     int player;                  /* --player: M4A_PLAYER_* the song plays on */
 } SongRenderOpts;
@@ -895,6 +943,46 @@ static void psg_log_cb(void *user, uint32_t reg, uint32_t value)
     (void)user;
     if (sPsgLog.f)
         fprintf(sPsgLog.f, "%lld %02X %02X\n", (long long)sPsgLog.engine->gba.now, reg, value);
+}
+
+/* --pcm-log: after each SoundMain (SoundMainRAM done), one "f <frame>" line
+ * (the ROM's engine frame, from the cycle clock) and one line per real
+ * DirectSound channel with a nonzero status: index, status, key, midiKey,
+ * track (the engine's: the sequencer's track on --song, the SMF track on
+ * --midi), velocity, envelope volume, right / left volume (ChnVolSetAsm),
+ * envelope right / left and frequency.  For comparing the two paths frame
+ * by frame (plan, milestone 5 slice 6). */
+static FILE *sPcmLog;
+static void pcm_log_cb(M4AEngine *engine, void *user)
+{
+    (void)user;
+    if (!sPcmLog)
+        return;
+    long long frame = (engine->gba.now - 124773) / GBA_CYCLES_PER_FRAME + 1;
+    fprintf(sPcmLog, "f %lld\n", frame);
+    for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+        const M4APCMChannel *ch = &engine->pcmChannels[i];
+        if (!ch->status)
+            continue;
+        fprintf(sPcmLog, "%d st=%02X k=%u mk=%u t=%d v=%u env=%u vr=%u vl=%u er=%u el=%u f=%u\n",
+                i, ch->status, ch->key, ch->midiKey, ch->trackIndex, ch->velocity, ch->envelopeVolume,
+                ch->rightVolume, ch->leftVolume, ch->envelopeVolumeRight, ch->envelopeVolumeLeft,
+                ch->frequency);
+    }
+}
+
+static void pcm_log_open(M4AEngine *engine, const char *path)
+{
+    if (!path)
+        return;
+    sPcmLog = fopen(path, "w");
+    engine->frameLogHook = pcm_log_cb;
+    engine->frameLogHookUser = NULL;
+}
+
+static void pcm_log_close(void)
+{
+    if (sPcmLog) { fclose(sPcmLog); sPcmLog = NULL; }
 }
 
 static int grow_buffers(float **l, float **r, uint64_t *cap, uint64_t need, uint64_t limit)
@@ -1039,6 +1127,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
         sPsgLog.engine = &engine;
         engine.psg[0].writeLog = psg_log_cb;
     }
+    pcm_log_open(&engine, o->pcmLogPath);
     FILE *seqLog = o->seqLogPath ? fopen(o->seqLogPath, "w") : NULL;
     seq.traceFile = seqLog;
     if (song2)
@@ -1079,6 +1168,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
             fprintf(stderr, "Out of memory allocating audio buffers\n");
             if (seqLog) fclose(seqLog);
             if (sPsgLog.f) { fclose(sPsgLog.f); sPsgLog.f = NULL; }
+            pcm_log_close();
             if (song2) { m4a_sequencer_detach(&seq2); voicegroup_free(vg2); m4a_song_free(song2); }
             m4a_sequencer_detach(&seq);
             m4a_engine_destroy(&engine);
@@ -1093,6 +1183,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
                             "longer-playing one, which this renderer does not do)\n", (double)total / rate);
             if (seqLog) fclose(seqLog);
             if (sPsgLog.f) { fclose(sPsgLog.f); sPsgLog.f = NULL; }
+            pcm_log_close();
             m4a_sequencer_detach(&seq2);
             m4a_sequencer_detach(&seq);
             m4a_engine_destroy(&engine);
@@ -1153,6 +1244,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
         fclose(sPsgLog.f);
         sPsgLog.f = NULL;
     }
+    pcm_log_close();
     if (song2) {
         m4a_sequencer_detach(&seq2);
         voicegroup_free(vg2);
@@ -1446,6 +1538,9 @@ static void dispatch_event(M4AEngine *engine, const RenderEvent *ev,
     case 0xC: /* Program Change */
         m4a_engine_program_change(engine, trackIdx, ev->data0);
         break;
+    case RENDER_EVT_TRACK_END: /* mid2agb's FINE */
+        m4a_engine_track_end(engine, trackIdx);
+        break;
     case 0xE: /* Pitch Bend — convert MIDI 14-bit unsigned to signed -8192..+8191 */
     {
         int16_t bend = (int16_t)(((int)(ev->data1 << 7) | ev->data0) - 8192);
@@ -1516,6 +1611,7 @@ int main(int argc, char *argv[])
     double      fadeoutSeconds = 5.0;
     double      totalDurSeconds = -1.0; /* -1 = not set */
     const char *psgLogPath    = NULL;
+    const char *pcmLogPath    = NULL;
     const char *seqLogPath    = NULL;
     int         player        = M4A_PLAYER_BGM;
     bool        playerSet     = false;
@@ -1620,6 +1716,8 @@ int main(int argc, char *argv[])
                         hz, m4a_pcm_freq_mode_hz(pcmFreqMode));
         } else if (strcmp(argv[i], "--psg-log") == 0 && i + 1 < argc) {
             psgLogPath = argv[++i];
+        } else if (strcmp(argv[i], "--pcm-log") == 0 && i + 1 < argc) {
+            pcmLogPath = argv[++i];
         } else if (strcmp(argv[i], "--seq-log") == 0 && i + 1 < argc) {
             seqLogPath = argv[++i];
         } else if (strcmp(argv[i], "--player") == 0 && i + 1 < argc) {
@@ -1712,6 +1810,7 @@ int main(int argc, char *argv[])
             .tailSeconds = tailSeconds, .fadeoutSeconds = fadeoutSeconds,
             .totalDurSeconds = totalDurSeconds, .loopCount = loopCount,
             .psgLogPath = psgLogPath,
+            .pcmLogPath = pcmLogPath,
             .seqLogPath = seqLogPath,
             .player = player,
         };
@@ -2169,6 +2268,7 @@ oom:
         sPsgLog.engine = &engine;
         engine.psg[0].writeLog = psg_log_cb;
     }
+    pcm_log_open(&engine, pcmLogPath);
     /* --gba-tempo-grid: the CgbSound entry of the song mid2agb makes of the
      * MIDI, from a timing-only sequencer on the chosen player (load_timing_song),
      * attached before the boot as the --song path's sequencer is, so frame 2's
@@ -2283,6 +2383,7 @@ oom:
         fclose(sPsgLog.f);
         sPsgLog.f = NULL;
     }
+    pcm_log_close();
     if (timingSong) {
         m4a_sequencer_detach(&timingSeq);
         m4a_song_free(timingSong);
