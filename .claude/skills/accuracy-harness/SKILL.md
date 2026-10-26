@@ -49,12 +49,12 @@ out): each MIDI tick on the frame MPlayMain's tempoC / 150 plays it.
 **The midi-input reports are their own baseline family**
 (`baselines/<date>_midi-path-*.json`, the report's `"input"` field says
 `midi`; `"midi_quantize"`, `"gba_start_delay"` and `"gba_tempo_grid"` say
-which form).  **The midi baseline is the batching set** (slice 6):
-`2026-10-25_midi-path-batching.json` / `-batching-latch.json` for the
-runner's default (41/44), `-batching-aligned` / `-batching-aligned-latch`
+which form).  **The midi baseline is the interleave set** (slice 7):
+`2026-10-26_midi-path-interleave.json` / `-interleave-latch.json` for the
+runner's default (43/44), `-interleave-aligned` / `-interleave-aligned-latch`
 for `--no-gba-tempo-grid` (12/44); the earlier `midi-path-start`,
-`-aligned`, `-tempo-grid`, `-lfo-grid`, `-lfo-order` and `-cgb-entry`
-sets are history.  Never compare a midi
+`-aligned`, `-tempo-grid`, `-lfo-grid`, `-lfo-order`, `-cgb-entry` and
+`-batching` sets are history.  Never compare a midi
 report against a song-input baseline with `compare_reports.py`, and
 never save a midi run as the song-input baseline.  What the MIDI path's
 flags remove: the time origin (`--gba-start-delay`; without it an event
@@ -82,13 +82,16 @@ VOLCHG / PITCHG pass (`track_change_pass`, after the LFO steps) applies
 what is left to every channel the track owns; the renderer ends each
 track where mid2agb writes FINE (`m4a_engine_track_end`: the later of
 the MTrk's and the first MTrk's end-of-track, songs without a loop
-only).  What is left, each against the row's own `--song` render: 42 of
-the 44 grid WAVs are that render sample for sample; vs_wild and
-rg_vs_trainer differ from frames 903 / 904 on, the two-tick-frame
-interleave (in a frame with two ticks the ROM steps tick n's LFO before
-tick n + 1's commands; rg_vs_trainer's PSG write lists differ on frames
-904 .. 944, every other PSG write of every row is on its `--song` cycle,
-register and value); se_rain_stop fails at its `--song` value.
+only).  In a frame with two ticks the ROM steps tick n's LFO before tick
+n + 1's commands: with the grid the renderer sends
+`m4a_engine_tick_boundary` before the first event of each later tick of
+a frame (the walker's `gba_tempo_grid_tick_in_frame`), which runs that
+step among the events, latched like them (slice 7; the plugin never
+calls it, by decision: it cannot know a frame's ticks).  What is left,
+each against the row's own `--song` render: all 44 grid WAVs are that
+render sample for sample, every PSG write of every row on its `--song`
+cycle, register and value; se_rain_stop fails at its `--song` value
+(1c).
 `--pcm-log <file>` dumps every DirectSound channel after each SoundMain
 (status, keys, track, velocity, envelope, volumes, frequency) on both
 paths: compare the two renders frame by frame and channel by channel,
@@ -97,7 +100,7 @@ with `--midi`:
 log both renders and compare them **frame by frame** (each frame's
 ordered (register, value) list); a whole-log sequence match pairs
 repetitive vibrato writes frames apart.  Plan, "Milestone 5 slice 1"
-through "slice 6".
+through "slice 7".
 
 Output: a table on stdout and `build/accuracy/report.json`. poryaaaa WAVs and
 logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-mgba>/`.

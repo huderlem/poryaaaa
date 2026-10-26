@@ -31,6 +31,7 @@ typedef struct {
     int64_t  frame;          /* the frame the walker is on (-1 before frame 0) */
     int64_t  lastFrame;      /* the frame of the last placed tick */
     uint64_t nextClock;      /* the next song tick to place */
+    uint64_t frameFirstClock;/* the first tick of lastFrame */
     bool     frozen;         /* tempoI 0 met with tempoC < 150: no tick ever again */
 } GbaTempoGrid;
 
@@ -53,6 +54,11 @@ uint64_t gba_tempo_grid_pass_clock(const GbaTempoGrid *g, uint64_t tick, uint64_
  * Queries must not go backwards; a clock already placed returns the last
  * placed tick's frame. */
 int64_t gba_tempo_grid_frame(GbaTempoGrid *g, uint64_t clock);
+
+/* The index of song tick `clock` among its frame's ticks (0 for the first),
+ * for a clock gba_tempo_grid_frame just placed or queried: the LFO steps
+ * MPlayMain runs before that tick's commands in the same frame (slice 7). */
+uint32_t gba_tempo_grid_tick_in_frame(const GbaTempoGrid *g, uint64_t clock);
 
 /* A TEMPO (microseconds per beat) at the tick last placed: takes effect on
  * the next frame's add. */

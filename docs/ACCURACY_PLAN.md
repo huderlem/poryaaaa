@@ -8126,6 +8126,260 @@ frame number on the boot frames, its hook installed when fopen fails,
 the logs left open on the MIDI path's out-of-memory return; the shadow
 pool orphaned at a track end (debug mode only).
 
+### Milestone 5 slice 7: the two-tick-frame LFO interleave on the MIDI path (2026-10-26)
+
+Scope: the order of a frame's events and LFO steps on the MIDI path
+when the frame holds more than one song tick (which tick's events
+precede which LFO step, and the flag drop and LFO-delay countdown that
+follow).  Out of scope: -P priority and PRIO, the host's order inside one
+tick, mid2agb's note-length conversion, the slice 5 review's
+timing-copy items, se_rain_stop's lateness floor (1c), the sequencer
+path (`--song` / `--cry`, byte-identical) and the CgbSound driver.
+Before any change the baselines reproduced: claim_check against
+`2026-10-25_cry-over-song-rows.json` 59 diffed, 0 moved, 57/66, 0
+regressions, every row 0.0; unit 1891/1891, blip 49112/0, songs 561/561;
+the four midi runs 0 field differences on 44 rows against
+`2026-10-25_midi-path-batching(-latch, -aligned, -aligned-latch).json`.
+
+**Step 1, the reading.**  *The ROM's rule* (`m4a_1.s`): `_081DD86C`
+adds tempoI to tempoC once per frame, then `_081DD9BC` runs a tick while
+tempoC >= 150 (`_081DD874` .. `_081DD9B6`, tempoC -= 150 after each).
+One tick walks every track of trackCount in order (`_081DD87C` ..
+`_081DD998`): the track's chain walk, its commands while wait == 0
+(`_081DD8E0`, each handler back to `_081DD938`), then `wait -= 1` and
+**that track's LFO step** (`_081DD938` .. `_081DD994`: nothing with
+lfoSpeed or mod 0; lfoDelayC != 0 decremented; else lfoSpeedC +=
+lfoSpeed, the triangle, modM = mod x tri >> 6, PITCHG / VOLCHG on a
+change).  A second tick in the frame repeats the whole walk; the VOLCHG
+/ PITCHG pass (`_081DD9C8`) runs once after the last tick.  The
+sequencer port is the same statement for statement (`m4a_sequencer.c`:
+`mplay_main`'s `while (tempoC >= 150)` over `track_tick`, which ends in
+`lfo_step`; `track_apply` after the loop).  So in a frame with ticks n
+and n + 1, per track: tick n's commands, tick n's step, tick n + 1's
+commands, tick n + 1's step, then the pass.  Across tracks the ROM
+interleaves the tracks too (track 0's step before track 1's tick-n
+commands), but a track's LFO step reads and writes only that track
+(mod, lfoSpeed, lfoSpeedC, lfoDelayC, modM, its flags), and no command
+or note of another track touches those, so "every track's tick-n events,
+every track's tick-n step, every track's tick-n+1 events, every step" is
+the same machine state.  What the order changes, for a track with
+lfoSpeed and mod set (or set in tick n + 1):
+
+- a MOD or LFOS from 0 in tick n + 1: the ROM's tick-n step is skipped
+  (mod 0), the track takes one step this frame; with every event first
+  it takes two, so lfoSpeedC (the LFO phase) runs one step ahead until
+  the next clear_modM (a MOD / LFOS 0, or a note with an LFO delay);
+- an LFOS change between nonzero values in tick n + 1: tick n's step adds
+  the old speed on the ROM, the new one with the events first, and
+  lfoSpeedC accumulates, so the phase differs from then on; a MOD change
+  between nonzero values only changes tick n's modM (modM is recomputed
+  from mod and lfoSpeedC at each step), visible only where the two
+  orders flag differently and the frame's last modM differs from the
+  channels' (written first as "tick n's step uses the old depth", corrected
+  while writing the unit test: a MOD 30 -> 60 case did not differ);
+- a note in tick n + 1: its TrkVolPitSet reads the modM tick n's step
+  left (the ROM) or the previous frame's (all events first); ply_note's
+  `flags &= 0xF0` drops tick n's PITCHG / VOLCHG on the ROM, so when tick
+  n + 1's step leaves modM unchanged the older channels keep the
+  previous frame's LFO offset there, while the new note has tick n's;
+  with an LFO delay, the note's lfoDelayC = lfoDelay is decremented once
+  this frame on the ROM and twice with the events first (the delayed
+  vibrato one tick early);
+- a MOD / LFOS 0, LFODL or MODT in tick n + 1: no difference (clear_modM
+  leaves the same modM / lfoSpeedC either way; LFODL is read at the next
+  note; MODT flags both halves on a change), except lfoDelayC, which only
+  the next note reads after resetting it.
+
+*The engine* (`m4a_engine.c`): the MIDI path applies every event of the
+frame (unlatched: as dispatched between two SoundMains; latched: the
+drain at the top of the tick), then `mplay_main_tail` adds tempoI and
+runs `m4a_lfo_tick` once per 150, then `track_change_pass`.  For a
+two-tick frame that is "tick n's and tick n + 1's events, step, step,
+pass".  The renderer knows each event's tick (the grid walker places
+every song tick on its frame, `gba_tempo_grid.c`); the engine does not:
+the latched drain sees one frame's batch, not its ticks.
+
+*The plugin* (decision, the user, 2026-10-26: **renderer only**, the
+plugin's output unchanged).  Its "ticks" are the engine's own
+accumulator, which runs at the host BPM from the boot and is not phase-
+locked to the host's beat grid; nothing the host sends says which of a
+frame's two accumulator ticks an event belongs to.  Splitting a frame's
+events among its ticks by arrival time inside the frame would be an
+invented rule: at a fast tempo a MOD ridden from 0, or a note on a
+vibrato track, would get one or two LFO steps that frame depending on
+where in the 16.7 ms it arrived -- one LFO step of vibrato phase.  The
+plugin keeps "all of a frame's events, then its steps".
+
+*The measured gap* (grid form, `--pcm-log` / `--psg-log` of the MIDI
+render against the row's `--song` render, frame by frame, channel by
+channel without the track number; `--seq-log` of the `--song` render as
+the reference for which commands share a tick -- its frame label is one
+less than `--pcm-log`'s / the ROM frame; latched = unlatched):
+
+| row | first difference | field (`--song` -> MIDI) | frames | PSG lists | the frame's ticks |
+|-----|------|------|------:|------:|------|
+| mus_vs_wild | 903, ch1 / ch4 | f 17925 -> 17991, 11963 -> 12007 | 53 (903 .. 1086) | 0 | tick n: no command; tick n + 1: MOD 5 on tracks 0 and 1 (from 0), notes on tracks 2, 3, 6 |
+| mus_rg_vs_trainer | 904, ch2 | f 12721 -> 12583 | 43 (904 .. 950) | 40 (904 .. 944) | frame 903, tick n + 1: MOD 4 on tracks 0 and 7 (from 0) |
+
+Mechanism, both rows: the first bullet above, nothing new.  rg_vs_trainer
+(LFOS 44, MOD 4): the ROM's one step gives lfoSpeedC 44, modM 4 x 44 >>
+6 = 2; the MIDI path's two give 88, tri 128 - 88 = 40, modM 2 -- equal on
+frame 903; the next step gives the ROM 88 (modM 2, no change) and the
+MIDI path 132 (tri -4, modM -1): the first difference on 904, ch2 (track
+0's note), and the PSG track 7's (programmable wave, voice 3) writes 904 .. 944, until MOD 0 at SMF
+tick 1080 (clear_modM resets lfoSpeedC on both).  vs_wild (LFOS 18, MOD
+5): one step 18 -> modM 1, two 36 -> modM 2, different at once (frame
+903); the same on frames 972 and 1073 (MOD 0 -> 5 in a second tick
+again), each run ended by the next MOD 0.
+
+*The corpus scan* (every MIDI row, its MIDI walked on the grid in its
+window: tempoI from the first MTrk's tempos, mid2agb's clocks, each event
+on its tick's frame and its tick's index in the frame; per MTrk and
+channel the MOD / LFOS / LFODL / MODT state, LFOS 22 at a track's start):
+the micro rows are at 120 BPM (no frame holds two ticks); two-tick frames
+in littleroot, groudon, mt_chimney, credits (60 s), se_faint,
+se_contest_place, se_truck_unload, se_low_health: none; vs_wild 368,
+rg_vs_trainer 176, vs_trainer 384, se_exp 109, se_rain_stop 56.  An
+LFO-state command or a note on a modulated track in a later tick of a
+frame: vs_wild 9 -- MOD 0 -> 5 on ROM frames 903 (tracks 0, 1), 972 (0,
+1), 1073 (1), 1197 (0, 1; past the 20 s window's 1194 logged frames),
+MOD 5 -> 0 on 793 and 1151 (track 1, no effect by the last bullet);
+rg_vs_trainer 2 -- MOD 0 -> 4 on 903 (tracks 0, 7); none in vs_trainer,
+se_exp, se_rain_stop (no MOD in their windows).  No note on a modulated
+track and no LFOS / LFODL / MODT falls in a later tick anywhere in the
+corpus.  (Slice 3b counted vs_wild's 7 MOD 0 -> 5; the two 5 -> 0 are
+the other two.)
+
+**The design.**  A new engine entry point,
+`m4a_engine_tick_boundary(engine)`: "the frame's next song tick starts
+here", i.e. the LFO step of the tick whose events came before it runs
+now.  It is latched like every other entry point (`M4A_EV_TICK_BOUNDARY`
+in the queue, applied in order by the drain); applied, it runs
+`m4a_lfo_tick` and counts one step ahead (`lfoTicksAhead`);
+`mplay_main_tail`'s tick loop skips one step per counted tick and clears
+the count after the loop, so the frame still takes one step per tick,
+the steps in their ticks' places among the events, and the pass once
+after them.  A sequencer-driven engine ignores it (its MPlayMain is the
+sequencer's).  The renderer, under `--gba-tempo-grid` only, gives each
+event its tick's index in its frame (the grid walker records the frame's
+first tick; `gba_tempo_grid_tick_in_frame`) and before dispatching an
+event whose index k exceeds the boundaries already sent in that frame,
+sends the missing ones (k boundaries before the first event of the
+frame's tick k).  No new flag: it is part of what `--gba-tempo-grid`
+means (the ROM's ticks), as the held TEMPO is.  Without the grid
+nothing calls it (the aligned pair, the plugin).
+
+*Why it is the ROM's.*  The walker's frames are the engine's accumulator
+frames (slice 3b), so the boundaries a frame receives are its ticks after
+the first; each step then runs where `_081DD938` runs it relative to the
+commands, and the per-track equivalence above makes the global order
+the ROM's state.  The gate walk (`_081DD892`) of tick n + 1 is not
+moved: on the MIDI path note ends are events, already in tick order, and
+no LFO step reads a channel.  The flag drop and the delay countdown
+follow from the order, unchanged code.
+
+*Predictions* (grid form; latched = unlatched):
+
+1. **Song input byte-identical**: claim_check 59 / 0 moved / 57/66 / 0
+   regressions / no row moved (the sequencer engine never calls it).
+2. **The aligned pair byte-identical** (0 field differences, every WAV
+   equal to its batching WAV): no grid, no boundary.
+3. **vs_wild and rg_vs_trainer equal to `--song`** on every frame's
+   channel dump and every frame's PSG write list, every write on its
+   cycle; their WAVs the `--song` renders sample for sample: -49.4 /
+   -40.1 PASS, -49.3 / -42.9 PASS.
+4. **Every other grid row byte-identical** to its batching WAV (the scan:
+   no other frame has an LFO-state change or a modulated note in a later
+   tick; vs_trainer, se_exp and se_rain_stop get boundaries but have no
+   track with mod set in them).
+5. **Grid 43/44**, 44 of 44 grid WAVs the `--song` render; se_rain_stop
+   fails at its `--song` value (1c).
+6. **The plugin's output unchanged** (`m4a_plugin.c` untouched, nothing
+   in it calls the boundary).
+
+**Step 2, the code.**  `plugin/m4a_engine.h` / `.c`:
+`M4A_EV_TICK_BOUNDARY`, `M4AEngine.lfoTicksAhead`,
+`m4a_engine_tick_boundary` (a no-op under a sequencer; queued when
+latched; applied: `m4a_lfo_tick`, one tick ahead), `mplay_main_tail`'s
+tick loop skipping the ticks already stepped and clearing the count,
+`m4a_engine_start_song_tempo` clearing it.  `cmd/gba_tempo_grid.h` /
+`.c`: `frameFirstClock` (set when a placed tick opens a frame) and
+`gba_tempo_grid_tick_in_frame`.  `cmd/poryaaaa_render.c`:
+`RenderEvent.gridTickInFrame` (set in the grid walk, 0 without the grid)
+and, in the dispatch loop, the boundaries before an event up to its
+index, counted per dispatch sample (one per grid frame).  No new flag;
+`m4a_plugin.c` and the sequencer unchanged.
+
+**Step 3, the unit test** (`test_two_tick_interleave_midi_path`, 12
+assertions; `batch_pair` now sends the renderer's boundaries -- k before
+an event of a frame's k-th tick -- which at 120 BPM, every existing
+caller, sends none): the grid walker's index at 240 (ticks 3, 6, 8, 11
+second in their frames) and at 120 (none over 400 ticks); at TEMPO 240,
+the same material through the MIDI path and a sequencer song, every PCM /
+CGB channel compared after each of 120 frames, latched and not: A a MOD
+0 -> 30 at second tick 24 under LFOS 40; B an LFOS 40 -> 20 there under
+MOD 30; C a note there restarting an LFODL 3 delay; D notes at second
+ticks 43, 72, 78 on a LFOS 22 / MOD 4 track while an N96 sounds (second
+ticks whose step leaves tick n's modM unchanged after tick n's changed
+it -- 14, 43, 72, 78 in the first 96 -- so the dropped flag keeps the
+older note's pitch); and a
+sequencer-driven engine taking two boundaries a frame, latched (frames
+20 .. 39) and not, ends every frame with its tracks and PCM channels
+those of an engine without them (nothing counted or queued).  On the
+engine with the boundary a no-op (the old order) 8 fail: A, B from frame
+18 (105 frames), C from 20 (103), D on 3 frames from 30, both forms.  A
+MOD 30 -> 60 and a run of MOD changes between nonzero values at second
+ticks did not differ on the old engine (the corrected bullet of step 1;
+not kept as assertions).  Unit **1903/1903** (1891 + 12).
+
+**Step 4, the measurement.**  Song input: claim_check 59 diffed, 0
+moved, 57/66, 0 regressions, no row moved; unit 1903/1903, blip 49112/0,
+songs 561/561; poryaaaa and poryaaaa-standalone build.  Midi:
+`baselines/2026-10-26_midi-path-interleave(.json/.txt)`, `-latch`,
+`-aligned`, `-aligned-latch`: **grid 43/44** (batching 41/44), aligned
+12/44; against the batching set the grid pair differs on vs_wild and
+rg_vs_trainer only (19 fields, the same in both latch forms), the
+aligned pair on nothing (0 field differences, every WAV byte-identical);
+latched = unlatched (every grid WAV equal); compare_reports 0
+regressions over 1 dB.
+
+| test | batching grid | interleave grid | `--song` | batching aligned | interleave aligned |
+|------|------:|------:|------:|------:|------:|
+| mus_vs_wild | -21.1 / -11.2 | **-49.4 / -40.1** PASS | -49.4 / -40.1 | 2.1 / 3.7 | 2.1 / 3.7 |
+| mus_rg_vs_trainer | -15.6 / -7.0 | **-49.3 / -42.9** PASS | -49.3 / -42.9 | 2.3 / 3.9 | 2.3 / 3.9 |
+
+*Channel dumps and PSG logs against `--song`* (grid, both latch forms):
+before as the gap table; after, 0 differing frames on both rows; every
+frame's PSG write list equal with every write on its cycle (vs_wild 1116,
+rg_vs_trainer 4274 = 4132 + the 40 frames' 142).  The MIDI path's own PSG
+logs before -> after: vs_wild byte-identical, rg_vs_trainer changed on
+exactly frames 904 .. 944.  **All 44 grid WAVs are now their `--song`
+renders sample for sample** (slice 6: 42).
+
+**Which predictions held.**  1: held.  2: held.  3: held, both rows, every
+value and WAV.  4: held (vs_trainer, se_exp, se_rain_stop take boundaries
+and are byte-identical).  5: held, 43/44, 44 of 44 WAVs.  6: held (no
+plugin source change).
+
+**The midi baseline** is now the interleave set
+(`2026-10-26_midi-path-interleave.json` / `-latch.json`, the runner's
+default; `-interleave-aligned` / `-aligned-latch` for
+`--no-gba-tempo-grid`); the batching set is history.
+
+**What is left on the MIDI path** (grid form, against `--song`): nothing
+on the corpus -- every row is its `--song` render sample for sample;
+se_rain_stop fails at its `--song` value (the 1c lateness floor).  The
+aligned pair (no grid: the plugin's situation) is where the MIDI path
+still differs from the ROM, by design: the exact tempo map instead of
+the ROM's tick frames, the fixed CgbSound entry, and (this slice) a
+frame's events before its LFO steps.  Not reached by the corpus and
+recorded: a frame with three ticks or more (tempoI > 300) gets two
+boundaries, as the rule says, untested on a row; the boundary's step runs
+before the frame's gate walk when unlatched (the walk reads no LFO
+state); a host calling the boundary more often than the frame has ticks
+gets the extra steps (the renderer's walker and the engine's accumulator
+agree, slice 3b).
+
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
 Timing model step 3 is done (section above): 38/38, the songs at the PCM

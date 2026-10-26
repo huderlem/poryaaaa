@@ -701,6 +701,7 @@ void m4a_engine_start_song_tempo(M4AEngine *engine)
     engine->tempoI = 150;
     engine->tempoC = 0;
     engine->tempoINextSet = false;
+    engine->lfoTicksAhead = 0;
 }
 
 void m4a_engine_set_tick_tempo(M4AEngine *engine, uint16_t tempoI)
@@ -750,6 +751,7 @@ static void apply_event(M4AEngine *engine, const M4AQueuedEvent *ev)
     case M4A_EV_BEND:     m4a_engine_pitch_bend(engine, ev->track, ev->bend); break;
     case M4A_EV_XCMD:     m4a_engine_xcmd(engine, ev->track, ev->a, ev->b); break;
     case M4A_EV_TRACK_END: m4a_engine_track_end(engine, ev->track); break;
+    case M4A_EV_TICK_BOUNDARY: m4a_engine_tick_boundary(engine); break;
     default: break;
     }
 }
@@ -1993,6 +1995,20 @@ static void m4a_lfo_tick(M4AEngine *engine)
     }
 }
 
+/* The boundary between two ticks of one frame (m4a_engine.h): the step of
+ * the tick that ended, now, after its events and before the next tick's
+ * (MPlayMain's _081DD938 at the end of each track's tick). */
+void m4a_engine_tick_boundary(M4AEngine *engine)
+{
+    if (engine->externalSequencer)
+        return;
+    if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_TICK_BOUNDARY, 0, 0, 0, 0 }))
+        return;
+    m4a_lfo_tick(engine);
+    if (engine->lfoTicksAhead < UINT8_MAX)
+        engine->lfoTicksAhead++;
+}
+
 /*
  * Advance active portamento glides.  Called once per engine tick (~60Hz),
  * matching MPlayProcessPortamento which runs once per VBlank so the glide
@@ -2105,8 +2121,13 @@ static void mplay_main_tail(M4AEngine *engine)
     }
     while (engine->tempoC >= 150) {
         engine->tempoC -= 150;
-        m4a_lfo_tick(engine);
+        /* A tick whose step m4a_engine_tick_boundary already ran. */
+        if (engine->lfoTicksAhead > 0)
+            engine->lfoTicksAhead--;
+        else
+            m4a_lfo_tick(engine);
     }
+    engine->lfoTicksAhead = 0;
     /* The VOLCHG / PITCHG pass after the ticks. */
     track_change_pass(engine);
 

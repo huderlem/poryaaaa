@@ -15,6 +15,7 @@ void gba_tempo_grid_init(GbaTempoGrid *g, uint32_t division, uint32_t clocksPerB
     g->frame         = -1;
     g->lastFrame     = 0;
     g->nextClock     = 0;
+    g->frameFirstClock = 0;
     g->frozen        = false;
 }
 
@@ -43,6 +44,8 @@ int64_t gba_tempo_grid_frame(GbaTempoGrid *g, uint64_t clock)
             g->frozen = true;
         if (g->frozen)
             return GBA_TEMPO_GRID_NEVER;
+        if (g->tempoC < 150)
+            g->frameFirstClock = g->nextClock;   /* this tick opens a new frame */
         while (g->tempoC < 150) {
             g->frame++;
             g->tempoC += g->tempoI;
@@ -52,6 +55,11 @@ int64_t gba_tempo_grid_frame(GbaTempoGrid *g, uint64_t clock)
         g->nextClock++;
     }
     return g->lastFrame;
+}
+
+uint32_t gba_tempo_grid_tick_in_frame(const GbaTempoGrid *g, uint64_t clock)
+{
+    return clock > g->frameFirstClock ? (uint32_t)(clock - g->frameFirstClock) : 0;
 }
 
 void gba_tempo_grid_set_tempo(GbaTempoGrid *g, uint32_t usPerBeat)

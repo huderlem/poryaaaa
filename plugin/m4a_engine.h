@@ -368,7 +368,8 @@ enum {
     M4A_EV_PROGRAM,
     M4A_EV_BEND,
     M4A_EV_XCMD,
-    M4A_EV_TRACK_END
+    M4A_EV_TRACK_END,
+    M4A_EV_TICK_BOUNDARY
 };
 typedef struct {
     uint8_t kind;    /* M4A_EV_* */
@@ -522,6 +523,9 @@ struct M4AEngine {
      * the next frame's add (ply_tempo's order); unused by the plugin. */
     bool     tempoINextSet;
     uint16_t tempoINext;
+    /* m4a_engine_tick_boundary: LFO steps of this frame's ticks already run
+     * among its events; the frame's tick loop skips that many. */
+    uint8_t  lfoTicksAhead;
 
     /* Loaded voice data */
     ToneData *voiceGroup;   /* array of 128 ToneData entries */
@@ -928,6 +932,14 @@ void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm);
  * sequencer drives the engine; the plugin uses set_tempo_bpm. */
 void m4a_engine_start_song_tempo(M4AEngine *engine);
 void m4a_engine_set_tick_tempo(M4AEngine *engine, uint16_t tempoI);
+/* poryaaaa_render --gba-tempo-grid (plan, milestone 5 slice 7): the frame's
+ * next song tick starts here.  In a frame with two ticks MPlayMain runs tick
+ * n's commands and each track's LFO step before tick n + 1's commands; the
+ * host calls this between the two ticks' events, and the LFO step of the
+ * tick before it runs now (latched like the other entry points), the
+ * frame's tick loop then skipping it.  A no-op while a sequencer drives the
+ * engine; the plugin never calls it (it cannot know a frame's ticks). */
+void m4a_engine_tick_boundary(M4AEngine *engine);
 
 /* Audio processing */
 void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamples);

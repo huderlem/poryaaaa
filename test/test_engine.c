@@ -6886,8 +6886,17 @@ static int batch_pair(const char *text, const ToneData *voices, const CgbEntryEv
     *sounding = 0;
     *seqClean = true;
     for (int f = 3; f < 3 + nFrames; f++) {
-        while (ev < nEvs && evs[ev].tick < nTicks && tickFrame[evs[ev].tick] == f)
+        /* The renderer's tick boundaries: before an event of the frame's
+         * k-th tick, k boundaries in all (slice 7). */
+        int firstTick = -1, sent = 0;
+        for (int k = 0; k < nTicks && firstTick < 0; k++)
+            if (tickFrame[k] == f)
+                firstTick = k;
+        while (ev < nEvs && evs[ev].tick < nTicks && tickFrame[evs[ev].tick] == f) {
+            for (; sent < evs[ev].tick - firstTick; sent++)
+                m4a_engine_tick_boundary(&pair[0]);
             cgb_entry_dispatch(&pair[0], &evs[ev++]);
+        }
         for (int k = 0; k < 2; k++)
             lfo_order_frame(&pair[k], outL, outR);   /* past frame f's SoundMainRAM */
         bool same = true;
@@ -7061,6 +7070,174 @@ static void test_tick_batching_midi_path(void)
             snprintf(msg, sizeof(msg), "%s%s (%d frames differ, first %d)", cases[c].what,
                      q ? ", latched" : "", bad, firstBad);
             ASSERT(bad == 0 && seqClean, msg);
+        }
+    }
+    free(wd);
+}
+
+/*
+ * The two-tick-frame LFO interleave on the MIDI path (plan, milestone 5
+ * slice 7): in a frame with two song ticks MPlayMain runs tick n's commands
+ * and each track's LFO step before tick n + 1's commands.  With the
+ * renderer's tick boundaries (m4a_engine_tick_boundary, batch_pair) the same
+ * material through the MIDI path and a sequencer song leaves every channel
+ * the same after every frame at 240 (two ticks on three frames in five),
+ * latched and not: a MOD from 0 and an LFOS change in a second tick, a note
+ * restarting an LFO delay there, notes there on a vibrato track while an
+ * older note sounds.  A sequencer-driven engine ignores the boundary; the
+ * grid walker gives one-tick frames no boundary.
+ */
+static void test_two_tick_interleave_midi_path(void)
+{
+    printf("Testing the two-tick-frame LFO interleave on the MIDI path...\n");
+    char msg[200];
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    WaveData *wd = seq_test_wave();
+    voices[2].type = VOICE_DIRECTSOUND;
+    voices[2].key = 60;
+    voices[2].wav = wd;
+    voices[2].attack = 0xFF;
+    voices[2].sustain = 0xFF;
+    voices[2].release = 0xF0;
+
+    /* The grid walker: at 240 ticks 0 .. 11 on frames 0 1 2 2 3 4 4 5 5 6 7
+     * 7, so ticks 3, 6, 8 and 11 are second ticks; at 120 no frame has two. */
+    {
+        static const uint32_t want240[12] = { 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1 };
+        GbaTempoGrid g;
+        gba_tempo_grid_init(&g, 24, 24);
+        bool ok = true;
+        for (uint64_t c = 0; c < 12; c++) {
+            (void)gba_tempo_grid_frame(&g, c);
+            ok = ok && gba_tempo_grid_tick_in_frame(&g, c) == want240[c];
+            if (c == 0)
+                gba_tempo_grid_set_tempo(&g, 250000);   /* 240 BPM from the next frame */
+        }
+        ASSERT(ok, "grid walker at 240: second ticks 3, 6, 8, 11 get index 1, the others 0");
+        gba_tempo_grid_init(&g, 24, 24);
+        ok = true;
+        for (uint64_t c = 0; c < 400; c++) {
+            (void)gba_tempo_grid_frame(&g, c);
+            ok = ok && gba_tempo_grid_tick_in_frame(&g, c) == 0;
+            if (c == 0)
+                gba_tempo_grid_set_tempo(&g, 500000);   /* 120 BPM */
+        }
+        ASSERT(ok, "grid walker at 120: every tick first in its frame (no boundary)");
+    }
+
+    /* Each case: KEYSH, TEMPO 240, VOICE 2, VOL, PAN, the case's setup at
+     * tick 0, an N96 Cn3, then from tick 24 the case's commands (A .. C at
+     * second tick 24, frame 18 with tick 23; D at 43, 72, 78), the note's
+     * end and FINE at tick 96; 120 frames.  Every case fails on an engine
+     * whose boundary does nothing (all of a frame's events before its
+     * steps): A .. C from their frame on, D on 3 frames. */
+    static const struct {
+        const char *what, *pre, *at24;
+        CgbEntryEvent pre_ev[3], ev[10];
+        int nPre, nEv;
+    } cases[] = {
+        { "A: a MOD from 0 in the second tick takes one step that frame",
+          "\t.byte\t\tLFOS  , 40\n",
+          "\t.byte\t\tMOD   , 30\n\t.byte\tW72\n\t.byte\tFINE\n",
+          { { 0, 'c', 1, 0x15, 40 } }, { { 24, 'c', 1, 1, 30 }, { 96, 'n', 1, 60, 0 }, { 96, 'e', 1, 0, 0 } }, 1, 3 },
+        { "B: an LFOS change in the second tick after the first tick's step",
+          "\t.byte\t\tLFOS  , 40\n\t.byte\t\tMOD   , 30\n",
+          "\t.byte\t\tLFOS  , 20\n\t.byte\tW72\n\t.byte\tFINE\n",
+          { { 0, 'c', 1, 0x15, 40 }, { 0, 'c', 1, 1, 30 } },
+          { { 24, 'c', 1, 0x15, 20 }, { 96, 'n', 1, 60, 0 }, { 96, 'e', 1, 0, 0 } }, 2, 3 },
+        { "C: an LFO delay restarted in the second tick counts once that frame",
+          "\t.byte\t\tLFOS  , 40\n\t.byte\t\tLFODL , 3\n\t.byte\t\tMOD   , 30\n",
+          "\t.byte\t\tN24   , Dn3 , v127\n\t.byte\tW24\n\t.byte\tW48\n\t.byte\tFINE\n",
+          { { 0, 'c', 1, 0x15, 40 }, { 0, 'c', 1, 0x1A, 3 }, { 0, 'c', 1, 1, 30 } },
+          { { 24, 'n', 1, 62, 127 }, { 48, 'n', 1, 62, 0 }, { 96, 'n', 1, 60, 0 }, { 96, 'e', 1, 0, 0 } }, 3, 4 },
+        { "D: notes in second ticks on a vibrato track while an older note sounds",
+          "\t.byte\t\tLFOS  , 22\n\t.byte\t\tMOD   , 4\n",
+          /* ticks 43, 72, 78: second ticks whose step leaves tick n's modM
+           * unchanged, so the dropped flag keeps the older note's pitch */
+          "\t.byte\tW19\n\t.byte\t\tN03   , Dn3 , v127\n\t.byte\tW03\n"   /* tick 43 */
+          "\t.byte\tW24\n\t.byte\tW02\n\t.byte\t\tN03   , En3 \n\t.byte\tW03\n"   /* tick 72 */
+          "\t.byte\tW03\n\t.byte\t\tN03   , Fn3 \n\t.byte\tW03\n"   /* tick 78 */
+          "\t.byte\tW15\n\t.byte\tFINE\n",
+          { { 0, 'c', 1, 0x15, 22 }, { 0, 'c', 1, 1, 4 } },
+          { { 43, 'n', 1, 62, 127 }, { 46, 'n', 1, 62, 0 }, { 72, 'n', 1, 64, 127 }, { 75, 'n', 1, 64, 0 },
+            { 78, 'n', 1, 65, 127 }, { 81, 'n', 1, 65, 0 }, { 96, 'n', 1, 60, 0 }, { 96, 'e', 1, 0, 0 } }, 2, 8 },
+    };
+    for (int c = 0; c < (int)(sizeof(cases) / sizeof(cases[0])); c++) {
+        char one[2048];
+        snprintf(one, sizeof(one),
+                 "%s\t.byte\tKEYSH , t_key+0\n"
+                 "\t.byte\tTEMPO , 240*t_tbs/2\n"
+                 "\t.byte\t\tVOICE , 2\n"
+                 "\t.byte\t\tVOL   , 127*t_mvl/mxv\n"
+                 "\t.byte\t\tPAN   , c_v+0\n"
+                 "%s"
+                 "\t.byte\t\tN96   , Cn3 , v127\n"
+                 "\t.byte\tW24\n"
+                 "%s%s", seq_song_header, cases[c].pre, cases[c].at24, seq_song_footer);
+        CgbEntryEvent ev[16];
+        int n = 0;
+        ev[n++] = (CgbEntryEvent){ 0, 'p', 1, 2, 0 };
+        ev[n++] = (CgbEntryEvent){ 0, 'c', 1, 7, 127 };
+        ev[n++] = (CgbEntryEvent){ 0, 'c', 1, 10, 64 };
+        for (int k = 0; k < cases[c].nPre; k++)
+            ev[n++] = cases[c].pre_ev[k];
+        ev[n++] = (CgbEntryEvent){ 0, 'n', 1, 60, 127 };
+        for (int k = 0; k < cases[c].nEv; k++)
+            ev[n++] = cases[c].ev[k];
+        /* the events in tick order (D's note-offs interleave with its notes) */
+        for (int i = 1; i < n; i++)
+            for (int j = i; j > 0 && ev[j - 1].tick > ev[j].tick; j--) {
+                CgbEntryEvent tmp = ev[j]; ev[j] = ev[j - 1]; ev[j - 1] = tmp;
+            }
+        for (int q = 0; q < 2; q++) {
+            int firstBad, sounding;
+            bool seqClean;
+            int bad = batch_pair(one, voices, ev, n, 240, q == 1, 120, &firstBad, &sounding, &seqClean);
+            snprintf(msg, sizeof(msg), "%s%s (%d frames differ, first %d)", cases[c].what,
+                     q ? ", latched" : "", bad, firstBad);
+            ASSERT(bad == 0 && seqClean, msg);
+        }
+    }
+
+    /* A sequencer-driven engine ignores the boundary, latched or not. */
+    {
+        char one[2048];
+        snprintf(one, sizeof(one),
+                 "%s\t.byte\tKEYSH , t_key+0\n\t.byte\tTEMPO , 240*t_tbs/2\n\t.byte\t\tVOICE , 2\n"
+                 "\t.byte\t\tLFOS  , 40\n\t.byte\t\tMOD   , 30\n\t.byte\t\tN96   , Cn3 , v127\n"
+                 "\t.byte\tW96\n\t.byte\tFINE\n%s", seq_song_header, seq_song_footer);
+        M4ASong *song = parse_song_text(one);
+        ASSERT(song != NULL, "sequencer song parses");
+        if (song) {
+            static M4AEngine e, ref;
+            M4ASequencer seq, seqRef;
+            engine_init_booted(&e, 48000.0f);
+            engine_init_booted(&ref, 48000.0f);
+            m4a_engine_set_voicegroup(&e, voices);
+            m4a_engine_set_voicegroup(&ref, voices);
+            m4a_sequencer_init(&seq, &e);
+            m4a_sequencer_init(&seqRef, &ref);
+            m4a_sequencer_start(&seq, song);
+            m4a_sequencer_start(&seqRef, song);
+            float outL[1024], outR[1024];
+            bool same = true;
+            for (int f = 0; f < 40; f++) {
+                m4a_engine_set_quantize_events(&e, f >= 20);
+                m4a_engine_tick_boundary(&e);
+                m4a_engine_tick_boundary(&e);
+                same = same && e.lfoTicksAhead == 0 && e.eventQueueCount == 0;
+                lfo_order_frame(&e, outL, outR);
+                lfo_order_frame(&ref, outL, outR);
+                same = same && memcmp(e.tracks, ref.tracks, sizeof(e.tracks)) == 0
+                     && memcmp(e.pcmChannels, ref.pcmChannels, sizeof(e.pcmChannels)) == 0;
+            }
+            ASSERT(same, "a sequencer-driven engine ignores the tick boundary (tracks and channels as without it)");
+            m4a_sequencer_detach(&seq);
+            m4a_sequencer_detach(&seqRef);
+            m4a_engine_destroy(&e);
+            m4a_engine_destroy(&ref);
+            m4a_song_free(song);
         }
     }
     free(wd);
@@ -7877,6 +8054,7 @@ int main(void)
     test_lfo_cgbsound_order();
     test_cgb_entry_midi_path();
     test_tick_batching_midi_path();
+    test_two_tick_interleave_midi_path();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

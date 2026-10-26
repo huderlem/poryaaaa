@@ -204,6 +204,9 @@ typedef struct {
     uint64_t songTick;
     uint32_t loopPass;
     uint32_t gridTempoUs;
+    /* --gba-tempo-grid: the index of the event's tick among its frame's
+     * ticks (0 without the grid): the tick boundaries before it. */
+    uint32_t gridTickInFrame;
 } RenderEvent;
 
 /* Dynamic array helpers */
@@ -2176,6 +2179,7 @@ int main(int argc, char *argv[])
             evs[i].samplePos = gba_tempo_grid_dispatch_sample(gridp, evs[i].samplePos, clock,
                                                               evs[i].type == RENDER_EVT_TEMPO ? evs[i].gridTempoUs : 0,
                                                               sampleRate);
+            evs[i].gridTickInFrame = gridp ? gba_tempo_grid_tick_in_frame(gridp, clock) : 0;
         }
         const int64_t lastEventFrame = grid.lastFrame;  /* before a fade query past the events */
         if (fadeOnGrid && fadeFrame < 0)
@@ -2342,6 +2346,10 @@ oom:
      * so this only states it; the held TEMPOs are what move the steps. */
     const uint32_t gridClocksPerBeat = gbaTempoGrid ? (extendedClocks ? 48 : 24) : 0;
     bool songTempoStarted = !gbaTempoGrid;
+    /* --gba-tempo-grid: the tick boundaries sent in the frame of the
+     * dispatch sample boundarySample (one sample per grid frame). */
+    uint64_t boundarySample = UINT64_MAX;
+    uint32_t boundariesSent = 0;
     for (int i = 0; i < renderEvtCount; i++) {
         const RenderEvent *ev = &renderEvts[i];
 
@@ -2364,6 +2372,14 @@ oom:
             render_frames(&engine, outL, outR, samplePos, evPos - samplePos);
 
         samplePos = evPos;
+        /* A later tick of the frame: MPlayMain runs each earlier tick's LFO
+         * steps before this tick's commands (plan, milestone 5 slice 7). */
+        if (evPos != boundarySample) {
+            boundarySample = evPos;
+            boundariesSent = 0;
+        }
+        for (; boundariesSent < ev->gridTickInFrame; boundariesSent++)
+            m4a_engine_tick_boundary(&engine);
         dispatch_event(&engine, ev, useTrackIndex, gridClocksPerBeat);
     }
 
