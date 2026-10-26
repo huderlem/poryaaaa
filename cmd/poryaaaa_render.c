@@ -397,6 +397,13 @@ static int cmp_raw_events(const void *a, const void *b)
     const RawMidiEvent *eb = (const RawMidiEvent *)b;
     if (ea->tick < eb->tick) return -1;
     if (ea->tick > eb->tick) return  1;
+    /* A track end (mid2agb's FINE) after its own MTrk's events of the tick
+     * and before the next MTrk's: MPlayMain runs each track's commands,
+     * FINE included, before the next track's.  (origIndex rises with the
+     * MTrk, so this is the file order for every other event.) */
+    if (ea->track != eb->track) return ea->track < eb->track ? -1 : 1;
+    bool endA = ea->type == RENDER_EVT_TRACK_END, endB = eb->type == RENDER_EVT_TRACK_END;
+    if (endA != endB) return endA ? 1 : -1;
     /* Stable tiebreaker: preserve original file order so that setup events
      * (Program Change, CC) that precede Note Ons at the same tick are always
      * dispatched first, regardless of whether the platform's qsort is stable. */
@@ -603,10 +610,9 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
                                         tempos.events, tempos.count,
                                         tpqn, sampleRate);
 
-    /* The track ends (RENDER_EVT_TRACK_END), without a loop only, after every
-     * other event of their tick: appended after the sort, then merged in
-     * by tick (origIndex past the others').  They do not lengthen the
-     * render (lastTick above). */
+    /* The track ends (RENDER_EVT_TRACK_END), without a loop only, each after
+     * its MTrk's other events of its tick (cmp_raw_events).  They do not
+     * lengthen the render (lastTick above). */
     if (trackEndCount > 0 && !(loopStartTick != UINT64_MAX && loopEndTick != UINT64_MAX
                                && loopEndTick > loopStartTick)) {
         for (int i = 0; i < trackEndCount; i++)
@@ -2191,6 +2197,7 @@ int main(int argc, char *argv[])
             uint64_t last = 0;
             for (int i = 0; i < renderEvtCount; i++)
                 if (evs[i].type != RENDER_EVT_TEMPO   /* the last channel event, as totalMidiSamples */
+                    && evs[i].type != RENDER_EVT_TRACK_END
                     && evs[i].samplePos < never - gba_tempo_grid_sample(0, sampleRate))
                     last = evs[i].samplePos;   /* the ticks a TEMPO of 0 never reaches are no part of it */
             totalSamples = last + tailSamps;

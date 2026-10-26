@@ -6844,8 +6844,8 @@ static void test_cgb_entry_midi_path(void)
 
 /* The material through both paths, as cgb_entry_pair, compared on the
  * channels instead: after each of frames 3 .. 2 + nFrames, every real PCM
- * and CGB channel's status, right / left volume (ChnVolSetAsm), frequency
- * and envelope.  Returns the differing frames; *firstBad the first, *sounding
+ * and CGB channel's status, right / left volume (ChnVolSetAsm), frequency,
+ * envelope and whether it is owned by no track (ply_fine's unlink).  Returns the differing frames; *firstBad the first, *sounding
  * the frames with more than one PCM channel on (a releasing note beside a
  * new one), *seqClean whether the sequencer engine's tracks never took a
  * pending change or the finished mark. */
@@ -6898,14 +6898,18 @@ static int batch_pair(const char *text, const ToneData *voices, const CgbEntryEv
                 && a->leftVolume == b->leftVolume && a->frequency == b->frequency
                 && a->envelopeVolume == b->envelopeVolume
                 && a->envelopeVolumeRight == b->envelopeVolumeRight
-                && a->envelopeVolumeLeft == b->envelopeVolumeLeft;
+                && a->envelopeVolumeLeft == b->envelopeVolumeLeft
+                /* ply_fine's unlink: owned by no track on both (the paths
+                 * number their tracks differently) */
+                && (a->trackIndex == M4A_NO_TRACK) == (b->trackIndex == M4A_NO_TRACK);
             on += (a->status & CHN_ON) != 0;
         }
         for (int c = 0; c < MAX_CGB_CHANNELS; c++) {
             const M4ACGBChannel *a = &pair[0].cgbChannels[c], *b = &pair[1].cgbChannels[c];
             same = same && a->status == b->status && a->rightVolume == b->rightVolume
                 && a->leftVolume == b->leftVolume && a->frequency == b->frequency
-                && a->envelopeVolume == b->envelopeVolume;
+                && a->envelopeVolume == b->envelopeVolume
+                && (a->trackIndex == M4A_NO_TRACK) == (b->trackIndex == M4A_NO_TRACK);
         }
         for (int t = 0; t < MAX_TRACKS; t++)
             *seqClean = *seqClean && pair[1].tracks[t].chgFlags == 0 && !pair[1].tracks[t].finished;

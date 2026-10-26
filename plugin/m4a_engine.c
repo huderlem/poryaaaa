@@ -1304,9 +1304,8 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
         if (portamentoInherit) {
             ch->status = CHN_ENV_SUSTAIN;
             /* A legato continuation must not re-arm the hardware envelope
-             * and sweep (MO_VOL on the next tick); the volume refresh that
-             * an LFO-delay restart may have run above would otherwise do so.
-             * The new frequency still has to reach NRx3/NRx4. */
+             * and sweep (MO_VOL); only the new frequency has to reach
+             * NRx3/NRx4. */
             ch->modify = 0x02;
         } else {
             m4a_cgb_channel_start(ch);
@@ -1474,10 +1473,9 @@ void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key)
 }
 
 /*
- * Recalculate and push updated frequencies into every active PCM/CGB channel
- * on the given track.  Called when pitch-related track state changes (pitch
- * bend, LFO vibrato) so that already-playing notes follow the new pitch.
- * Matches MPlayMain's per-tick note re-evaluation on real GBA hardware.
+ * Push the track's (already computed) keyM / pitM into the frequency of every
+ * channel it owns: the PITCHG half of MPlayMain's pass (track_change_pass, and
+ * the sequencer's m4a_engine_track_apply).
  */
 static void refresh_channel_pitches(M4AEngine *engine, M4ATrack *track, int trackIndex)
 {
@@ -1499,9 +1497,6 @@ static void refresh_channel_pitches(M4AEngine *engine, M4ATrack *track, int trac
     }
 }
 
-/* Recalculate track vol/pan and push updated rightVolume/leftVolume into
-* all active channels on the track. Matches MPlayMain's behavior of calling
-* ChnVolSetAsm on every active channel when MPT_FLG_VOLCHG is set. */
 /* Push the track's (already computed) volMR/volML into its channels: the
  * ChnVolSetAsm half of MPlayMain's VOLCHG pass. */
 static void apply_track_volumes(M4AEngine *engine, M4ATrack *track, int trackIndex)
@@ -1529,7 +1524,7 @@ static inline void refresh_volumes(M4AEngine *engine, M4ATrack *track, int track
     apply_track_volumes(engine, track, trackIndex);
 }
 
-/* MPlayMain's VOLCHG / PITCHG pass (_081DD9C8 .. _081DDA58) for the MIDI
+/* MPlayMain's VOLCHG / PITCHG pass (_081DD9C8 .. _081DDA62) for the MIDI
  * path: after the frame's ticks, each flagged track's TrkVolPitSet, then
  * ChnVolSetAsm (VOLCHG) and the frequency (PITCHG) on every channel it
  * still owns, releasing ones included (plan, milestone 5 slice 6). */
@@ -2169,7 +2164,7 @@ void m4a_engine_tick(M4AEngine *engine)
         drain_events(engine);
 
     /* The rest of MPlayMain without a sequencer: the frame's LFO steps
-     * (tempo loop, VOLCHG / PITCHG folded in), then portamento and PWM, all
+     * (tempo loop), the VOLCHG / PITCHG pass, then portamento and PWM, all
      * before CgbSound as in SoundMain, so a CGB pitch / volume / duty they
      * set is written by this frame's CgbSound (plan, milestone 5 slice 4). */
     if (!seq)

@@ -7816,7 +7816,7 @@ against `2026-10-25_midi-path-cgb-entry(-latch, -aligned,
   RealClearChain (channel->track = 0), track flags = 0; MPlayMain's
   `ldrb flags; cmp 0; beq _081DD994` skips the tick's LFO step and the
   track never ticks again.
-- mid2agb's order inside a tick (`EventCompare`, midi.cpp 580-614, applied by `std::stable_sort` in `ReadMidiTracks`):
+- mid2agb's order inside a tick (`EventCompare`, midi.cpp 581-614, applied by `std::stable_sort` in `ReadMidiTracks`):
   EndOfTie, loop markers, TEMPO, VOICE, controllers, BEND, KEYSH, then the
   notes by key -- a tick's controllers always precede its notes.
 
@@ -7841,9 +7841,9 @@ of differing frames, on the cgb-entry code):
 | lfo_delay | 123, ch0 | f 3569 -> 3382 | 10 | ply_fine: the LFO steps after FINE |
 | se_rain_stop | 20, ch0 | vr / vl 20 / 19 -> 17 / 17 | 2 | batching: VOL before the note (slice 2a's tick 24) |
 | se_contest_place | 25, ch0 + ch2 | vr / vl 10 / 9 -> 52 / 49 | 5 | batching: VOL before a note, two releasing notes |
-| mus_littleroot | 87, ch2 | vr / vl 46 / 45 -> 93 / 92, f 17670 -> 17858 | 206 | batching: VOL and BEND before a note |
+| mus_littleroot | 87, ch2 | vr / vl 46 / 45 -> 93 / 92, f 17670 -> 17858 | 206 | batching: MOD 0 and VOL before a note |
 | mus_vs_wild | 150, ch0 | vr / vl 67 / 66 -> 77 / 55 | 84 (19 before 903) | batching: PAN before a note; from 903 the interleave |
-| mus_mt_chimney | 91, ch1 | vr / vl 62 / 8 -> 9 / 60, f 5981 -> 5959 | 79 | batching: PAN and BEND before a note |
+| mus_mt_chimney | 91, ch1 | vr / vl 62 / 8 -> 9 / 60, f 5981 -> 5959 | 79 | batching: PAN and MOD 0 before a note |
 | mus_rg_vs_trainer | 14, ch0 + ch4 | vr / vl 10 / 72 -> 41 / 41 | 201 (146 before 903) | batching: PAN before a note; from 904 the interleave |
 | mus_vs_trainer | 440, ch1 | vr / vl 61 / 37 -> 54 / 44 | 10 | batching |
 | mus_credits | 2416, ch0 | vr / vl 18 / 15 -> 24 / 9 | 182 | batching |
@@ -7859,7 +7859,8 @@ two-tick-frame LFO interleave); the FINE then made vol and lfo_delay
 equal.  Nothing new: every difference before 903 is one of the two
 mechanisms.  Corpus check of the order rule: on all 530 vanilla MIDIs no
 note-on precedes a VOL / PAN / BEND / BENDR / TUNE / LFOS / MODT / MOD at
-the same tick on its channel (22983 controllers precede one), so the
+the same tick in its MTrk on its channel (22983 note-ons have one before
+them at their tick), so the
 MIDI file's order is mid2agb's wherever it matters here.
 
 **Decision (the user, 2026-10-25):** the batching is the engine's for
@@ -7964,8 +7965,9 @@ finished mark.  On the old engine (HEAD's plugin/ with a no-op
 `m4a_engine_track_end` and the two fields stubbed) 12 fail: the combined
 song (both forms, 145 frames from 18) and A, B, C, E, F (both forms); D
 holds on both (the old rule reaches every channel too) and guards the
-pass.  Two existing assertions (`test_midi_path_modt_tune_lfodl`: TUNE's
-keyM, MODT's pitch) now tick once before reading, the pass's frame.
+pass.  `test_midi_path_modt_tune_lfodl` now ticks once (the pass's frame)
+before three of its reads: TUNE -64's keyM / pitM, TUNE centre's keyM and
+MODT's pitch.
 Unit **1891/1891** (1875 + 16).
 
 **Step 4, the measurement.**  Song input: claim_check 59 diffed, 0 moved,
@@ -8013,6 +8015,11 @@ held, in all four runs.  6: held.  7: held, 41/44.  8: held: the same
 ten WAVs moved, se_rain_stop -32.9 -> -41.8 and se_contest_place's worst
 1 s -8.5 -> -10.8 the only changes over 0.2 dB, 12/44.
 
+**The midi baseline** is now the batching set
+(`2026-10-25_midi-path-batching.json` / `-latch.json`, the runner's
+default; `-batching-aligned` / `-aligned-latch` for
+`--no-gba-tempo-grid`); the cgb-entry set is history.
+
 **What is left on the MIDI path** (grid form, against `--song`): vs_wild
 and rg_vs_trainer, the two-tick-frame LFO interleave (in a frame with two
 ticks the ROM steps tick n's LFO before tick n + 1's commands; the
@@ -8027,6 +8034,97 @@ end-of-track and the renderer's loop detection (first `[` / `]` of any
 track, where mid2agb's GOTO comes from the first MTrk's markers, the
 slice 5 item); a track end applies to the shadow pool's channels too
 (the overflow-debug mode only).
+
+**Code review of slice 6 (2026-10-25).**  Two independent read-only
+reviews (reviewer 1: the change against MPlayMain / ply_note / ply_fine /
+TrkVolPitSet / ChnVolSetAsm / clear_modM in m4a_1.s and m4a.c, the
+sequencer port, mid2agb's FINE and event order, the plugin, latch and
+timing-sequencer paths; reviewer 2: every number of this section
+recomputed -- all 44 rows re-rendered on both paths with its own scripts,
+the channel dumps and PSG logs compared with its own method, the nulls
+recomputed from the WAVs, the unit test assertion by assertion, the
+corpus scan redone, the docs).
+
+Confirmed: every handler's flags (VOLCHG / PITCHG, MODT on a change,
+clear_modM by modT, nonzero MOD / LFOS and LFODL none) and the LFO step's;
+the flag drop on exactly the notes that take a channel (the rejects, bad
+voice and shadow notes keep them; TrkVolPitSet's both-halves recompute
+equivalent); the pass's place (drain, LFO, pass, portamento / PWM,
+CgbSound, SoundMainRAM), its reach (ON and owned, MO_VOL / MO_PIT on
+CGB) and the PAUSE skip being moot; ply_fine's STOP-if-ON, unlink, flags
+and LFO; M4A_NO_TRACK everywhere else in the engine (note-off, the CGB
+steal test, the PCM tie-break, PWM, poly stats); the FINE tick (max with
+the first MTrk's end, the clock conversion, after its track's events,
+Type 0, multi-channel MTrks, loops); the `--song` / `--cry` paths and the
+timing-only sequencer untouched; the plugin needing no clear of the new
+fields; every value, pass count, moved row, WAV identity and latch
+identity of the tables; the gap table's frames, fields and counts, before
+and after (and the other 34 rows' PCM logs equal on both paths); the PSG
+claims and counts; 42 of 44 WAVs equal to `--song`; the mechanism of
+every row at the named frames in the `.s` and the MIDI; the unit test's
+events against its song texts and the 12 old-engine failures (from the
+code); the m4a_1.s line references.
+
+*Acted on* (each alone; gate after each: claim_check 59 diffed, 0 moved,
+57/66, 0 regressions, no row moved; the four midi runs 0 field
+differences on 44 rows against the batching set and every WAV
+byte-identical; unit as below):
+
+- *The track end's place among the tracks of its tick* (reviewer 1): the
+  ROM runs each track's commands, FINE included, before the next
+  track's, so a lower track's FINE precedes a higher track's note of the
+  same tick (the note's scan sees the channel STOP); the renderer put
+  every track end after every event of the tick.  `cmp_raw_events` now
+  orders a tie by MTrk, then the track end after its MTrk's events
+  (origIndex rises with the MTrk: the file order for every other event).
+  Reached by none of the 530 vanilla MIDIs without a loop (my scan);
+  harness-neutral.
+- *The track ends lengthened grid renders* (reviewer 1): with
+  `--gba-tempo-grid`, no loop and no `--total-duration-seconds`, the
+  render ends a tail after the last non-TEMPO event, which now included
+  the track ends -- 182 of the 530 vanilla MIDIs have a FINE after their
+  last event (mus_heal 5.06 s at 8df534a, 5.35 s at the slice commit).
+  Track ends are left out of that bound: 5.06 s again (se_a 3.81, as
+  8df534a; the exact path never counted them).  Harness-neutral (the
+  harness passes `--total-duration-seconds`).
+- *The unlink was not tested* (reviewer 2): a `track_end` that only
+  stopped and dropped the flags passed every assertion.  `batch_pair`
+  also compares whether each channel is owned by no track; the mutant
+  now fails 6 (the combined song and E / F, both forms).  Unit
+  **1891/1891** (no new assertion).
+- *Docs and comments* (both): littleroot's and mt_chimney's first
+  differences are MOD 0 (clear_modM's PITCHG) with a VOL / PAN before the
+  note, not a BEND (reviewer 2, read in the `.s` and the MIDI: `MOD 0`,
+  `VOL 127`, `N12 Fn1` / `PAN c_v-46`, `MOD 0`, `N24 Gn2`); EventCompare
+  is midi.cpp 581-614; the corpus count is per MTrk (reviewer 2's 0
+  violations agrees; its totals for "controllers before a note" are
+  29511 controllers / 22929 tick groups, my 22983 counts note-ons with a
+  controller before them at their tick -- different definitions); the
+  unit-test wording (three ticks added, above); the baseline sentence;
+  stale comments in m4a_engine.c (the tick's "VOLCHG / PITCHG folded in",
+  the pass's end label, the legato and pitch / volume helpers'
+  comments).
+
+*Recorded, not acted on* (no corpus row or caller reaches them): a
+DirectSound voice without a sample takes a channel and drops the flags
+on the ROM, the engine returns first (reviewer 1; as slice 5's wav ==
+NULL item); a note with an audition set drops the track's flags like any
+note (tests only); the two-tick-frame interleave (out of scope: tick n's
+LFO flag dropped by tick n + 1's note, the LFO delay one tick early); a
+CC or note after a FINE still applies, a note revives the track's LFO
+(the renderer's FINE is its track's last event, the plugin never ends a
+track); mid2agb makes no AGB track (no FINE) for a channel whose notes
+all have zero length, the renderer ends it anyway; a second end-of-track
+meta event, events after one; "%d MIDI events" and the grid's last-frame
+message count the track ends; the parse's loop test in ticks against the
+render's in samples; a Type 0 file's track ends go after the whole
+MTrk's events of the tick, where mid2agb's tracks run per channel; the
+order inside a tick is the host's (any MIDI with a note-on before its
+tick's controller); the pitch half skips fixed-frequency and sampleless
+PCM channels (the mixer ignores it, as on `--song`); `--pcm-log`'s
+frame number on the boot frames, its hook installed when fopen fails,
+the logs left open on the MIDI path's out-of-memory return; the shadow
+pool orphaned at a track end (debug mode only).
 
 ### Next: milestone 4, cries and SE (handoff, 2026-10-24)
 
