@@ -265,11 +265,8 @@ static void render_general_tab(M4AGuiState *gui)
             ImGui::EndCombo();
         }
         ImGui::SetItemTooltip(
-            "Rate the DirectSound (PCM) channels are mixed at: the m4a sound mode's\n"
-            "frequency setting (SOUND_MODE_FREQ_xxxxx).  Pokemon games use 13379 Hz,\n"
-            "so high notes alias as in-game; a game that sets a higher rate sounds\n"
-            "cleaner, at a CPU cost it would pay too.  (7884 Hz is not offered\n"
-            "while the HQ Mixer is on: its frame is not a multiple of 8 samples.)");
+            "Sample rate for PCM (DirectSound) instruments.\n"
+            "Vanilla Pokemon games use 13379 Hz.");
     }
 }
 
@@ -702,29 +699,26 @@ static void render_menu_bar(M4AGuiState *gui)
             "(CC 0x17 = duty-cycle pattern, CC 0x19 = modulation speed).");
         ImGui::Separator();
         toggle_menu_item(gui, "HQ Mixer (ipatix)", &gui->settings.hqMixer,
-            "Mix the DirectSound (PCM) channels with ipatix's High-Quality Audio\n"
-            "Mixer, as the pret wiki installs it in pokeemerald, instead of the\n"
-            "stock SoundMainRAM: a 16-bit mix with one final quantization, so\n"
-            "chords no longer wrap or add 8-bit rounding noise per channel.\n"
-            "Use it when your project has the HQ mixer installed.  PSG channels\n"
-            "are unaffected; 7884 Hz is not an HQ mix rate (it snaps to 13379).");
+            "Emulate ipatix's High-Quality Audio Mixer for PCM instruments.\n"
+            "Enable this if your project has the HQ mixer installed.");
         if (gui->settings.hqMixer && gui->settings.pcmFreqMode == 2) {
             gui->settings.pcmFreqMode = M4A_PCM_FREQ_MODE_DEFAULT;
             gui->settingsChanged = true;
         }
         ImGui::Separator();
-        if (ImGui::BeginMenu("Quantize to GBA Frames")) {
+        bool quantizeOpen = ImGui::BeginMenu("Quantize to GBA Frames");
+        ImGui::SetItemTooltip(
+            "Snap MIDI events to the GBA's 60 Hz frame timing,\n"
+            "as the real sound engine does.");
+        if (quantizeOpen) {
             uint8_t *mode = &gui->settings.eventLatchMode;
             radio_menu_item(gui, "Follow Transport", mode, M4A_LATCH_TRANSPORT,
-                "Hold notes, CCs, program changes and pitch bends to the next GBA\n"
-                "frame (one VBlank, about 16.7 ms) while the DAW transport plays, as\n"
-                "the game's sound engine would; apply them at once while it is\n"
-                "stopped, so live playing stays responsive.  With no transport\n"
-                "(the standalone) this means Never.  The default.");
+                "Quantize while the DAW is playing, for accurate timing.\n"
+                "Respond instantly while stopped, for live playing. (Default)");
             radio_menu_item(gui, "Always", mode, M4A_LATCH_ON,
-                "Always hold events to the next GBA frame, playing or not.");
+                "Always quantize MIDI events to GBA frames (about 16.7 ms).");
             radio_menu_item(gui, "Never", mode, M4A_LATCH_OFF,
-                "Never hold events: every event applies at once, playing or not.");
+                "Never quantize; MIDI events apply immediately.");
             ImGui::EndMenu();
         }
         ImGui::EndMenu();
