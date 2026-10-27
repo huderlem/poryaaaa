@@ -189,6 +189,16 @@ def build():
     c.note(0, 36, 2 * BEAT); c.note(2 * BEAT, 43, 2 * BEAT)
     add("pcm_psg", [a, b, c])
 
+    # HQ-mixer fast-path blocks at their boundaries (docs/HQ-MIXER-ACCURACY.md,
+    # section 6).  The flute is 3344 Hz at key 60: ratio 1.0 at key 84, 2.0 at
+    # 96.  pcm_ratio_1x: just above 1.0 (85), just below (83), just above 2.0
+    # (97).  pcm_short_loop: the flute's 562-sample loop shorter than a
+    # frame's advance (key 100: 564; 108: 896, two wraps a frame) and key 112
+    # (1128 > 0x400 bytes: the fast path reads straight from ROM on the
+    # first frame, then the unbuffered loop wraps twice a frame).
+    add("pcm_ratio_1x", pattern(V_PCM, (85, 83, 97)))
+    add("pcm_short_loop", pattern(V_PCM, (100, 108, 112)))
+
     return tests
 
 

@@ -135,6 +135,102 @@ static FastState fast_loop_lt1(uint32_t *r5, int32_t r8, const int8_t *r3, int32
     return s;
 }
 
+/* C_fast_mixing_loop with the "Mix Freq > 1.0 and < 2.0" block (the second
+ * six instructions).  r4 = step - 2^23 - 2^23 (the selection's second
+ * subpls, in [-2^23, 0)); r11 doubled back (movpl r11, r11, lsl#1); every
+ * output sample advances one source sample, two when the fraction wraps.
+ *
+ *   mulne r9, r7, r12          @ NE: the previous sample's subs r12 (diff != 0)
+ *   adds r9, r6, r9, asr#23    @ Block #2: the output at single scale, flags
+ *   add r6, r12, r6            @ the next base (one sample on)
+ *   mlane \reg, r11, r9, \reg  @ NE: the output is not 0
+ *   adds r7, r7, r4            @ PL: fraction + step >= 2.0
+ *   ldrplsb r6, [r3, #1]!      @ a second sample on
+ *   ldrsb r12, [r3, #1]!
+ *   subs r12, r12, r6
+ *   bic r7, r7, r2, asr#1
+ *
+ * (quirk) as the < 1.0 block: a diff of 0 skips the next multiply and r9
+ * keeps the previous output, whose asr #23 is 0 or -1 (a negative output
+ * leaves the next sample one unit low), except at an iteration's first
+ * sample (subs r8, r8, #8). */
+static FastState fast_loop_1to2(uint32_t *r5, int32_t r8, const int8_t *r3, int32_t r6,
+                                uint32_t r7, uint32_t r4, uint32_t r11)
+{
+    bool ne = true;                                      /* movs r2, #0xFF000000 */
+    int32_t r12 = (int32_t)r3[0] - r6;                   /* ldrsb r12, [r3]; sub r12, r12, r6 */
+    uint32_t r9 = 0;
+    do {
+        ne = true;                                       /* subs r8, r8, #8 (or movs r2) */
+        for (int k = 0; k < 8; k++) {
+            if (ne)
+                r9 = r7 * (uint32_t)r12;
+            r9 = (uint32_t)r6 + (uint32_t)((int32_t)r9 >> 23);
+            r6 = r12 + r6;
+            if (r9 != 0)
+                r5[k] = mla(r5[k], r11, (int32_t)r9);
+            r7 = r7 + r4;
+            if ((int32_t)r7 >= 0) {                      /* PL */
+                r3 += 1;
+                r6 = r3[0];
+            }
+            r3 += 1;
+            r12 = (int32_t)r3[0] - r6;
+            ne = (r12 != 0);
+            r7 &= 0x007FFFFFu;
+        }
+        r5 += 8;
+        r8 -= 8;
+    } while (r8 > 0);
+    FastState s = { r6, r7 };
+    return s;
+}
+
+/* C_fast_mixing_loop with the "Mix Freq > 2.0" block (the third six
+ * instructions).  r4 = step - 2^23 (the selection's addpl puts the second
+ * 2^23 back); r11 doubled back; the pointer moves by the whole part of
+ * fraction + step - 1 each sample (r3 is one past the base).
+ *
+ *   mulne r9, r7, r12          @ NE: the previous sample's subs r12 (diff != 0)
+ *   adds r9, r6, r9, asr#23    @ Block #3: the output at single scale, flags
+ *   add r7, r7, r4             @ no flags
+ *   mlane \reg, r11, r9, \reg  @ NE: the output is not 0
+ *   add r3, r3, r7, lsr#23
+ *   ldrsb r6, [r3]
+ *   ldrsb r12, [r3, #1]!
+ *   subs r12, r12, r6
+ *   bic r7, r7, r2, asr#1
+ *
+ * (quirk) the diff-0 skip as in the other blocks. */
+static FastState fast_loop_ge2(uint32_t *r5, int32_t r8, const int8_t *r3, int32_t r6,
+                               uint32_t r7, uint32_t r4, uint32_t r11)
+{
+    bool ne = true;                                      /* movs r2, #0xFF000000 */
+    int32_t r12 = (int32_t)r3[0] - r6;                   /* ldrsb r12, [r3]; sub r12, r12, r6 */
+    uint32_t r9 = 0;
+    do {
+        ne = true;                                       /* subs r8, r8, #8 (or movs r2) */
+        for (int k = 0; k < 8; k++) {
+            if (ne)
+                r9 = r7 * (uint32_t)r12;
+            r9 = (uint32_t)r6 + (uint32_t)((int32_t)r9 >> 23);
+            r7 = r7 + r4;
+            if (r9 != 0)
+                r5[k] = mla(r5[k], r11, (int32_t)r9);
+            r3 += r7 >> 23;
+            r6 = r3[0];
+            r3 += 1;
+            r12 = (int32_t)r3[0] - r6;
+            ne = (r12 != 0);
+            r7 &= 0x007FFFFFu;
+        }
+        r5 += 8;
+        r8 -= 8;
+    } while (r8 > 0);
+    FastState s = { r6, r7 };
+    return s;
+}
+
 bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
 {
     /* C_mixing_setup */
@@ -174,11 +270,26 @@ bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
          * and the final pointer are computed here (stmfd {r2, r9}) and
          * stored after the loop; the source bytes come from the stack
          * copy or ROM, identical content. */
-        /* C_select_highspeed_codepath: subs r4, r4, #0x800000 */
+        /* C_select_highspeed_codepath: the block by step.
+         *   subs r4, r4, #0x800000      @ r4 = step - 1.0
+         *   movpl r11, r11, lsl#1       @ >= 1.0: 0-127 -> 0-254 volume
+         *   subpls r4, r4, #0x800000    @ >= 1.0: r4 = step - 2.0
+         *   addpl r4, r4, #0x800000     @ >= 2.0: r4 = step - 1.0
+         * The byte source (a DMA3 / CPU copy onto the stack below 0x400
+         * bytes, else ROM) has the same content either way and is not
+         * modelled. */
         uint32_t r4adj = r4step - 0x800000u;
-        if ((int32_t)r4adj >= 0)
-            return false;                                /* >= 1.0: the other blocks (step 5) */
-        FastState s = fast_loop_lt1(buf, r8, r3, r6, r7, r4adj, r11);
+        FastState s;
+        if ((int32_t)r4adj < 0) {
+            s = fast_loop_lt1(buf, r8, r3, r6, r7, r4adj, r11);
+        } else {
+            r11 <<= 1;
+            r4adj -= 0x800000u;
+            if ((int32_t)r4adj < 0)
+                s = fast_loop_1to2(buf, r8, r3, r6, r7, r4adj, r11);
+            else
+                s = fast_loop_ge2(buf, r8, r3, r6, r7, r4adj + 0x800000u, r11);
+        }
         /* C_end_mixing / C_mixing_end_store */
         r4->fw = s.r7;
         r4->sampleStor = (int8_t)s.r6;

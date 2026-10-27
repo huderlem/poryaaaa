@@ -220,7 +220,17 @@ and mixes).  Differences:
   `< 1.0` (position kept as `p − 2^23`, the sample advance taken from the
   sign of `p + step`, `bic` of bits 23..31 after each sample), `[1.0, 2.0)`
   (`asr #23` interpolation at single scale, one or two loads per sample),
-  `≥ 2.0` (pointer += `fw >> 23` each sample).  The block is pasted over
+  `≥ 2.0` (pointer += `fw >> 23` each sample).  **Confirmed (step 5)**:
+  the selection leaves `r4 = step − 2.0` for the middle block (the
+  `adds r7, r7, r4` is PL exactly when the fraction plus the step reaches
+  2.0: the second load, `ldrplsb r6, [r3, #1]!`) and `r4 = step − 1.0` for
+  the top one (`add r3, r3, r7, lsr#23` moves the pointer, which is one
+  past the base, by the whole samples minus one); both double the halved
+  volume back (`movpl r11, r11, lsl#1`: `2 × ceil(v / 2)` per side, so an
+  odd volume rounds up) and mix `base + ((fraction × diff) asr 23)`; in
+  every block the fraction `r7` is a plain 23-bit value at the multiply
+  (the `bic` after each sample), the `< 1.0` block's `p − 2^23` being only
+  the `adds r7, r7, r4` carry trick.  The block is pasted over
   the NOP slots once per change (`previous_fast_code`), which has no
   behavioural effect beyond selecting the block.
   **(quirk)** the `mulne` condition is the flags left by the *previous*
@@ -231,8 +241,12 @@ and mixes).  Differences:
   r9`), a no-op skip.  **Measured (step 4)**: the first sample of each
   8-sample iteration takes its flags from the loop's `subs r8, r8, #8`
   instead, so it always multiplies — pcm frame 64 was off by one output
-  sample until the port did the same.  Port the condition codes, and the
-  loop structure they live in.
+  sample until the port did the same.  In the two `≥ 1.0` blocks the
+  flags come from `subs r12, r12, r6` (the new diff), executed every
+  sample, so the skip follows every advance onto a flat run (one unit low
+  at single scale, `asr #23` of a negative output) rather than every
+  other sample; the iteration rule is the same (step 5, unit-tested).
+  Port the condition codes, and the loop structure they live in.
 - **Else the unbuffered loop**: one sample per iteration, mixed *before*
   the end check; at a loop end `ptr −= loopLen; count += loopLen` (a
   relative wrap, not a reset to `loopStart`; the vanilla while-loop for
@@ -364,6 +378,9 @@ pan (107 → 108), lfo_delay (127 → 128), pcm_chord (112 → 113) and bend
 (7 → 8) each keep a single-frame residual of one DAC step — −66 to −88 dB
 null, passing, where vanilla has them at −inf.  The crossings sit inside
 the HQ mixer's longer SoundMain; they are the reference's, not the port's.
+Step 5 added `pcm_bass` (frames 36 / 44 / 64 of its 8 crossings, −61.4),
+`pcm_psg` (20 / 25 of 13, −59.4) and `se_contest_place` (28 / 44 of 6,
+−69.2) to the list, each with the ring byte-identical in all 177 frames.
 
 **Not output-neutral: `ENABLE_DMA`** (measured in step 1).  The DMA3 copy
 and the CPU copy read the same bytes, but the two ROMs' references differ:
@@ -521,10 +538,10 @@ path from `--pcm-log` (frequency × divFreq / 2^23) rather than guessing.
 |---|---|---|
 | downsampler, noise shaping, seed = 0 | every PCM row | — |
 | interpolating fast path, `< 1.0` | `pcm` (key 55), `pcm_bass`, `pcm_adsr` | — |
-| `[1.0, 2.0)` | `pcm` (key 67?), `pcm_chord` | `pcm_ratio_1x` (a key with step just above 1.0) |
-| `≥ 2.0` | `pcm_hi` (keys 84–96) | — |
-| direct-from-ROM read (> 0x400 bytes or no stack) | none at 13379 Hz? (448 B max at ratio 2) | `pcm_hi` at a key with ratio > 4.6 (0x400 / 224) |
-| unbuffered loop: loop wrap inside a frame | `pcm` (looped flute), `pcm_chord` | `pcm_short_loop` (a loop shorter than a frame's advance: multi-wrap) |
+| `[1.0, 2.0)` | `pcm_adsr` (1.0 exactly), `pcm_bass` (1.26), `pcm_hi` (keys 84 / 91: 1.0 / 1.5), `pcm_psg` | `pcm_ratio_1x` (keys 85 / 83 / 97: 1.059, 0.944, 2.119) — added in step 5 |
+| `≥ 2.0` | `pcm_hi` (key 96: 2.0 exactly) | `pcm_ratio_1x` (key 97), `pcm_short_loop` (keys 100 / 108 / 112: 2.52, 4.0, 5.04) — step 5 |
+| direct-from-ROM read (> 0x400 bytes or no stack) | none at 13379 Hz (448 B max at ratio 2) | `pcm_short_loop` key 112: the note's first frame (advance 1128 > 0x400, count 1874) — step 5; output-neutral by construction, the port does not model the copy |
+| unbuffered loop: loop wrap inside a frame | `pcm` (looped flute), `pcm_chord` | `pcm_short_loop`: the flute's 562-sample loop against advances of 564 / 896 / 1128 (one, then two wraps a frame) — step 5 |
 | unbuffered loop: sample end inside a frame | `pcm_adsr`, `pcm_drum`? | — |
 | volume-zero freeze | none | `pcm_vol0` (VOL 0 for a few ticks mid-note, then back), `pcm_slow_attack` (attack 1–2) |
 | FIX path (block + remainder, alignment variants) | `pcm_drum` (voice 12, `no_resample`); vanilla music uses no FIX DirectSound voices (0 in `sound/voice_groups.inc`; FRLG drumsets to check) | `pcm_fix_loop` (a looped FIX voice; the remainder loop's `loopStart` reset) |
@@ -731,6 +748,42 @@ blip 49112/0, songs 561/561.
 
 **Step 5 — the `[1.0, 2.0)` and `≥ 2.0` blocks, direct-from-ROM reads.**
 `pcm_hi`, `pcm_chord`, the new `pcm_ratio_1x` / `pcm_short_loop` rows.
+
+**Step 5 — done 2026-10-27.**  `fast_loop_1to2` and `fast_loop_ge2` in
+`plugin/m4a_hq_mixer.c` (the second and third `high_speed_code_resource`
+blocks in the `C_fast_mixing_loop` frame, each instruction in the
+comment), selected as `C_select_highspeed_codepath` does (`r4 = step −
+2.0` / `step − 1.0`, the halved volume doubled back); the direct-from-ROM
+read is the same bytes and is not modelled (section 2).  Predicted before
+the run: `pcm_bass`, `pcm_adsr`, `pcm_hi`, `pcm_psg` to −inf or the floor,
+the songs and cries unchanged at 0 dB (FIX / CMP channels), vanilla
+unchanged.  Measured, HQ (`claim_check --mixer hq` against the skeleton
+baseline): 34/66, 0 regressions, 13 rows improved — `pcm_hi`, `pcm_adsr`,
+`se_rain_stop` −inf; `pcm_bass` −61.4, `pcm_psg` −59.4, `se_contest_place`
+−69.2 are the floor (section 3: rings identical in all 177 frames, the
+error frames at the probe's timer-0 crossings; pcm_psg and
+se_contest_place re-probed for the ring dump); the songs moved from 0 dB
+to −5..−48 (their non-FIX / non-CMP channels now sound; `mus_credits`
+−47.7) and `cry_over_bgm` to −6.6.  The same seven PSG logs show moved
+writes (93–532 cycles, the frozen FIX / CMP channels), 0 moved on the
+other 52.  Then the two rows: `gen_micro_midis.py` appends `pcm_ratio_1x`
+(flute keys 85 / 83 / 97) and `pcm_short_loop` (keys 100 / 108 / 112) at
+the end of `micro.cfg` (ids 31 / 32; every earlier id and MIDI
+unchanged), both ROMs rebuilt (symbols unchanged; vanilla sha256
+`88d5eca15f2d…`, HQ `8e02da3a345c…`), the canary renders pcm / pcm_cmp /
+cry_bulbasaur byte-identical to the previous references on both ROMs,
+`--update-refs` on both families (the 31 old FLACs unchanged, two added
+each, the vanilla manifest's hash — stale since 2026-10-24 — now
+current).  Both rows −inf on both ROMs: vanilla 59/68 (0 regressions, no
+row moved; baseline `2026-10-27_step5-micro-rows`), HQ 36/68 (baseline
+`2026-10-27_hq-fast-blocks`).  `--pcm-log` confirms the ratios (0.944 /
+1.059 / 2.119; 2.52 / 4.0 / 5.04) and key 112's first frame on the fast
+path (count 1874 → 746, advance 1128 > 0x400) before the loop wraps twice
+a frame.  Unit tests: 8 new assertions in `test_hq_mixer` (the `[1, 2)`
+ramp with the odd volume rounded up, the `≥ 2.0` ramp with the packed
+borrow, the diff-0 skip in the `[1, 2)` block, the state after each);
+unit 1955/1955, blip 49112/0, songs 563/563 on both ROMs.  No source
+correction was needed: the three blocks' flag analysis in section 2 held.
 
 **Step 6 — the FIX path.**  `pcm_drum`, `pcm_fix_loop`; se_faint's snare and
 rg_vs_trainer's drumset if they are FIX (check the voicegroups).

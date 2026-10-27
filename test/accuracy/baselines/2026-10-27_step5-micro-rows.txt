@@ -1,0 +1,76 @@
+ROM: /home/huderlem/m4a_plugin/build/accuracy/rom/accuracy_test.gba (mixer vanilla; engine asked for vanilla)
+mgba: mGBA 0.10.5+m4a_blip
+references: /home/huderlem/m4a_plugin/build/accuracy/refs/88d5eca15f2d-mGBA_0.10.5+m4a_blip
+
+test                lag ms  gain dB |    null worst1s | gm null gm wrst |    ref   test |   drift | gate -40
+------------------------------------------------------------------------------------------------------------
+sq1                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -16.8  -16.8 |       - | PASS
+sq1_env                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.3  -18.3 |       - | PASS
+sq1_sweep              0.0      0.0 |    -inf    -inf |    -inf    -inf |  -17.0  -17.0 |       - | PASS
+sq1_alt                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -16.8  -16.8 |       - | PASS
+sq2                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.1  -18.1 |       - | PASS
+sq2_alt                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.1  -18.1 |       - | PASS
+wave                   0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.8  -19.8 |       - | PASS
+wave_alt               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.8  -19.8 |       - | PASS
+noise                  0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.0  -20.0 |       - | PASS
+noise7                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.5  -18.5 |       - | PASS
+pcm                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.4  -21.4 |       - | PASS
+pcm_hi                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.9  -20.9 |       - | PASS
+pcm_adsr               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -29.9  -29.9 |       - | PASS
+pcm_drum               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.9  -21.9 |       - | PASS
+pcm_cmp                0.0      0.0 |   -55.0   -50.2 |   -55.0   -50.2 |  -27.1  -27.1 |       - | PASS
+pcm_reverb             0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.0  -21.0 |       - | PASS
+pcm_chord              0.0     -0.0 |   -55.7   -51.9 |   -55.7   -51.9 |  -14.2  -14.2 |       - | PASS
+pcm_bass               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -25.2  -25.2 |       - | PASS
+pan                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.5  -19.5 |       - | PASS
+vol                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -25.3  -25.3 |       - | PASS
+vel                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -26.5  -26.5 |       - | PASS
+bend                   0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.2  -20.2 |       - | PASS
+lfo_vib                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.1  -20.1 |       - | PASS
+lfo_trem               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.1  -20.1 |       - | PASS
+lfo_pan                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.1  -20.1 |       - | PASS
+lfo_delay              0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.0  -21.0 |       - | PASS
+lfo_psg                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -17.1  -17.1 |       - | PASS
+tune                   0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.6  -21.6 |       - | PASS
+tune_psg               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.0  -18.0 |       - | PASS
+psg_mix                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -15.2  -15.2 |       - | PASS
+pcm_psg                0.0     -0.0 |   -55.0   -49.2 |   -55.0   -49.2 |  -13.3  -13.3 |       - | PASS
+pcm_ratio_1x           0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.1  -21.1 |       - | PASS
+pcm_short_loop         0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.4  -21.4 |       - | PASS
+mus_littleroot         0.0     -0.0 |   -49.6   -44.2 |   -49.6   -44.2 |  -23.7  -23.7 |     0.0 | PASS
+mus_weather_groudon     0.0      0.0 |    -inf    -inf |    -inf    -inf |  -31.1  -31.1 |     0.0 | PASS
+mus_vs_wild            0.0     -0.0 |   -49.4   -40.1 |   -49.4   -40.1 |  -20.9  -20.9 |     0.0 | PASS
+mus_mt_chimney         0.0     -0.0 |   -49.6   -44.3 |   -49.6   -44.3 |  -23.5  -23.5 |     0.0 | PASS
+mus_rg_vs_trainer      0.0     -0.0 |   -49.3   -42.9 |   -49.3   -42.9 |  -19.6  -19.6 |     0.0 | PASS
+mus_vs_trainer         0.0     -0.0 |   -52.7   -45.2 |   -52.7   -45.2 |  -20.4  -20.4 |     0.0 | PASS
+mus_credits            0.0     -0.0 |   -51.3   -40.7 |   -51.3   -40.7 |  -23.0  -23.0 |     0.0 | PASS
+se_exp                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -24.8  -24.8 |       - | PASS
+se_faint               0.0     -0.0 |   -53.3   -42.9 |   -53.3   -42.9 |  -29.9  -29.9 |       - | PASS
+se_contest_place       0.0      0.0 |   -53.7   -44.7 |   -53.7   -44.7 |  -26.9  -26.9 |       - | PASS
+se_truck_unload        0.0      0.0 |    -inf    -inf |    -inf    -inf |  -39.2  -39.2 |       - | PASS
+se_low_health          0.0      0.0 |    -inf    -inf |    -inf    -inf |  -24.0  -24.0 |       - | PASS
+se_rain_stop           0.0     -0.0 |   -41.8   -23.4 |   -41.8   -23.4 |  -41.3  -41.3 |       - | FAIL
+cry_pidgey             0.0     -0.0 |   -43.0   -38.4 |   -43.0   -38.4 |  -33.4  -33.4 |       - | FAIL
+cry_bulbasaur          0.0      0.0 |   -54.9   -51.9 |   -54.9   -51.9 |  -28.1  -28.1 |       - | PASS
+cry_wailord            0.0     -0.0 |   -48.1   -46.9 |   -48.1   -46.9 |  -22.4  -22.4 |       - | PASS
+cry_jynx               0.0     -0.0 |   -41.1   -38.2 |   -41.1   -38.2 |  -26.2  -26.2 |       - | FAIL
+cry_jynx_faint         0.0     -0.0 |   -61.2   -56.1 |   -61.2   -56.1 |  -25.7  -25.7 |       - | PASS
+cry_bulbasaur_howl     0.0      0.0 |   -47.9   -39.4 |   -47.9   -39.4 |  -25.4  -25.4 |       - | FAIL
+cry_pidgey_quiet       0.0     -0.0 |   -43.1   -38.5 |   -43.1   -38.5 |  -36.0  -36.0 |       - | FAIL
+cry_jynx_faint_full     0.0     -0.0 |   -61.0   -56.1 |   -61.0   -56.1 |  -25.7  -25.7 |       - | PASS
+cry_wailord_doubles     0.0      0.0 |   -47.3   -45.9 |   -47.3   -45.9 |  -29.4  -29.4 |       - | PASS
+cry_pidgey_roar2       0.0      0.0 |   -50.1   -49.8 |   -50.1   -49.8 |  -33.6  -33.6 |       - | PASS
+cry_bulbasaur_reverse     0.0     -0.0 |   -46.5   -33.6 |   -46.5   -33.6 |  -28.1  -28.1 |       - | FAIL
+cry_jynx_growl1        0.0     -0.0 |   -62.4   -62.4 |   -62.4   -62.4 |  -36.8  -36.8 |       - | PASS
+cry_pidgey_echo_start     0.0      0.0 |   -34.9   -26.4 |   -34.9   -26.4 |  -36.2  -36.2 |       - | FAIL
+cry_bulbasaur_encounter     0.0     -0.0 |   -46.5   -43.6 |   -46.5   -43.6 |  -28.8  -28.8 |       - | PASS
+cry_jynx_echo_end      0.0     -0.0 |   -43.9   -40.9 |   -43.9   -40.9 |  -28.4  -28.4 |       - | PASS
+cry_pidgey_echo_start_chorus     0.0      0.0 |   -31.3   -28.9 |   -31.3   -28.9 |  -33.2  -33.2 |       - | FAIL
+cry_jynx_high_pitch     0.0     -0.0 |   -42.8   -33.4 |   -42.8   -33.4 |  -29.0  -29.0 |       - | FAIL
+cry_wailord_high_pitch     0.0      0.0 |   -51.3   -51.2 |   -51.3   -51.2 |  -25.4  -25.4 |       - | PASS
+cry_second_bulbasaur_pidgey     0.0      0.0 |   -60.4   -59.9 |   -60.4   -59.9 |  -28.8  -28.8 |       - | PASS
+cry_second_jynx_wailord     0.0     -0.0 |   -45.3   -42.6 |   -45.3   -42.6 |  -22.1  -22.1 |       - | PASS
+cry_over_se            0.0     -0.0 |   -55.0   -52.7 |   -55.0   -52.7 |  -23.5  -23.5 |       - | PASS
+cry_over_bgm           0.0     -0.0 |   -49.6   -46.4 |   -49.6   -46.4 |  -23.1  -23.1 |       - | PASS
+
+59/68 pass at -40 dB (raw null depth, full file and worst 1 s window)

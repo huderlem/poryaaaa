@@ -222,7 +222,12 @@ cycles and, through mgba's ordering of a timer overflow against the DAC
 slot it coincides with, every DirectSound reference -- while the probe's
 `.frames` and lateness stayed put.  Before the harness, render pcm,
 pcm_cmp and cry_bulbasaur with `mgba_render` on the new ROM and `cmp` them
-against the current references (`docs/ACCURACY.md`, "Working rules").  The
+against the current references (`docs/ACCURACY.md`, "Working rules"):
+`--frames 182 --rate 48000 --type micro --id 10` / `--id 14` (3 s rows)
+and `--frames 122 --type cry --id 0` (cry_bulbasaur is a 2 s row; 182
+frames there is a different file, not a ROM difference).  Both ROMs when
+the HQ one is in use (`build/accuracy/rom-hq`, its refs under the HQ
+hash).  The
 ELF and map the CMake target writes are `build/accuracy/rom/accuracy_test.elf`
 / `.map`; `test/accuracy/rom/build/` is only a stale hand build if it
 exists, do not read symbols from it.)  The map still works for the function

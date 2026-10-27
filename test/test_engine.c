@@ -2999,6 +2999,89 @@ static void test_hq_mixer(void)
         e.pcmSamplesPerVBlank = 8;
     }
 
+    /* The [1.0, 2.0) block: the 12-sample ramp at step 1.25 (count 12 >
+     * advance 10), base 0 from init, volumes 3 / 3 halved to 2 / 2 and
+     * doubled back to 4 / 4 (movpl r11, lsl#1).  Single scale: output =
+     * base + (frac * diff) asr 23 with the base one sample on each output
+     * and two when the fraction wraps (adds r7 with r4 = step - 2.0 PL):
+     * 0, 12, 25, 37, 50, 62, 75, 87, times 4.  After: fw 0, base 100
+     * (data[9]), count 2, pointer data + 10. */
+    {
+        WaveData *wd = ramp_wave(12, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0xA00000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 3;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq fast 1-2: the path is ported");
+        static const int want[8] = { 0, 12, 25, 37, 50, 62, 75, 87 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(4 * want[i]) << 16 | (uint32_t)(4 * want[i]))) ok = 0;
+        ASSERT(ok, "hq fast 1-2: base + (frac * diff) asr 23 at volume 2 * ceil(3 / 2)");
+        ASSERT(ch.fw == 0 && ch.count == 2 && ch.currentPointer == wd->data + 10 && ch.sampleStor == 100,
+               "hq fast 1-2: fw, count, pointer and base after the frame");
+        free(wd);
+    }
+
+    /* The >= 2.0 block: data 4 * i (32 samples) at step 2.5 (advance 20 <
+     * count 32), base -4 (the ramp continues), volumes 2 / 2 -> 1 / 1 -> 2 / 2.
+     * The pointer moves by the whole part of frac + step - 1 each sample
+     * (r3 one past the base): bases -4, 4, 16, 24, 36, 44, 56, 64 and the
+     * fractions 0, .5, 0, .5, ...: -4, 6, 16, 26, 36, 46, 56, 66 at single
+     * scale, times 2; -8 per side packed borrows: 0xFFF7FFF8.  After: fw 0, base 76
+     * (data[19]), count 12, pointer data + 20. */
+    {
+        static WaveData wd;
+        static int8_t ramp4[40];
+        for (int i = 0; i < 40; i++) ramp4[i] = (int8_t)(4 * i);
+        wd.size = 32; wd.data = ramp4;
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        ch.wav = &wd; ch.currentPointer = ramp4; ch.count = 32; ch.sampleStor = -4;
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x1400000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq fast 2+: the path is ported");
+        static const uint32_t want[8] = { 0xFFF7FFF8u, 0x000C000Cu, 0x00200020u, 0x00340034u,
+                                          0x00480048u, 0x005C005Cu, 0x00700070u, 0x00840084u };
+        int ok = 1;
+        for (int i = 0; i < 8; i++) if (buf[i] != want[i]) ok = 0;
+        ASSERT(ok, "hq fast 2+: pointer += fw >> 23 each sample, single scale at the doubled volume");
+        ASSERT(ch.fw == 0 && ch.count == 12 && ch.currentPointer == ramp4 + 20 && ch.sampleStor == 76,
+               "hq fast 2+: fw, count, pointer and base after the frame");
+    }
+
+    /* The mulne quirk in the [1.0, 2.0) block: a flat run of -10 at step
+     * 1.0 exactly (r4 = -2^23: never PL, one sample per output) with the
+     * base -10.  Every sample advances onto a diff of 0, so after the
+     * iteration's first sample the multiply is skipped and r9 keeps the
+     * previous output; its asr #23 is -1: -10 then -11 seven times, per
+     * iteration.  Volume 2 / 2 -> 2: -20 = 0xFFEBFFEC, -22 = 0xFFE9FFEA. */
+    {
+        static WaveData wd;
+        static int8_t flat[40];
+        memset(flat, -10, sizeof(flat));
+        wd.size = 32; wd.data = flat;
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        ch.wav = &wd; ch.currentPointer = flat; ch.count = 32; ch.sampleStor = -10;
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        e.pcmSamplesPerVBlank = 16;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        int ok = 1;
+        for (int i = 0; i < 16; i++)
+            if (buf[i] != ((i % 8) == 0 ? 0xFFEBFFECu : 0xFFE9FFEAu)) ok = 0;
+        ASSERT(ok, "hq fast 1-2: diff-0 skip gives -11 after the iteration's first sample");
+        ASSERT(ch.count == 16 && ch.currentPointer == flat + 16 && ch.sampleStor == -10, "hq fast 1-2: state after the flat frame");
+        e.pcmSamplesPerVBlank = 8;
+    }
+
     /* Volume zero: the channel is skipped for the frame, nothing advances. */
     {
         WaveData *wd = ramp_wave(12, 0, 0);
