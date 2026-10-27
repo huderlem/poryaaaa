@@ -26,10 +26,10 @@ run2() {
 NAMES=$(printf '%s\n' "$@")
 # micro-tests: type 2, id = line in micro.cfg from 0 (70 frames = 1.2 s, 180 = 3 s)
 i=0
-for m in sq1 sq1_env sq1_sweep sq1_alt sq2 sq2_alt wave wave_alt noise noise7 pcm pcm_hi pcm_adsr pcm_drum pcm_cmp pcm_reverb pcm_chord pcm_bass pan vol vel bend lfo_vib lfo_trem lfo_pan lfo_delay lfo_psg tune tune_psg psg_mix pcm_psg pcm_ratio_1x pcm_short_loop; do
+for m in sq1 sq1_env sq1_sweep sq1_alt sq2 sq2_alt wave wave_alt noise noise7 pcm pcm_hi pcm_adsr pcm_drum pcm_cmp pcm_reverb pcm_chord pcm_bass pan vol vel bend lfo_vib lfo_trem lfo_pan lfo_delay lfo_psg tune tune_psg psg_mix pcm_psg pcm_ratio_1x pcm_short_loop pcm_fix_loop; do
     case $m in
         pcm|pcm_cmp|wave) f=180;;
-        pcm_hi|pcm_adsr|pcm_reverb|pcm_bass|pan|vol|tune|pcm_ratio_1x|pcm_short_loop) f=0;;   # not in the probed corpus
+        pcm_hi|pcm_adsr|pcm_reverb|pcm_bass|pan|vol|tune|pcm_ratio_1x|pcm_short_loop|pcm_fix_loop) f=0;;   # not in the probed corpus
         *) f=70;;
     esac
     [ $f = 0 ] || run2 $m $f 2 $i

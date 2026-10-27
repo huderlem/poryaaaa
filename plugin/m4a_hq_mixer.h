@@ -20,10 +20,10 @@ extern "C" {
  * `frameOffset` with first-order noise shaping and saturation, reading the
  * ring taps for the next frame's seed as it goes.
  *
- * Ported so far (steps 4-5 of the plan): the uncompressed, non-FIX paths
- * (the fast loop's three blocks and the unbuffered loop), the volume-zero
- * skip and the downsampler.  A channel on another path (FIX, CMP, REV,
- * synth) is left untouched for the frame and counted in
+ * Ported so far (steps 4-6 of the plan): the uncompressed paths (the fast
+ * loop's three blocks, the unbuffered loop, the FIX path), the volume-zero
+ * skip and the downsampler.  A channel on another path (CMP, REV, synth)
+ * is left untouched for the frame and counted in
  * engine->hqUnportedChannelFrames.
  */
 void m4a_hq_sound_main_ram(M4AEngine *engine, int frameOffset, int pcmDmaCounter);

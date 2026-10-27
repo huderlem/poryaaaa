@@ -23,6 +23,7 @@ V_SQ1, V_SQ1_ENV, V_SQ1_SWEEP, V_SQ1_ALT = 0, 1, 2, 3
 V_SQ2, V_SQ2_ALT, V_WAVE, V_WAVE_ALT = 4, 5, 6, 7
 V_NOISE, V_NOISE7 = 8, 9
 V_PCM, V_PCM_ADSR, V_PCM_DRUM, V_PCM_CMP, V_PCM_BASS = 10, 11, 12, 13, 14
+V_PCM_FIX_LOOP = 15
 
 CC_MOD, CC_VOL, CC_PAN = 1, 7, 10
 CC_BENDR, CC_LFOS, CC_MODT, CC_TUNE, CC_LFODL = 20, 21, 22, 24, 26
@@ -198,6 +199,9 @@ def build():
     # first frame, then the unbuffered loop wraps twice a frame).
     add("pcm_ratio_1x", pattern(V_PCM, (85, 83, 97)))
     add("pcm_short_loop", pattern(V_PCM, (100, 108, 112)))
+    # The FIX path with a loop (step 6): the flute at its own rate, the key
+    # ignored; each note outlives the 1874 samples (0.14 s) and loops.
+    add("pcm_fix_loop", pattern(V_PCM_FIX_LOOP))
 
     return tests
 

@@ -231,6 +231,81 @@ static FastState fast_loop_ge2(uint32_t *r5, int32_t r8, const int8_t *r3, int32
     return s;
 }
 
+/* C_setup_fixed_freq_mixing .. C_mixing_end_store: the FIX path.  One
+ * source sample per output sample at the unhalved volume r11, raw +-128.
+ *
+ *   C_fixed_mixing_length_check:
+ *     cmp r2, r8; subgt lr, r8, #1; suble lr, r2, #1   @ min(count, left) - 1
+ *     movs lr, lr, lsr#2; beq C_fixed_mixing_process_rest
+ *     sub r8, r8, lr, lsl#2; sub r2, r2, lr, lsl#2
+ *     (the alignment-selected sign-extension code is pasted; ldmia r3!, {r10})
+ *   C_fixed_mixing_loop: 4 samples a word, mlane \reg, r11, r6, \reg (NE:
+ *     the sample is not 0, a no-op skip), subs lr, lr, #1; bne
+ *     sub r3, r3, #4
+ *   C_fixed_mixing_process_rest: mov r1, #4
+ *   C_fixed_mixing_unaligned_loop: ldrsb r6, [r3], #1; mla; subs r2, r2, #1;
+ *     beq C_fixed_mixing_loop_or_end (loop: r2 = loopLen, r3 = loopStart
+ *     absolute; else status 0, nothing stored); subs r1, r1, #1; bgt
+ *   subs r8, r8, #4; bgt C_fixed_mixing_length_check
+ *
+ * The word loads ignore the pointer's low two bits and the pasted code
+ * picks the bytes from the alignment, so every block mixes the four
+ * bytes at the pointer; after the blocks the pointer is rewound to the
+ * next unread byte.  The remainder is always four samples (r8 is a
+ * multiple of 4 throughout), so the frame mixes exactly r8 samples or
+ * stops at the data's end.  fw and sampleStor are not touched (the path
+ * skips C_end_mixing). */
+static bool fix_path(M4APCMChannel *r4, uint32_t *r5, int32_t r8, int32_t r2, int8_t *r3, uint32_t r11)
+{
+    int32_t loopLen = 0;                                 /* [sp, ARG_LOOP_LENGTH] */
+    int8_t *loopStart = NULL;                            /* [sp, ARG_LOOP_START_POS] */
+    if (r4->status & CHN_LOOP) {
+        loopStart = r4->wav->data + r4->wav->loopStart;  /* add r3, r0 (not compressed) */
+        loopLen = (int32_t)(r4->wav->size - r4->wav->loopStart);
+    }
+    for (;;) {
+        /* C_fixed_mixing_length_check */
+        int32_t lr = ((r2 > r8 ? r8 : r2) - 1) >> 2;
+        if (lr != 0) {
+            r8 -= lr << 2;
+            r2 -= lr << 2;
+            /* C_fixed_mixing_loop */
+            do {
+                for (int k = 0; k < 4; k++) {
+                    int32_t r6 = r3[k];
+                    if (r6 != 0)
+                        r5[k] = mla(r5[k], r11, r6);
+                }
+                r3 += 4;
+                r5 += 4;
+            } while (--lr != 0);
+        }
+        /* C_fixed_mixing_process_rest / C_fixed_mixing_unaligned_loop */
+        for (int r1 = 4; r1 > 0; r1--) {
+            int32_t r6 = *r3++;
+            *r5 = mla(*r5, r11, r6);
+            r5++;
+            if (--r2 == 0) {
+                /* C_fixed_mixing_loop_or_end */
+                if (loopLen != 0) {
+                    r2 = loopLen;
+                    r3 = loopStart;
+                } else {
+                    r4->status = 0;                      /* C_mixing_end_and_stop_channel */
+                    return true;
+                }
+            }
+        }
+        r8 -= 4;
+        if (r8 <= 0)
+            break;
+    }
+    /* C_mixing_end_store */
+    r4->count = r2;
+    r4->currentPointer = r3;
+    return true;
+}
+
 bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
 {
     /* C_mixing_setup */
@@ -240,11 +315,11 @@ bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
     if (r11 == 0)
         return true;                                     /* beq C_mixing_epilogue: nothing stored */
     uint32_t r0 = r4->type;
-    if (r4->synthType != M4A_SYNTH_NONE)                 /* TONEDATA_TYPE_SPL -> C_setup_synth */
-        return false;
     if (r0 & (VOICE_TYPE_CMP | VOICE_TYPE_REV))          /* -> C_data_load_comp / _uncomp_rev */
         return false;
     if (r0 & VOICE_TYPE_FIX)                             /* bne C_setup_fixed_freq_mixing */
+        return fix_path(r4, buf, r8, r4->count, r4->currentPointer, r11);
+    if (r4->synthType != M4A_SYNTH_NONE)                 /* TONEDATA_TYPE_SPL -> C_setup_synth */
         return false;
 
     /* C_mixing_setup_comp_rev */

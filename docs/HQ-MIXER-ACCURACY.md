@@ -261,7 +261,17 @@ Groups of 4 output samples from a word load with alignment-selected
 sign-extension code, `min(count, frameLength)` at a time; the remainder
 sample by sample; on exhaustion `ptr = loopStart` (absolute) and `count =
 loopLen`, or the channel stops (status 0).  Unhalved volume, raw ±128
-sample.
+sample.  **Confirmed (step 6)**: `C_fixed_mixing_length_check` takes
+`(min(count, left) − 1) >> 2` blocks of four, the word loads ignore the
+pointer's low two bits and the pasted code picks the bytes by that
+alignment, the pointer is rewound to the next unread byte after the
+blocks, and the remainder is always four samples (`left` stays a multiple
+of 4), so a frame mixes exactly `frameLength` samples or stops at the
+data's end — a per-sample model with the loop reset and the stop at
+`count == 0` is exact.  The block's `mlane` skips a zero sample (a no-op);
+the remainder's `mla` does not.  `fw` and `sampleStor` are not written
+(the path skips `C_end_mixing`); the FIX test precedes the synth test in
+`C_mixing_setup`, so a FIX synth voice takes this path.
 
 ### The pre-cached paths (CMP, REV)
 
@@ -380,7 +390,18 @@ null, passing, where vanilla has them at −inf.  The crossings sit inside
 the HQ mixer's longer SoundMain; they are the reference's, not the port's.
 Step 5 added `pcm_bass` (frames 36 / 44 / 64 of its 8 crossings, −61.4),
 `pcm_psg` (20 / 25 of 13, −59.4) and `se_contest_place` (28 / 44 of 6,
-−69.2) to the list, each with the ring byte-identical in all 177 frames.
+−69.2) to the list, each with the ring byte-identical in all 177 frames;
+step 6 `pcm_drum` (24 / 36 / 52 of 7, −50.6: a drum's samples jump, so one
+DAC step costs more, as the cries' do in vanilla).  With the FIX drums
+mixed the songs sit at their vanilla floor or past it (littleroot −54.4
+vs vanilla −49.6, vs_wild −53.7 / −49.4, vs_trainer −53.1 / −52.7,
+rg_vs_trainer −51.1 / −49.3), credits −47.7 / −51.3 and mt_chimney −44.0
+/ −49.6 with a −28.9 worst window at 5 s: the floor at a different level
+on a different set of crossings (48 in mt_chimney's 1200 frames, 30
+frames over 200 / 32768), as this section predicted: mt_chimney re-probed
+for 1200 frames has its ring byte-identical in all 1193 compared frames,
+so the −28.9 window is the reference's crossings on a noise-heavy
+passage, nothing of the port's.
 
 **Not output-neutral: `ENABLE_DMA`** (measured in step 1).  The DMA3 copy
 and the CPU copy read the same bytes, but the two ROMs' references differ:
@@ -544,7 +565,7 @@ path from `--pcm-log` (frequency × divFreq / 2^23) rather than guessing.
 | unbuffered loop: loop wrap inside a frame | `pcm` (looped flute), `pcm_chord` | `pcm_short_loop`: the flute's 562-sample loop against advances of 564 / 896 / 1128 (one, then two wraps a frame) — step 5 |
 | unbuffered loop: sample end inside a frame | `pcm_adsr`, `pcm_drum`? | — |
 | volume-zero freeze | none | `pcm_vol0` (VOL 0 for a few ticks mid-note, then back), `pcm_slow_attack` (attack 1–2) |
-| FIX path (block + remainder, alignment variants) | `pcm_drum` (voice 12, `no_resample`); vanilla music uses no FIX DirectSound voices (0 in `sound/voice_groups.inc`; FRLG drumsets to check) | `pcm_fix_loop` (a looped FIX voice; the remainder loop's `loopStart` reset) |
+| FIX path (block + remainder, alignment variants) | `pcm_drum` (voice 12, `no_resample`); every vanilla song through its drumset (`voice_keysplit_all voicegroup_*_drumset`: 26 `no_resample` voices in emerald_1 alone, the FRLG drumset's kick and snares in rg_vs_trainer); se_faint's rs_sfx_1 has none | `pcm_fix_loop` (voice 15, the flute looped at its own rate; the remainder's `loopStart` reset) — added in step 6 |
 | reverb seed | `pcm_reverb`, mus_littleroot, mus_vs_wild | `pcm_reverb_max` (`-R127`: the `>> 2` scaling) |
 | saturation | none deliberate | `pcm_clip` (6+ notes at velocity 127, VOL 127: expect clipping, not wrap) |
 | 16-bit half overflow / borrow | every row with negative samples | `pcm_clip` with a pan test |
@@ -787,6 +808,37 @@ correction was needed: the three blocks' flag analysis in section 2 held.
 
 **Step 6 — the FIX path.**  `pcm_drum`, `pcm_fix_loop`; se_faint's snare and
 rg_vs_trainer's drumset if they are FIX (check the voicegroups).
+
+**Step 6 — done 2026-10-27.**  `fix_path` in `plugin/m4a_hq_mixer.c`
+(`C_setup_fixed_freq_mixing` .. `C_mixing_end_store`, the length check,
+the four-sample blocks, the remainder with its loop-or-end, every
+instruction in the comment); the dispatch now tests FIX before the synth
+flag as `C_mixing_setup` does.  Checked first: rg_vs_trainer's voicegroup
+opens with `voice_keysplit_all voicegroup_frlg_drumset` (kick and snares
+`no_resample`), and every vanilla drumset is FIX (26 voices in emerald_1),
+while se_faint's `voicegroup_rs_sfx_1` has none — so the prediction was
+`pcm_drum` to −inf or the floor, every song improved, se_faint unchanged,
+the CMP rows and cries at 0 dB, vanilla untouched.  Measured, HQ against
+`2026-10-27_hq-fast-blocks`: 0 regressions; `pcm_drum` −50.6 is the floor
+(section 3), the six DirectSound songs from −5..−48 to −44..−54 (their
+drums were the frozen channels), se_faint −49.2 as before, the cries 0
+dB.  The write diff: the five songs' PSG logs are back to 0 moved (the
+frozen-channel bookkeeping is gone), `cry_over_se` / `cry_over_bgm` still
+move (the frozen CMP cry, step 8), and `pcm_psg` shows two writes 4
+cycles early in frame 123 — exposed by its new 180-frame probe log (the
+corpus had 70 frames), present on the vanilla ROM too (`track_diff`:
+track 0, the three-note chord track, ends 4 cycles early before its
+`ply_fine` on the tick where its gate ends and FINE follows), so a vanilla
+sequencer-cost residual recorded in `ACCURACY.md` section 6, not this
+step's.  The row: voice 15 `voice_directsound_no_resample` on the flute
+in `accuracy_micro.inc`, `pcm_fix_loop` = the standard three-note pattern
+(id 33), both ROMs rebuilt (symbols unchanged; vanilla sha256
+`2d2db7fd59e3…`, HQ `6fc8845e6782…`; canaries byte-identical), refs
+updated on both families.  `pcm_fix_loop` −inf on both ROMs.  Baselines
+`2026-10-27_step6-fix-loop-row` (vanilla 60/69, 0 regressions, no row
+moved) and `2026-10-27_hq-fix-path` (HQ 42/69).  Unit tests: 7 new
+assertions (the FIX frame, the end without a loop, the loop reset; the
+frame test's unported example is now CMP); unit 1962/1962.
 
 **Step 7 — reverb.**  The seed arithmetic and the one-frame delay;
 `pcm_reverb`, `pcm_reverb_max`, mus_littleroot, mus_vs_wild, mus_credits.

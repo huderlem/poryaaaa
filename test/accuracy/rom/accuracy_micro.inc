@@ -17,3 +17,4 @@ voice_group accuracy_micro
 	voice_directsound_no_resample 64, 0, DirectSoundWaveData_sd90_solo_snare, 255, 0, 255, 242 @ 12 fixed-frequency drum
 	voice_directsound_compressed 60, 0, Cry_Bulbasaur, 255, 0, 255, 0             @ 13 compressed sample
 	voice_directsound 60, 0, DirectSoundWaveData_sc88pro_fretless_bass, 255, 253, 0, 188 @ 14 bass
+	voice_directsound_no_resample 60, 0, DirectSoundWaveData_sc88pro_flute, 255, 0, 255, 165 @ 15 looped PCM, fixed-frequency (the HQ mixer's FIX loop)

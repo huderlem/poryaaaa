@@ -3195,7 +3195,74 @@ static void test_hq_mixer(void)
         ASSERT(A[0] == 3, "hq seed: the next slot is only read");
     }
 
-    /* The frame: an unported path (FIX) leaves the channel untouched and
+    /* The FIX path: the 12-sample ramp, frame 8, volumes 2 / 2 unhalved.
+     * min(12, 8) - 1 >> 2 = 1 block of four (10..40), then the four-sample
+     * remainder (50..80): 20, 40, .. 160 packed; count 4, pointer data + 8,
+     * fw and the base untouched. */
+    {
+        WaveData *wd = ramp_wave(12, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x400000; ch.fw = 77; ch.sampleStor = 9;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq fix: the path is ported");
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(20 * (i + 1)) << 16 | (uint32_t)(20 * (i + 1)))) ok = 0;
+        ASSERT(ok, "hq fix: one sample per output at the unhalved volume");
+        ASSERT(ch.count == 4 && ch.currentPointer == wd->data + 8 && ch.fw == 77 && ch.sampleStor == 9,
+               "hq fix: count and pointer stored, fw and the base untouched");
+        free(wd);
+    }
+
+    /* The FIX end: a 6-sample ramp, frame 8: one block (10..40) and a
+     * remainder that runs out on its second sample (50, 60): the channel
+     * stops (status 0) with nothing stored, the last two outputs unmixed. */
+    {
+        WaveData *wd = ramp_wave(6, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        int ok = 1;
+        for (int i = 0; i < 6; i++)
+            if (buf[i] != ((uint32_t)(20 * (i + 1)) << 16 | (uint32_t)(20 * (i + 1)))) ok = 0;
+        ASSERT(ok && buf[6] == 0 && buf[7] == 0, "hq fix: 20 .. 120 then nothing");
+        ASSERT(ch.status == 0 && ch.count == 6 && ch.currentPointer == wd->data, "hq fix: stopped, nothing stored");
+        free(wd);
+    }
+
+    /* The FIX loop: the 6-sample ramp looped from sample 2 (length 4):
+     * 10..40, 50, 60 then the loop start (absolute) 30, 40; after: count
+     * 2, pointer data + 4. */
+    {
+        WaveData *wd = ramp_wave(6, 1, 2);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN | CHN_LOOP; ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        static const int want[8] = { 10, 20, 30, 40, 50, 60, 30, 40 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(2 * want[i]) << 16 | (uint32_t)(2 * want[i]))) ok = 0;
+        ASSERT(ok, "hq fix: the loop restarts at loopStart, absolute");
+        ASSERT(ch.count == 2 && ch.currentPointer == wd->data + 4 && ch.status == (CHN_ENV_SUSTAIN | CHN_LOOP),
+               "hq fix: count and pointer after the wrap");
+        free(wd);
+    }
+
+    /* The frame: an unported path (CMP) leaves the channel untouched and
      * is counted; a ported one advances. */
     {
         WaveData *wd = ramp_wave(12, 0, 0);
@@ -3203,11 +3270,11 @@ static void test_hq_mixer(void)
         e.pcmDivFreq = 1; e.pcmSamplesPerVBlank = 8;
         M4APCMChannel *ch = &e.pcmChannels[0];
         memset(ch, 0, sizeof(*ch));
-        m4a_pcm_channel_start(ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX);
+        m4a_pcm_channel_start(ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_CMP);
         ch->frequency = 0x400000; ch->leftVolume = ch->rightVolume = 127;
         ch->attack = 255; ch->decay = 255; ch->sustain = 255;
         m4a_hq_sound_main_ram(&e, 0, 7);
-        ASSERT_EQ(e.hqUnportedChannelFrames, 1, "hq frame: a FIX channel is counted as unported");
+        ASSERT_EQ(e.hqUnportedChannelFrames, 1, "hq frame: a CMP channel is counted as unported");
         ASSERT(ch->count == 12 && ch->currentPointer == wd->data, "hq frame: and left untouched");
         ch->type = VOICE_DIRECTSOUND;
         m4a_hq_sound_main_ram(&e, 8, 6);
