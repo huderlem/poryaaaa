@@ -247,7 +247,11 @@ wrote (`docs/HQ-MIXER-ACCURACY.md`, step 2).
 `tools/frame_diff.py <ref.wav> <out.wav>` for the differing frames; then
 `HQ_DEBUG=1 build/poryaaaa_render ... --hq-mixer 2> ring.txt` (one
 `HQRING` line per frame with the ring slot, one `HQDBG` line with the mix
-buffer words) and a probe run of that test on the HQ ROM, and
+buffer words, and one `HQSTACK` line per pre-cached channel-frame -- the
+CMP / REV paths' decoded buffer with its index, advance, count, step, fw,
+volume and base, to set against the probe's `buf=` dump at
+`C_select_highspeed_codepath_vla_r3` and its registers at
+`C_data_load_comp_for` / `_rev`) and a probe run of that test on the HQ ROM, and
 `tools/hq_ring_compare.py <probe .txt> ring.txt`.  Identical rings with a
 single differing frame of one DAC step = the scheduler floor (the frame's
 timer-0 slot crossing in the `.events` file, one engine frame before the

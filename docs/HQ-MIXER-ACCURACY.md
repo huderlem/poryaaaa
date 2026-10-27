@@ -310,9 +310,39 @@ the remainder's `mla` does not.  `fw` and `sampleStor` are not written
   Decoding the two blocks with that rule and the 256-entry view of the
   delta table reproduces the probe's buffer dump byte for byte
   (`tools/hq_decode_check.py`), and the same decoder reproduces the
-  previous frame's real blocks.  The port can
-  therefore reproduce the end frame exactly from the mixer's own code
-  bytes; `pcm_rev` and the reversed cries decide (step 8).
+  previous frame's real blocks.  **Ported (step 8)**: the port reproduces
+  the end frame from the mixer's own code bytes (the three prefetch words
+  and the 256-byte table view are constants of the image).  **Measured
+  (step 8, `cry_pidgey_echo_start_chorus` frame 12)**: once the frame's
+  first block is before the sample, *every* block of that frame is read
+  from open bus — the decode loop steps the wrapped address by 0x21, so
+  the real blocks 0, 1, … are read at `data + 0x84000000 + 0x21 k`, never
+  at `data + 0x21 k`; a port that only wraps the negative blocks plays the
+  real ones where the ROM plays prefetch garbage.  The lane of byte `j` of
+  block `k` is `(j + k) & 3` in both cases (the WaveData is word-aligned
+  in ROM, `0x21 ≡ 1 mod 4`).
+- **The last block's tail (step 8)**: a cry's `.bin` stops at the
+  look-ahead sample (Bulbasaur: 29 of the last block's 33 bytes), but the
+  mixer decodes the whole block, so its remaining bytes are whatever
+  follows the `.incbin` in the ROM: `.align 2` zeros, then the next
+  entry's 16-byte header (`01 00 00 00 …` for the next cry).  Vanilla
+  never outputs those samples (indices ≥ size); the HQ mixer plays them
+  as the sample runs out (a few samples of ±1), and — the larger effect —
+  the downsampler's 7-bit residual then stays shifted through the
+  following silence, so every later note's rounding differs by one (a
+  pcm_cmp second note at −29 dB, cry_over_bgm's song at −33).  The loader
+  fills a truncated last block from the next entry's file in
+  `direct_sound_data.inc` order (`symbol_map_next_path`); all 20
+  compressed rows went from 0/−11..−57 dB to −inf or the floor.
+- **Before the sample (step 8)**: `C_data_load_uncomp_rev`'s end frame
+  reads from `(idx − advance − 1) & ~3`, i.e. before `data`: the entry's
+  own header, the padding and the previous entry's tail (up to
+  `advance + 4` bytes, ≤ 1132 at 13379 Hz).  The loader keeps up to 1280
+  of those bytes in front of the data (`WaveData.romBefore`, from the
+  previous entry's `.bin` in the same order; a `.wav`-loaded sample is
+  re-laid-out with the header rebuilt from its fields, which the `.bin`
+  carries byte for byte); without them the header alone is rebuilt and
+  the rest reads 0.  `pcm_rev` −31.9 → −inf.
 - **Uncompressed reverse**: words byte-swapped onto the stack, then the fast
   loop; at the end the zero fill and status 0 as above.
 - The stack budget: if `0x03007900 + bytes ≥ sp` the pre-cached paths
@@ -323,7 +353,16 @@ the remainder's `mla` does not.  `fw` and `sampleStor` are not written
   dispatcher's and the sound driver's frames, so roughly 0x4E0 bytes of
   budget; in the game it varies with the main loop's call depth at the
   interrupt).  Measure it (step 2) and make it an engine parameter with
-  the test ROM's value as the default.
+  the test ROM's value as the default.  **Done (step 8)**:
+  `engine->hqStackSp` (default `0x03007DD0`, `poryaaaa_render
+  --hq-stack-sp`); the check sees `sp − 12` (the one `stmfd {r4, r9,
+  r12}` before it), so the budget is 1220 bytes: 19 blocks of a
+  compressed frame pass, 20 skip.  `pcm_cmp_hi` (the Bulbasaur cry at
+  keys 96 / 72 / 94: ratios 6.3 / 1.6 / 5.6) plays only its middle note
+  on the HQ ROM, the other two frozen silent, and reads −inf; the vanilla
+  ROM plays all three (−43.6).  A skipped channel's `C_end_mixing` stores
+  the unchanged registers, so nothing moves until the envelope ends the
+  note.
 
 ### The synth paths (SPL)
 
@@ -574,11 +613,11 @@ path from `--pcm-log` (frequency × divFreq / 2^23) rather than guessing.
 | reverb seed | `pcm_reverb`, mus_littleroot, mus_vs_wild, mus_credits | `pcm_reverb_max` (`-R127`: the `>> 2` scaling at 31) — added in step 7 |
 | saturation | none deliberate | `pcm_clip` (6+ notes at velocity 127, VOL 127: expect clipping, not wrap) |
 | 16-bit half overflow / borrow | every row with negative samples | `pcm_clip` with a pan test |
-| compressed forward | `pcm_cmp`, every forward cry | — |
+| compressed forward | `pcm_cmp`, every forward cry | — (step 8: −inf) |
 | compressed end frame (zero fill, immediate stop) | `pcm_cmp`, cries with the sample ending (pidgey) | — |
-| compressed reverse + the negative block | reversed cries | — (measure first) |
-| uncompressed reverse | none in vanilla (reversed cries are DPCM) | `pcm_rev` (`voice_directsound` with the REV bit on an uncompressed sample; mid2agb cannot express it — a hand-written voice in the micro voicegroup) |
-| stack budget exceeded | none | `pcm_cmp_hi` (a compressed sample at ratio ≥ 6: expect a frozen, never-ending silent channel) |
+| compressed reverse + the negative block | reversed cries, `cry_pidgey_echo_start_chorus` (two channels ending in different frames) | — (step 8: −inf; the whole end frame on open bus) |
+| uncompressed reverse | none in vanilla (reversed cries are DPCM) | `pcm_rev` (voice 16, `voice_directsound_reverse` on the pizzicato) — step 8, −inf with the loader's preceding bytes |
+| stack budget exceeded | none | `pcm_cmp_hi` (the Bulbasaur cry at keys 96 / 72 / 94: the two high notes frozen silent on the HQ ROM) — step 8, −inf |
 | synth pulse / saw / triangle, duty LFO | none | `synth_pulse`, `synth_pulse_lfo`, `synth_saw`, `synth_tri` — `.bin` descriptors in the micro voicegroup (the repo's `duty.bin` / `saw.bin` / `triangle.bin` layouts); **vanilla-ROM rows of these are not meaningful** (a click) and are skipped unless `--mixer hq` |
 | frame lengths ≠ 224 | none | step 11 |
 
@@ -875,6 +914,47 @@ paths with step 2(e)'s measurement in hand: decide whether the negative
 block is reproduced (mgba's open-bus value is deterministic per ROM) or
 recorded as a residual, as the vanilla reversed-cry end is.  The stack
 budget skip (`pcm_cmp_hi`).  Rows: every cry and `pcm_rev`.
+
+**Step 8 — done 2026-10-27.**  `precache_path` in `plugin/m4a_hq_mixer.c`
+(`C_data_load_comp` forward and reverse, `C_data_load_uncomp_rev`, each
+with its byte range, the stack check against `hqStackSp − 12`, the end
+case's `F_clear_mem` and `streqb`, the fill, the fast loop from
+`sp + (idx & mask)` and `C_end_mixing`), `hq_decode_block`
+(`F_decode_compressed` with the 256-byte table view) and the open-bus
+lanes; `C_mixing_setup_comp_rev`'s FIX-forced step; the engine's
+`hqStackSp` and the renderer's `--hq-stack-sp`; `HQ_DEBUG=1` dumps each
+pre-cache buffer (`HQSTACK`, comparable with the probe's `buf=`).
+Predicted: every cry and `pcm_cmp` to −inf or the cry floor, the two
+cry-over rows to the floor with their PSG logs back to 0 moved, the
+songs unchanged.  Measured in three rounds, each attributed with the
+ring compare, the register compare at `C_data_load_comp_*` and the
+buffer compare: (1) the first port (negative blocks only from open bus)
+gave `cry_bulbasaur_reverse` −inf but left 20 compressed rows at
+0/−11..−57 — one cause, the truncated last block (section 2: the next
+entry's header bytes and the shifted residual), fixed in the loader;
+(2) `pcm_rev` −31.9: the bytes before the sample, kept by the loader
+(`romBefore`); (3) `cry_pidgey_echo_start_chorus` −11.2: the whole end
+frame on open bus (section 2), found by comparing the engine's `HQSTACK`
+against the probe's `buf=` with every register equal.  Final: HQ 68/72
+(from 43), 0 regressions; `pcm_cmp`, `pcm_rev`, `pcm_cmp_hi` and 20 of
+the 22 cry rows −inf, `cry_wailord_doubles` −69.6 (the floor: ring
+identical, 5 crossings), `cry_over_se` −66.7, `cry_over_bgm` −51.0
+(the vanilla floor; their PSG logs 0 moved, so the HQ gate is now 62
+logs diffed with only pcm_psg's known 4 cycles).  The four rows left are
+the floor (`mt_chimney`, `credits`, `se_contest_place`) and `se_faint`
+−49.2 (no FIX / CMP voice; open).  Rows: voice 16 (`voice_directsound_reverse`
+on the pizzicato) and `pcm_rev`, `pcm_cmp_hi`; both ROMs rebuilt twice
+(symbols unchanged; final vanilla sha256 `3faa13cab66a…`, HQ
+`475cc577aa29…`; canaries byte-identical each time), refs updated (37
+micro rows).  Vanilla 63/72, 0 regressions, no row moved (the loader's
+new bytes are never output by the vanilla mixer; an earlier
+`pcm_cmp_hi` with three high compressed notes read −35.4 on vanilla —
+a vanilla high-ratio DPCM residual noted, not pursued).  Baselines
+`2026-10-27_step8-cmp-rows` (vanilla) and `2026-10-27_hq-precached`
+(HQ).  Unit tests: the forward decode, the end's zero fill and stop,
+the reversed layout, the open-bus end (both forms), the stack skip, the
+uncompressed reverse with the rebuilt header and with the loader's
+bytes; unit 1988/1988.
 
 **Step 9 — synths.**  The four synth micro-tests in the HQ ROM; the HQ
 synth loops bit-exact; then the vanilla-mode extension re-derived from the

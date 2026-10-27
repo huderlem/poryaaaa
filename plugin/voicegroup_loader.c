@@ -226,10 +226,14 @@ static KeySplitDef *keysplit_map_find(const KeySplitMap *map, const char *name);
 static int parse_direct_sound_data_file(const char *filePath, const char *projectRoot, SymbolMap *map);
 static int parse_programmable_wave_data_file(const char *filePath, const char *projectRoot, SymbolMap *map);
 static int parse_keysplit_tables_file(const char *filePath, KeySplitMap *map);
-static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *relativeBinPath);
+static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *relativeBinPath,
+                                         const char *prevRelativePath, const char *nextRelativePath);
 static WaveData *load_wav_from_path(const char *absoluteWavPath);
 static WaveData *load_aif_from_path(const char *absoluteAifPath);
 static WaveData *load_wave_data(const char *projectRoot, const char *relativePath);
+static WaveData *load_wave_data_next(const char *projectRoot, const char *relativePath,
+                                     const char *prevRelativePath, const char *nextRelativePath);
+static WaveData *with_rom_before(WaveData *wd, const char *projectRoot, const char *prevRelativePath);
 static uint32_t *load_prog_wave(const char *projectRoot, const char *relativePath);
 /* ---- WaveData deduplication cache ---- */
 
@@ -463,6 +467,29 @@ static const char *symbol_map_find(const SymbolMap *map, const char *symbol)
 }
 
 /* Returns the 6 synth descriptor bytes for an inline synth symbol, or NULL. */
+/* The entry after `symbol` in its data file's order: what follows the
+ * sample in the ROM (after `.align 2` padding).  NULL for the last entry
+ * or a synth descriptor. */
+static const char *symbol_map_next_path(const SymbolMap *map, const char *symbol)
+{
+    for (int i = 0; i + 1 < map->count; i++) {
+        if (strcmp(map->entries[i].symbol, symbol) == 0)
+            return map->entries[i + 1].isSynth ? NULL : map->entries[i + 1].filePath;
+    }
+    return NULL;
+}
+
+/* The entry before `symbol` in its data file's order (NULL for the first
+ * or a synth descriptor). */
+static const char *symbol_map_prev_path(const SymbolMap *map, const char *symbol)
+{
+    for (int i = 1; i < map->count; i++) {
+        if (strcmp(map->entries[i].symbol, symbol) == 0)
+            return map->entries[i - 1].isSynth ? NULL : map->entries[i - 1].filePath;
+    }
+    return NULL;
+}
+
 static const uint8_t *symbol_map_find_synth(const SymbolMap *map, const char *symbol)
 {
     for (int i = 0; i < map->count; i++) {
@@ -1340,6 +1367,7 @@ static WaveData *load_wav_from_path(const char *absoluteWavPath)
     wd->status    = loopEnabled ? 0x4000 : 0;
     wd->freq      = freq;
     wd->loopStart = smplLoopStart;
+    wd->romBefore = 0;
     wd->size      = size;
     wd->data      = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
 
@@ -1597,6 +1625,7 @@ static WaveData *load_aif_from_path(const char *absoluteAifPath)
     wd->status    = loopEnabled ? 0x4000 : 0;
     wd->freq      = (uint32_t)(sampleRate * 1024.0);
     wd->loopStart = loopStart;
+    wd->romBefore = 0;
     wd->size      = size;
     wd->data      = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
 
@@ -1634,7 +1663,8 @@ static WaveData *load_aif_from_path(const char *absoluteAifPath)
  * Derives the .wav then .aif path by replacing the .bin extension in
  * relativeBinPath. Falls back to load_wave_data() if neither is found.
  */
-static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *relativeBinPath)
+static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *relativeBinPath,
+                                         const char *prevRelativePath, const char *nextRelativePath)
 {
     char relativeWavPath[MAX_PATH_LEN];
     strncpy(relativeWavPath, relativeBinPath, MAX_PATH_LEN - 1);
@@ -1646,7 +1676,7 @@ static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *re
         ext = relativeWavPath + pathLen - 4;
 
     if (!ext) {
-        return load_wave_data(projectRoot, relativeBinPath);
+        return load_wave_data_next(projectRoot, relativeBinPath, prevRelativePath, nextRelativePath);
     }
     ext[1] = 'w'; ext[2] = 'a'; ext[3] = 'v';
 
@@ -1654,21 +1684,92 @@ static WaveData *load_wave_data_from_wav(const char *projectRoot, const char *re
     build_path(fullPath, sizeof(fullPath), projectRoot, relativeWavPath);
 
     WaveData *wd = load_wav_from_path(fullPath);
-    if (wd) return wd;
+    if (wd) return with_rom_before(wd, projectRoot, prevRelativePath);
 
     ext[1] = 'a'; ext[2] = 'i'; ext[3] = 'f';
     build_path(fullPath, sizeof(fullPath), projectRoot, relativeWavPath);
     wd = load_aif_from_path(fullPath);
-    if (wd) return wd;
+    if (wd) return with_rom_before(wd, projectRoot, prevRelativePath);
 
-    /* Neither source format found — fall back to the .bin build artifact */
-    return load_wave_data(projectRoot, relativeBinPath);
+    /* Neither source format found -- fall back to the .bin build artifact */
+    return load_wave_data_next(projectRoot, relativeBinPath, prevRelativePath, nextRelativePath);
 }
 
 /*
  * Load a .bin sample file (DirectSound wave data).
  */
 static WaveData *load_wave_data(const char *projectRoot, const char *relativePath)
+{
+    return load_wave_data_next(projectRoot, relativePath, NULL, NULL);
+}
+
+/* As load_wave_data; `prevRelativePath` / `nextRelativePath` name the
+ * entries around this one in the ROM (direct_sound_data.inc order, each
+ * `.incbin` 4-aligned): the previous entry's tail is kept in front of the
+ * data (WaveData.romBefore) and the next one fills a compressed sample's
+ * truncated last block.  ipatix's HQ mixer reads both (the vanilla mixer
+ * neither). */
+#define ROM_BEFORE_MAX 1280   /* > the largest reversed frame's reach (advance + 4 at ratio 5.6) */
+
+/* The ROM bytes before a sample's data, right-aligned in `out`: this
+ * entry's 16-byte header and, when the previous entry's `.bin` is at
+ * hand, its file's tail with the `.align 2` zeros between.  Returns how
+ * many bytes of `out` are filled (16 without the previous entry). */
+static uint32_t rom_before_bytes(const char *projectRoot, const char *prevRelativePath,
+                                 const uint8_t header[16], uint8_t out[ROM_BEFORE_MAX])
+{
+    uint32_t romBefore = 16;
+    memcpy(out + ROM_BEFORE_MAX - 16, header, 16);
+    if (!prevRelativePath)
+        return romBefore;
+    char prevPath[MAX_PATH_LEN];
+    build_path(prevPath, sizeof(prevPath), projectRoot, prevRelativePath);
+    FILE *pf = fopen(prevPath, "rb");
+    if (!pf)
+        return romBefore;
+    long prevSize = 0;
+    if (fseek(pf, 0, SEEK_END) == 0 && (prevSize = ftell(pf)) > 0) {
+        uint32_t pad = (uint32_t)((4 - (prevSize & 3)) & 3);
+        uint32_t keep = (uint32_t)(ROM_BEFORE_MAX - 16 - pad);
+        if ((long)keep > prevSize) keep = (uint32_t)prevSize;
+        memset(out + ROM_BEFORE_MAX - 16 - pad, 0, pad);
+        if (fseek(pf, prevSize - (long)keep, SEEK_SET) == 0
+            && fread(out + ROM_BEFORE_MAX - 16 - pad - keep, 1, keep, pf) == keep)
+            romBefore = 16 + pad + keep;
+    }
+    fclose(pf);
+    return romBefore;
+}
+
+/* Re-allocate a sample loaded from a .wav / .aif with the ROM's preceding
+ * bytes in front of its data (the header rebuilt from the fields, which
+ * the .bin carries byte for byte). */
+static WaveData *with_rom_before(WaveData *wd, const char *projectRoot, const char *prevRelativePath)
+{
+    if (!wd || wd->size == 0 || wd->romBefore != 0)
+        return wd;
+    uint8_t header[16];
+    uint32_t f[4] = { (uint32_t)wd->type | ((uint32_t)wd->status << 16), wd->freq, wd->loopStart, wd->size };
+    for (int w = 0; w < 4; w++)
+        for (int b = 0; b < 4; b++)
+            header[4 * w + b] = (uint8_t)(f[w] >> (8 * b));
+    uint8_t before[ROM_BEFORE_MAX];
+    uint32_t romBefore = rom_before_bytes(projectRoot, prevRelativePath, header, before);
+    size_t dataBytes = (size_t)wd->size + 1;
+    WaveData *nw = malloc(sizeof(WaveData) + romBefore + dataBytes);
+    if (!nw)
+        return wd;
+    *nw = *wd;
+    nw->data = (int8_t *)((uint8_t *)nw + sizeof(WaveData) + romBefore);
+    nw->romBefore = romBefore;
+    memcpy(nw->data - romBefore, before + ROM_BEFORE_MAX - romBefore, romBefore);
+    memcpy(nw->data, wd->data, dataBytes);
+    free(wd);
+    return nw;
+}
+
+static WaveData *load_wave_data_next(const char *projectRoot, const char *relativePath,
+                                     const char *prevRelativePath, const char *nextRelativePath)
 {
     char fullPath[MAX_PATH_LEN];
     build_path(fullPath, sizeof(fullPath), projectRoot, relativePath);
@@ -1703,7 +1804,10 @@ static WaveData *load_wave_data(const char *projectRoot, const char *relativePat
     if (type != 0 && size > 0)
         dataSize = (size / M4A_DPCM_BLOCK_SAMPLES + 1) * M4A_DPCM_BLOCK_BYTES;
 
-    WaveData *wd = malloc(sizeof(WaveData) + dataSize + 1);
+    uint8_t before[ROM_BEFORE_MAX];
+    uint32_t romBefore = rom_before_bytes(projectRoot, prevRelativePath, header, before);
+
+    WaveData *wd = malloc(sizeof(WaveData) + romBefore + dataSize + 1);
     if (!wd) {
         fclose(f);
         return NULL;
@@ -1716,7 +1820,9 @@ static WaveData *load_wave_data(const char *projectRoot, const char *relativePat
     wd->freq = freq;
     wd->loopStart = loopStart;
     wd->size = size;
-    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData) + romBefore);
+    wd->romBefore = romBefore;
+    memcpy(wd->data - romBefore, before + ROM_BEFORE_MAX - romBefore, romBefore);
 
     /* Read the converter's extra sample after the data too (the mixer's
      * look-ahead at the last sample reads it; the loop-start sample for a
@@ -1726,8 +1832,32 @@ static WaveData *load_wave_data(const char *projectRoot, const char *relativePat
     if (bytesRead < dataSize + 1) {
         memset(wd->data + bytesRead, 0, dataSize + 1 - bytesRead);
     }
-
     fclose(f);
+
+    /* A compressed sample's last block is written only as far as the
+     * look-ahead sample (the Bulbasaur cry: 29 of the block's 33 bytes),
+     * but the GBA decodes the whole block: the missing bytes are what
+     * follows the `.incbin` in the ROM -- `.align 2` padding, then the
+     * next entry's 16-byte header and data.  The vanilla mixer never
+     * outputs those samples (indices >= size); ipatix's HQ mixer plays
+     * them at the sample's end, so reproduce the ROM's bytes from the
+     * next entry's file when the data file order is known. */
+    if (type != 0 && size > 0 && bytesRead < dataSize + 1 && nextRelativePath) {
+        char nextPath[MAX_PATH_LEN];
+        build_path(nextPath, sizeof(nextPath), projectRoot, nextRelativePath);
+        FILE *nf = fopen(nextPath, "rb");
+        if (nf) {
+            uint8_t nextBytes[64];
+            size_t nextRead = fread(nextBytes, 1, sizeof(nextBytes), nf);
+            fclose(nf);
+            size_t entryBytes = (16 + bytesRead + 3) & ~(size_t)3;   /* the entry, padded */
+            for (size_t o = bytesRead; o < dataSize + 1; o++) {
+                size_t r = 16 + o;                                   /* ROM offset from the entry's start */
+                if (r >= entryBytes && r - entryBytes < nextRead)
+                    wd->data[o] = (int8_t)nextBytes[r - entryBytes];
+            }
+        }
+    }
     return wd;
 }
 
@@ -1818,7 +1948,8 @@ static WaveData *resolve_and_load_sample(const char *projectRoot, const char *sy
         WaveData *cached = wave_cache_find(waveCache, absWavPath);
         if (cached) return cached;
 
-        WaveData *wd = load_wave_data_from_wav(projectRoot, samplePath);
+        WaveData *wd = load_wave_data_from_wav(projectRoot, samplePath, symbol_map_prev_path(dsMap, symbol),
+                                               symbol_map_next_path(dsMap, symbol));
         if (wd) {
             vg_register_wavedata(vg, wd);
             wave_cache_insert(waveCache, absWavPath, wd);
@@ -1890,7 +2021,8 @@ static WaveData *resolve_and_load_compressed_sample(const char *projectRoot, con
             if (file_mtime(absBinPath) >= sourceTime) {
                 WaveData *cached = wave_cache_find(waveCache, absBinPath);
                 if (cached) return cached;
-                WaveData *wd = load_wave_data(projectRoot, samplePath);
+                WaveData *wd = load_wave_data_next(projectRoot, samplePath, symbol_map_prev_path(dsMap, symbol),
+                                                   symbol_map_next_path(dsMap, symbol));
                 if (wd) {
                     vg_register_wavedata(vg, wd);
                     wave_cache_insert(waveCache, absBinPath, wd);

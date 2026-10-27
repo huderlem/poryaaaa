@@ -626,6 +626,7 @@ void m4a_engine_boot(M4AEngine *engine, bool emitAudio)
 void m4a_engine_init(M4AEngine *engine, float sampleRate)
 {
     memset(engine, 0, sizeof(M4AEngine));
+    engine->hqStackSp = M4A_HQ_STACK_SP_DEFAULT;
 
     engine->sampleRate = sampleRate;
     engine->pcmFreqMode = M4A_PCM_FREQ_MODE_DEFAULT;

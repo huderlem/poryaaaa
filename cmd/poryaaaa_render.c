@@ -883,6 +883,8 @@ static void print_usage(const char *prog)
         "                              40137 42048 (nearest is used; default: 13379)\n"
         "  --hq-mixer                  ipatix HQ-mixer mode (the pret wiki's HQ mixer; default: the\n"
         "                              vanilla pokeemerald mixer)\n"
+        "  --hq-stack-sp <addr>        HQ mode: sp at SoundMainRAM entry, the pre-cached paths' stack\n"
+        "                              budget (default 0x03007DD0, the test ROM's; see docs/HQ-MIXER-ACCURACY.md)\n"
         "  --tail <seconds>            Silence after last event, no loop markers (default: 3.0)\n"
         "\n"
         "Compiled-song options (--song):\n"
@@ -925,6 +927,7 @@ typedef struct {
     int cry2StartFrame;          /* --cry2-start-frame: the VBlank it starts on (its tick on engine frame + 2) */
     bool respectBaseMidiKey, portamento, pwm;
     bool hqMixer;                /* --hq-mixer: ipatix HQ-mixer mode */
+    uint32_t hqStackSp;          /* --hq-stack-sp: sp at SoundMainRAM entry (HQ stack budget) */
     int maxChannels;
     double sampleRate;
     int pcmFreqMode;
@@ -1082,6 +1085,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
     m4a_engine_set_pwm_enabled(&engine, o->pwm);
     m4a_engine_set_pcm_freq_mode(&engine, o->pcmFreqMode);
     m4a_engine_set_hq_mixer(&engine, o->hqMixer);
+    engine.hqStackSp = o->hqStackSp;
 
     M4ASequencer seq, seq2;
     m4a_sequencer_init(&seq, &engine);
@@ -1635,6 +1639,7 @@ int main(int argc, char *argv[])
     int         sampleRateHz  = 44100;
     int         pcmFreqMode   = M4A_PCM_FREQ_MODE_DEFAULT; /* SOUND_MODE_FREQ_13379 */
     bool        hqMixer       = false;  /* --hq-mixer: ipatix HQ-mixer mode */
+    uint32_t    hqStackSp     = M4A_HQ_STACK_SP_DEFAULT;  /* --hq-stack-sp: the mixer's sp at entry (its stack budget) */
     double      tailSeconds   = 3.0;
     int         loopCount     = 2;
     bool        extendedClocks = false; /* mid2agb -X: 48 clocks/beat */
@@ -1746,6 +1751,8 @@ int main(int argc, char *argv[])
                         hz, m4a_pcm_freq_mode_hz(pcmFreqMode));
         } else if (strcmp(argv[i], "--hq-mixer") == 0) {
             hqMixer = true;
+        } else if (strcmp(argv[i], "--hq-stack-sp") == 0 && i + 1 < argc) {
+            hqStackSp = (uint32_t)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--psg-log") == 0 && i + 1 < argc) {
             psgLogPath = argv[++i];
         } else if (strcmp(argv[i], "--pcm-log") == 0 && i + 1 < argc) {
@@ -1840,6 +1847,7 @@ int main(int argc, char *argv[])
             .portamento = portamento, .pwm = pwm, .maxChannels = maxChannels,
             .sampleRate = sampleRate, .pcmFreqMode = pcmFreqMode,
             .hqMixer = hqMixer,
+            .hqStackSp = hqStackSp,
             .tailSeconds = tailSeconds, .fadeoutSeconds = fadeoutSeconds,
             .totalDurSeconds = totalDurSeconds, .loopCount = loopCount,
             .psgLogPath = psgLogPath,

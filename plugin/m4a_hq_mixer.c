@@ -306,6 +306,241 @@ static bool fix_path(M4APCMChannel *r4, uint32_t *r5, int32_t r8, int32_t r2, in
     return true;
 }
 
+
+/* ---- The pre-cached paths: C_data_load_comp / _uncomp_rev (section 2 of
+ * docs/HQ-MIXER-ACCURACY.md).  The sample bytes of the frame are decoded
+ * (DPCM) or byte-swapped (reversed) onto the stack, then the fast loop
+ * plays them; `stack` stands in for [sp - r8, sp). ---- */
+
+#define HQ_BLK          64                /* BDPCM_BLK_SIZE */
+#define HQ_BLK_STRIDE   0x21              /* BDPCM_BLK_STRIDE */
+#define HQ_STACK_BOUND  0x03007900u       /* stack_boundary_literal */
+#define HQ_STACK_MAX    0x600             /* > any budget below the IRQ stack top */
+
+/* delta_lookup_table as F_decode_compressed indexes it.  The first pair's
+ * delta is `ldrb r1, [r12, r3]` with the WHOLE second byte of the block,
+ * so bytes 16..255 of the view are what follows the table in the mixer
+ * image: stack_boundary_literal, then C_data_load_comp's code.  Read from
+ * the HQ test ROM (the instructions are position-independent and no
+ * self-modified slot lies in the range); real blocks keep that nibble 0. */
+static const uint8_t sHqDeltaView[256] = {
+    0x00, 0x01, 0x04, 0x09, 0x10, 0x19, 0x24, 0x31, 0xC0, 0xCF, 0xDC, 0xE7, 0xF0, 0xF7, 0xFC, 0xFF,
+    0x00, 0x79, 0x00, 0x03, 0x2C, 0x90, 0x4F, 0x52, 0x28, 0x90, 0x4F, 0x42, 0x00, 0x50, 0x99, 0xE8,
+    0x4C, 0x90, 0x4F, 0xE2, 0x00, 0x50, 0x89, 0xE8, 0x30, 0xC0, 0x4F, 0xE2, 0x20, 0x00, 0x00, 0x4A,
+    0x00, 0xE0, 0x83, 0xE0, 0x40, 0xE0, 0x8E, 0xE2, 0x3F, 0xE0, 0xCE, 0xE3, 0x23, 0x93, 0xA0, 0xE1,
+    0x09, 0x83, 0x4E, 0xE0, 0x3C, 0x10, 0x1F, 0xE5, 0x08, 0x10, 0x81, 0xE0, 0x0D, 0x00, 0x51, 0xE1,
+    0xFB, 0x00, 0x00, 0x2A, 0x00, 0x10, 0x83, 0xE0, 0x00, 0x00, 0x52, 0xE0, 0x03, 0x00, 0x2D, 0xE9,
+    0x08, 0xD0, 0x4D, 0xE0, 0x06, 0x00, 0x00, 0xCA, 0x02, 0x10, 0x83, 0xE0, 0x3F, 0x10, 0x81, 0xE2,
+    0x3F, 0x10, 0xC1, 0xE3, 0x01, 0x10, 0x4E, 0xE0, 0x01, 0x80, 0x48, 0xE0, 0x08, 0x00, 0x8D, 0xE0,
+    0x00, 0x02, 0x00, 0xEB, 0x3F, 0x30, 0x03, 0xE2, 0x0D, 0x00, 0xA0, 0xE1, 0x08, 0x20, 0x9A, 0xE5,
+    0x00, 0x10, 0xC2, 0x05, 0x24, 0x20, 0x92, 0xE5, 0x10, 0x20, 0x82, 0xE2, 0x21, 0x10, 0xA0, 0xE3,
+    0x91, 0x29, 0x29, 0xE0, 0xC1, 0xFF, 0xFF, 0xEB, 0x40, 0x80, 0x58, 0xE2, 0xFC, 0xFF, 0xFF, 0xCA,
+    0x4B, 0x00, 0x00, 0xEA, 0x3F, 0xE0, 0x83, 0xE2, 0x3F, 0xE0, 0xCE, 0xE3, 0x00, 0x90, 0x43, 0xE0,
+    0x01, 0x90, 0x49, 0xE2, 0x29, 0x93, 0xA0, 0xE1, 0x09, 0x83, 0x4E, 0xE0, 0xC4, 0xE0, 0x1F, 0xE5,
+    0x08, 0xE0, 0x8E, 0xE0, 0x0D, 0x00, 0x5E, 0xE1, 0xD9, 0x00, 0x00, 0x2A, 0x00, 0xE0, 0x43, 0xE0,
+    0x00, 0x00, 0x52, 0xE0, 0x01, 0x40, 0x2D, 0xE9, 0x0D, 0x00, 0xA0, 0xE1, 0x08, 0xD0, 0x4D, 0xE0,
+    0x04, 0x00, 0x00, 0xCA, 0x02, 0x10, 0x43, 0xE0, 0x09, 0x13, 0x41, 0xE0, 0x01, 0x80, 0x48, 0xE0,
+};
+
+/* A frame whose first block lies before the sample (the reversed end
+ * frame, section 2 and step 2(e)): r9 = (idx - advance - 1) lsr 6 wraps,
+ * the block address data + 0x21 * r9 lands past the ROM (bit 31 set) and
+ * the ldrb reads open bus -- for EVERY block of the frame, since the
+ * decode loop steps that wrapped address by 0x21 and the real blocks 0,
+ * 1, .. are read at data + 0x84000000 + 0x21 k, not at data + 0x21 k
+ * (measured: cry_pidgey_echo_start_chorus frame 12, three open-bus blocks
+ * where the port first decoded the two real ones).  mgba (GBALoadBad, ARM
+ * code): cpu->prefetch[1] = the word two instructions ahead of the load,
+ * byte-selected by address & 3; the three loads of F_decode_compressed
+ * see F + 16, F + 20 and F + 28.  The WaveData is word-aligned in ROM and
+ * 0x21 = 1 (mod 4), so the lane of byte j of block k is (j + k) & 3.  Real
+ * hardware's open bus differs; the harness's truth is mgba's (ACCURACY.md,
+ * known residuals). */
+#define HQ_OPENBUS_W0 0xEA000003u         /* b C_bdpcm_decoder_loop_entry   (F + 16) */
+#define HQ_OPENBUS_W1 0xE4D93001u         /* ldrb r3, [r9], #1              (F + 20) */
+#define HQ_OPENBUS_WL 0xE0812002u         /* add r2, r1, r2                 (F + 28) */
+
+static inline uint8_t hq_block_byte(const WaveData *wav, int32_t k, bool openBus, int j, uint32_t openBusWord)
+{
+    if (!openBus)
+        return (uint8_t)wav->data[k * HQ_BLK_STRIDE + j];
+    return (uint8_t)(openBusWord >> (8 * ((j + k) & 3)));
+}
+
+/* F_decode_compressed: block k (0x21 bytes) -> 64 samples in `out`.
+ *   ldrb r2, [r9], #1; ldrb r3, [r9], #1
+ *   entry: ldrb r1, [r12, r3]; add r1, r1, r2; (store r2, r1)
+ *   loop:  ldrb r3, [r9], #1; ldrb r2, [r12, r3, lsr#4]; add r2, r1, r2;
+ *          and r3, r3, #0xF; -> entry; subs lr, #2; bgt loop */
+static void hq_decode_block(const WaveData *wav, int32_t k, bool openBus, uint8_t out[HQ_BLK])
+{
+    int j = 0, n = 0;
+    uint8_t r2 = hq_block_byte(wav, k, openBus, j++, HQ_OPENBUS_W0);
+    uint8_t r3 = hq_block_byte(wav, k, openBus, j++, HQ_OPENBUS_W1);
+    uint8_t r1 = (uint8_t)(sHqDeltaView[r3] + r2);
+    out[n++] = r2; out[n++] = r1;
+    for (int lr = HQ_BLK - 2; lr > 0; lr -= 2) {
+        r3 = hq_block_byte(wav, k, openBus, j++, HQ_OPENBUS_WL);
+        r2 = (uint8_t)(sHqDeltaView[r3 >> 4] + r1);
+        r3 &= 0xF;
+        r1 = (uint8_t)(sHqDeltaView[r3] + r2);
+        out[n++] = r2; out[n++] = r1;
+    }
+}
+
+/* C_data_load_uncomp_rev reads words from (idx - advance - 1) & ~3 on; in
+ * the end frame that is before the sample's data: the ROM's 16-byte
+ * WaveData header (type, status, freq, loopStart, size, little-endian)
+ * and, before it, the previous entry's tail.  The loader keeps those
+ * bytes in front of the data (WaveData.romBefore); without them (a .wav
+ * source, a hand-built sample) the header is rebuilt from the fields and
+ * the rest reads as 0 (a residual, ACCURACY.md).  Past the data the ROM
+ * holds the look-ahead byte and padding; only data[size] is kept. */
+static uint8_t hq_rev_src_byte(const WaveData *wav, int32_t i)
+{
+    if (i >= 0)
+        return i <= (int32_t)wav->size ? (uint8_t)wav->data[i] : 0;
+    if (i >= -(int32_t)wav->romBefore)                   /* the loader kept the ROM's bytes */
+        return (uint8_t)wav->data[i];
+    if (i >= -16) {
+        uint8_t hdr[16];
+        uint32_t f[4] = { (uint32_t)wav->type | ((uint32_t)wav->status << 16), wav->freq, wav->loopStart, wav->size };
+        for (int w = 0; w < 4; w++)
+            for (int b = 0; b < 4; b++)
+                hdr[4 * w + b] = (uint8_t)(f[w] >> (8 * b));
+        return hdr[16 + i];
+    }
+    return 0;
+}
+
+/* C_select_highspeed_codepath: the block by step (subs r4, #0x800000;
+ * movpl r11, lsl#1; subpls r4, #0x800000; addpl r4, #0x800000) and the
+ * fast loop over the frame from `src`. */
+static FastState fast_blocks(uint32_t *buf, int32_t r8, const int8_t *src, int32_t r6,
+                             uint32_t r7, uint32_t r4step, uint32_t r11)
+{
+    uint32_t r4adj = r4step - 0x800000u;
+    if ((int32_t)r4adj < 0)
+        return fast_loop_lt1(buf, r8, src, r6, r7, r4adj, r11);
+    r11 <<= 1;
+    r4adj -= 0x800000u;
+    if ((int32_t)r4adj < 0)
+        return fast_loop_1to2(buf, r8, src, r6, r7, r4adj, r11);
+    return fast_loop_ge2(buf, r8, src, r6, r7, r4adj + 0x800000u, r11);
+}
+
+/* C_data_load_comp (forward / reverse) and C_data_load_uncomp_rev, then
+ * the fast loop and C_end_mixing.  `idx` is the sample index the GBA keeps
+ * in currentPointer (the byte offset from data for uncompressed data),
+ * r0 the advance, r2 the count.  Every path: the byte range of the frame
+ * rounded to blocks (words), the stack check (bhs C_end_mixing: the
+ * channel is left exactly as it was, fw included), the end case when
+ * count - advance <= 0 (F_clear_mem over the bytes past the sample's end,
+ * then `streqb` status 0 -- the frame is still mixed), the fill, the fast
+ * loop from sp + (idx & mask) and the stores (fw, sampleStor, count -
+ * advance, the final index).  The reversed fills store downward from r0,
+ * which F_clear_mem leaves where it was: in the end frame that is the
+ * middle of the buffer, so the decoded (open-bus / pre-sample) bytes land
+ * below the zeros and the real tail is never played (measured, step 2(e)). */
+static bool precache_path(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf, int32_t r8,
+                          int32_t r2, int32_t idx, int32_t r6, uint32_t r7, uint32_t r4step,
+                          uint32_t r11, int32_t r0, uint32_t type)
+{
+    const WaveData *wav = r4->wav;
+    static uint8_t stack[HQ_STACK_MAX];
+    uint32_t spCheck = engine->hqStackSp - 12;           /* after stmfd sp!, {r4, r9, r12} */
+    int32_t lr, lo, r8b, srcOff, finalIdx;
+    int32_t newCount = r2 - r0;                          /* subs r0, r2, r0 */
+    bool stop = false;
+
+    if (type & VOICE_TYPE_CMP) {
+        if (!(type & VOICE_TYPE_REV)) {
+            /* C_data_load_comp_for (no loop support: "TODO" in the source) */
+            lr = (idx + r0 + 1 + (HQ_BLK - 1)) & ~(HQ_BLK - 1);
+            lo = idx & ~(HQ_BLK - 1);                    /* r9 << 6 */
+            r8b = lr - lo;
+            if (HQ_STACK_BOUND + (uint32_t)r8b >= spCheck || r8b > HQ_STACK_MAX)
+                return true;
+            finalIdx = idx + r0;
+            if (newCount <= 0) {
+                int32_t end = (idx + r2 + HQ_BLK - 1) & ~(HQ_BLK - 1);
+                int32_t r1 = lr - end;
+                r8b -= r1;
+                memset(stack + r8b, 0, (size_t)r1);
+                stop = true;
+            }
+            srcOff = idx & (HQ_BLK - 1);
+            uint8_t *dst = stack;
+            for (int32_t k = lo >> 6, n = r8b; n > 0; n -= HQ_BLK, k++, dst += HQ_BLK)
+                hq_decode_block(wav, k, false, dst);
+        } else {
+            /* C_data_load_comp_rev */
+            lr = (idx + HQ_BLK - 1) & ~(HQ_BLK - 1);
+            lo = (idx - r0 - 1) & ~(HQ_BLK - 1);         /* (lsr #6) << 6: floor, may be negative */
+            r8b = lr - lo;
+            if (HQ_STACK_BOUND + (uint32_t)r8b >= spCheck || r8b > HQ_STACK_MAX)
+                return true;
+            finalIdx = idx - r0;
+            int32_t dst = r8b;                           /* mov r0, sp (the top) */
+            if (newCount <= 0) {
+                int32_t r1 = (idx - r2) - lo;
+                r8b -= r1;
+                memset(stack + r8b, 0, (size_t)r1);
+                dst = r8b;
+                stop = true;
+            }
+            srcOff = (-idx) & (HQ_BLK - 1);              /* rsb r3, r3, #0; and r3, #63 */
+            uint8_t tmp[HQ_BLK];
+            bool openBus = lo < 0;                       /* the wrapped r9: the whole frame */
+            for (int32_t k = lo >> 6, n = r8b; n > 0; n -= HQ_BLK, k++) {
+                hq_decode_block(wav, k, openBus, tmp);
+                for (int m = 0; m < HQ_BLK; m++)         /* strb [r0, #-1]! */
+                    stack[--dst] = tmp[m];
+            }
+        }
+    } else {
+        /* C_data_load_uncomp_rev */
+        lr = (idx + 3) & ~3;
+        lo = (idx - r0 - 1) & ~3;
+        r8b = lr - lo;
+        if (HQ_STACK_BOUND + (uint32_t)r8b >= spCheck || r8b > HQ_STACK_MAX)
+            return true;
+        finalIdx = idx - r0;
+        int32_t dst = r8b;
+        if (newCount <= 0) {
+            int32_t r1 = (idx - r2) - lo;
+            r8b -= r1;
+            memset(stack + r8b, 0, (size_t)r1);
+            dst = r8b;
+            stop = true;
+        }
+        srcOff = (-idx) & 3;
+        for (int32_t i = lo, n = r8b; n > 0; n -= 4, i += 4) {
+            /* ldmia r9!, {r1}; byte swap; stmdb r0!, {r1} */
+            stack[dst - 1] = hq_rev_src_byte(wav, i);
+            stack[dst - 2] = hq_rev_src_byte(wav, i + 1);
+            stack[dst - 3] = hq_rev_src_byte(wav, i + 2);
+            stack[dst - 4] = hq_rev_src_byte(wav, i + 3);
+            dst -= 4;
+        }
+    }
+    if (stop)
+        r4->status = 0;                                  /* streqb r1, [r2, statusFlags] */
+    if (getenv("HQ_DEBUG")) {                            /* the stack buffer, as the probe's buf= dump */
+        fprintf(stderr, "HQSTACK idx %d adv %d cnt %d r8 %d off %d step %08X fw %08X vol %08X ss %d buf=",
+                idx, r0, r2, r8b, srcOff, r4step, r7, r11, r6);
+        for (int i = 0; i < r8b; i++) fprintf(stderr, "%02X", stack[i]);
+        fputc('\n', stderr);
+    }
+    FastState s = fast_blocks(buf, r8, (const int8_t *)stack + srcOff, r6, r7, r4step, r11);
+    /* C_end_mixing / C_mixing_end_store */
+    r4->fw = s.r7;
+    r4->sampleStor = (int8_t)s.r6;
+    r4->count = newCount;
+    r4->currentPointer = wav->data + finalIdx;
+    return true;
+}
+
 bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
 {
     /* C_mixing_setup */
@@ -315,9 +550,8 @@ bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
     if (r11 == 0)
         return true;                                     /* beq C_mixing_epilogue: nothing stored */
     uint32_t r0 = r4->type;
-    if (r0 & (VOICE_TYPE_CMP | VOICE_TYPE_REV))          /* -> C_data_load_comp / _uncomp_rev */
-        return false;
-    if (r0 & VOICE_TYPE_FIX)                             /* bne C_setup_fixed_freq_mixing */
+    /* tst CMP|REV; bne C_mixing_setup_comp_rev; tst FIX; bne C_setup_fixed_freq_mixing */
+    if (!(r0 & (VOICE_TYPE_CMP | VOICE_TYPE_REV)) && (r0 & VOICE_TYPE_FIX))
         return fix_path(r4, buf, r8, r4->count, r4->currentPointer, r11);
     if (r4->synthType != M4A_SYNTH_NONE)                 /* TONEDATA_TYPE_SPL -> C_setup_synth */
         return false;
@@ -325,6 +559,8 @@ bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
     /* C_mixing_setup_comp_rev */
     uint32_t r7 = r4->fw;
     uint32_t r4step = (uint32_t)engine->pcmDivFreq * r4->frequency;   /* mul r4, lr, r12 */
+    if (r0 & VOICE_TYPE_FIX)
+        r4step = 0x800000u;                              /* tst r0, FIX; movne r4, #0x800000 */
     /* Mixing goes with volume ranges 0-127: movs lsr #1 / adc #0x8000 /
      * bic #0x8000 -> ceil(L / 2) << 16 | ceil(R / 2). */
     {
@@ -339,32 +575,20 @@ bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
     uint64_t sum = (uint64_t)r7 + (uint64_t)r4step * (uint64_t)r8;
     uint32_t advance = (uint32_t)(sum >> 23);
 
+    /* bcs C_data_load_comp; bmi C_data_load_uncomp_rev (the flags of
+     * movs r0, r0, lsl#27: C = CMP, N = REV) */
+    if (r0 & (VOICE_TYPE_CMP | VOICE_TYPE_REV))
+        return precache_path(engine, r4, buf, r8, r2, (int32_t)(r3 - r4->wav->data), r6, r7,
+                             r4step, r11, (int32_t)advance, r0);
+
     /* C_data_load_uncomp_for: cmp r2, r0; ble C_unbuffered_mixing */
     if (r2 > (int32_t)advance) {
         /* The fast path: the frame cannot reach the sample's end.  count
          * and the final pointer are computed here (stmfd {r2, r9}) and
          * stored after the loop; the source bytes come from the stack
-         * copy or ROM, identical content. */
-        /* C_select_highspeed_codepath: the block by step.
-         *   subs r4, r4, #0x800000      @ r4 = step - 1.0
-         *   movpl r11, r11, lsl#1       @ >= 1.0: 0-127 -> 0-254 volume
-         *   subpls r4, r4, #0x800000    @ >= 1.0: r4 = step - 2.0
-         *   addpl r4, r4, #0x800000     @ >= 2.0: r4 = step - 1.0
-         * The byte source (a DMA3 / CPU copy onto the stack below 0x400
-         * bytes, else ROM) has the same content either way and is not
-         * modelled. */
-        uint32_t r4adj = r4step - 0x800000u;
-        FastState s;
-        if ((int32_t)r4adj < 0) {
-            s = fast_loop_lt1(buf, r8, r3, r6, r7, r4adj, r11);
-        } else {
-            r11 <<= 1;
-            r4adj -= 0x800000u;
-            if ((int32_t)r4adj < 0)
-                s = fast_loop_1to2(buf, r8, r3, r6, r7, r4adj, r11);
-            else
-                s = fast_loop_ge2(buf, r8, r3, r6, r7, r4adj + 0x800000u, r11);
-        }
+         * copy (DMA3 / CPU, below 0x400 bytes) or ROM, identical content,
+         * not modelled.  Then C_select_highspeed_codepath's block. */
+        FastState s = fast_blocks(buf, r8, r3, r6, r7, r4step, r11);
         /* C_end_mixing / C_mixing_end_store */
         r4->fw = s.r7;
         r4->sampleStor = (int8_t)s.r6;

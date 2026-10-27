@@ -3272,21 +3272,241 @@ static void test_hq_mixer(void)
         free(wd);
     }
 
-    /* The frame: an unported path (CMP) leaves the channel untouched and
-     * is counted; a ported one advances. */
+    /* The pre-cached paths (C_data_load_comp / _uncomp_rev).  A two-block
+     * DPCM sample (type 1): block 0 = 10, then byte 0x02 (delta 4 -> 14),
+     * then 31 bytes of 0x11 (+1, +1): 10, 14, 15, 16, .. 76; block 1 = 20,
+     * byte 0x01 (-> 21), then 0x11s: 20, 21, 22, .. 83. */
+    static int8_t dpcm[3 * 33 + 1];
+    static WaveData dpcmWav;
+    memset(dpcm, 0x11, sizeof(dpcm));
+    dpcm[0] = 10; dpcm[1] = 0x02;
+    dpcm[33] = 20; dpcm[34] = 0x01;
+    dpcmWav.type = 1; dpcmWav.freq = 13379 << 10; dpcmWav.size = 128; dpcmWav.data = dpcm;
+
+    /* Compressed forward at step 1.0, frame 8, volumes 2 / 2 (halved 1,
+     * doubled back 2): block 0 decoded, the [1, 2) block plays 0 (the
+     * stored base) then 10, 14, 15 .. 19; count 120, index 8, base 20. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, &dpcmWav, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ASSERT(ch.type & VOICE_TYPE_CMP, "hq cmp: the type follows the sample");
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq cmp: the path is ported");
+        static const int want[8] = { 0, 10, 14, 15, 16, 17, 18, 19 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(2 * want[i]) << 16 | (uint32_t)(2 * want[i]))) ok = 0;
+        ASSERT(ok, "hq cmp: the decoded block through the fast loop");
+        ASSERT(ch.count == 120 && ch.currentPointer == dpcm + 8 && ch.sampleStor == 20 && ch.status == CHN_ENV_SUSTAIN,
+               "hq cmp: count, index and base stored");
+    }
+
+    /* Compressed forward end: index 60 of a 64-sample version (count 4),
+     * advance 8: the range reaches block 1 (lr 128) but the sample's
+     * rounded end is 64, so the top block is zero-filled, status 0 at
+     * once, and the frame still plays 73, 74, 75, 76 then the zeros;
+     * count -4 and index 68 are stored anyway. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        dpcmWav.size = 64;
+        m4a_pcm_channel_start_at(&ch, &dpcmWav, VOICE_DIRECTSOUND, 60);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        static const int want[8] = { 0, 73, 74, 75, 76, 0, 0, 0 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(2 * want[i]) << 16 | (uint32_t)(2 * want[i]))) ok = 0;
+        ASSERT(ok, "hq cmp end: the real samples then the zero fill");
+        ASSERT(ch.status == 0 && ch.count == -4 && ch.currentPointer == dpcm + 68, "hq cmp end: status 0, the stores still made");
+        dpcmWav.size = 128;
+    }
+
+    /* Compressed reverse from the end (index 128): block 1 decoded and
+     * stored reversed, read from (-128) & 63 = 0: the base 0 then 83, 82,
+     * .. 77; count 120, index 120, base 76. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, &dpcmWav, VOICE_DIRECTSOUND | VOICE_TYPE_REV);
+        m4a_hq_channel_init(&ch);
+        ASSERT(ch.currentPointer == dpcm + 128 && ch.count == 128, "hq cmp rev: index = count = size");
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        static const int want[8] = { 0, 83, 82, 81, 80, 79, 78, 77 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(2 * want[i]) << 16 | (uint32_t)(2 * want[i]))) ok = 0;
+        ASSERT(ok, "hq cmp rev: the block played backwards");
+        ASSERT(ch.count == 120 && ch.currentPointer == dpcm + 120 && ch.sampleStor == 76, "hq cmp rev: count, index and base");
+    }
+
+    /* The reversed end frame (step 2(e)): index 4, count 4, advance 8.
+     * lo = (4 - 9) & ~63 = -64, so block -1 is decoded -- from open bus:
+     * lane (j - 1) & 3 of F + 16 / F + 20 / F + 28 gives bytes EA, 01,
+     * 20, 81, ..: samples EA, EB, EF, EF, AF, B0 ..; the real block 0 is
+     * never decoded.  The top half (64..127) is cleared, the open-bus block
+     * stored reversed below it, the read starts at (-4) & 63 = 60: -17
+     * (s3), -17 (s2), -21, -22, then the zeros -- with the diff-0 quirk:
+     * 0, -17, -17, -21, -22, -1, -1, -1 at volume 2. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start_at(&ch, &dpcmWav, VOICE_DIRECTSOUND | VOICE_TYPE_REV, 124);
+        m4a_hq_channel_init(&ch);
+        ASSERT(ch.currentPointer == dpcm + 4 && ch.count == 4, "hq cmp rev end: index 4");
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        static const uint32_t want[8] = { 0, 0xFFDDFFDEu, 0xFFDDFFDEu, 0xFFD5FFD6u, 0xFFD3FFD4u, 0xFFFDFFFEu, 0xFFFDFFFEu, 0xFFFDFFFEu };
+        int ok = 1;
+        for (int i = 0; i < 8; i++) if (buf[i] != want[i]) ok = 0;
+        ASSERT(ok, "hq cmp rev end: the open-bus block from the prefetch words, then zeros");
+        ASSERT(ch.status == 0 && ch.count == -4 && ch.sampleStor == 0, "hq cmp rev end: status 0");
+    }
+
+    /* The whole end frame reads open bus once its first block is before
+     * the sample (the wrapped address steps through the real blocks too):
+     * index 70, count 70, step 2.0 over 40 samples (advance 80): lo = -64,
+     * the decode is 2 blocks (-1, 0) and block 0 comes from the prefetch
+     * lanes (j & 3): 03 30 81 E0 02 20 .. -> samples 03, 03, C3, C4, C0,
+     * C0, C0, C4 ..; stored reversed, the read starts at (-70) & 63 = 58:
+     * C0 (s5), C0, C4, C3, 03, 03.  The >= 2.0 block plays 0 then every
+     * second: -64 (stack 59), -61 (stack 61) at volume 2. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start_at(&ch, &dpcmWav, VOICE_DIRECTSOUND | VOICE_TYPE_REV, 58);
+        m4a_hq_channel_init(&ch);
+        ASSERT(ch.currentPointer == dpcm + 70 && ch.count == 70, "hq cmp rev end 2: index 70");
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x1000000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        e.pcmSamplesPerVBlank = 40;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        ASSERT(buf[0] == 0 && buf[1] == 0xFF7FFF80u && buf[2] == 0xFF85FF86u,
+               "hq cmp rev end 2: the real block 0 is read from open bus too");
+        ASSERT(ch.status == 0, "hq cmp rev end 2: status 0");
+        e.pcmSamplesPerVBlank = 8;
+    }
+
+    /* The stack budget: a compressed frame needing 1344 bytes (advance
+     * 1280 at frame 8) against the default sp 0x03007DD0 (budget 1220)
+     * is skipped outright, nothing stored, nothing mixed. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, &dpcmWav, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x50000000u; ch.fw = 5; ch.sampleStor = 3;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq budget: a skipped channel is not unported");
+        int ok = 1;
+        for (int i = 0; i < 8; i++) if (buf[i] != 0) ok = 0;
+        ASSERT(ok && ch.count == 128 && ch.currentPointer == dpcm && ch.fw == 5 && ch.sampleStor == 3,
+               "hq budget: the channel is frozen for the frame");
+    }
+
+    /* Uncompressed reverse: the 12-sample ramp from its end, words
+     * byte-swapped onto the stack: 0 then 120, 110, .. 60; count 4, index
+     * 4, base 50. */
+    {
+        WaveData *wd = ramp_wave(12, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_REV);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq rev: the path is ported");
+        static const int want[8] = { 0, 120, 110, 100, 90, 80, 70, 60 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(2 * want[i]) << 16 | (uint32_t)(2 * want[i]))) ok = 0;
+        ASSERT(ok, "hq rev: the ramp backwards");
+        ASSERT(ch.count == 4 && ch.currentPointer == wd->data + 4 && ch.sampleStor == 50, "hq rev: count, index and base");
+        free(wd);
+    }
+
+    /* Uncompressed reverse end: index 4, count 4, advance 8: the words
+     * from (4 - 9) & ~3 = -8 are the ROM header's loopStart bytes
+     * (04 03 02 01 for 0x01020304), stored reversed at the bottom; the
+     * top is cleared; status 0; the frame plays 0, 1, 2, 3, 4 then zeros. */
+    {
+        WaveData *wd = ramp_wave(12, 0, 0);
+        wd->loopStart = 0x01020304u;
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start_at(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_REV, 8);
+        m4a_hq_channel_init(&ch);
+        ASSERT(ch.currentPointer == wd->data + 4 && ch.count == 4, "hq rev end: index 4");
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        static const int want[8] = { 0, 1, 2, 3, 4, 0, 0, 0 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(2 * want[i]) << 16 | (uint32_t)(2 * want[i]))) ok = 0;
+        ASSERT(ok, "hq rev end: the header bytes before the data, then zeros");
+        ASSERT(ch.status == 0 && ch.count == -4, "hq rev end: status 0");
+        free(wd);
+    }
+
+    /* The same end with the ROM's preceding bytes kept by the loader
+     * (romBefore 8: ..., 5, 6, 7, 8 just before the data): the words from
+     * -8 are 1, 2, 3, 4 -> reversed, 4, 3, 2, 1 then zeros. */
+    {
+        static uint8_t block[sizeof(WaveData) + 8 + 13];
+        WaveData *wd = (WaveData *)block;
+        memset(block, 0, sizeof(block));
+        wd->size = 12; wd->freq = 13379 << 10; wd->romBefore = 8;
+        wd->data = (int8_t *)(block + sizeof(WaveData) + 8);
+        for (int i = 0; i < 8; i++) wd->data[-8 + i] = (int8_t)(i + 1);
+        for (int i = 0; i < 12; i++) wd->data[i] = (int8_t)(10 * (i + 1));
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start_at(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_REV, 8);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        static const int want[8] = { 0, 4, 3, 2, 1, 0, 0, 0 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(2 * want[i]) << 16 | (uint32_t)(2 * want[i]))) ok = 0;
+        ASSERT(ok, "hq rev end: the loader's ROM bytes before the data");
+    }
+
+    /* The frame: an unported path (a synth, step 9) leaves the channel
+     * untouched and is counted; a ported one advances. */
     {
         WaveData *wd = ramp_wave(12, 0, 0);
         m4a_engine_set_hq_mixer(&e, true);
         e.pcmDivFreq = 1; e.pcmSamplesPerVBlank = 8;
         M4APCMChannel *ch = &e.pcmChannels[0];
         memset(ch, 0, sizeof(*ch));
-        m4a_pcm_channel_start(ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_CMP);
+        m4a_pcm_channel_start(ch, wd, VOICE_DIRECTSOUND);
+        ch->synthType = M4A_SYNTH_SAW;
         ch->frequency = 0x400000; ch->leftVolume = ch->rightVolume = 127;
         ch->attack = 255; ch->decay = 255; ch->sustain = 255;
         m4a_hq_sound_main_ram(&e, 0, 7);
-        ASSERT_EQ(e.hqUnportedChannelFrames, 1, "hq frame: a CMP channel is counted as unported");
+        ASSERT_EQ(e.hqUnportedChannelFrames, 1, "hq frame: a synth channel is counted as unported");
         ASSERT(ch->count == 12 && ch->currentPointer == wd->data, "hq frame: and left untouched");
-        ch->type = VOICE_DIRECTSOUND;
+        ch->synthType = M4A_SYNTH_NONE;
         m4a_hq_sound_main_ram(&e, 8, 6);
         ASSERT_EQ(e.hqUnportedChannelFrames, 1, "hq frame: a ported channel is not counted");
         ASSERT_EQ(ch->count, 8, "hq frame: and it advanced (envelope 255, volumes 51 / 51)");

@@ -65,6 +65,7 @@ extern "C" {
  * gDeltaEncodingTable.  Matches SoundMainRAM_Unk2 in m4a_1.s. */
 #define M4A_DPCM_BLOCK_SAMPLES      64
 /* The HQ mixer's frame buffer: the largest sound-mode frame (42048 Hz, 0x2C0 samples). */
+#define M4A_HQ_STACK_SP_DEFAULT 0x03007DD0u
 #define M4A_HQ_BUFFER_WORDS         0x2C0
 #define M4A_DPCM_BLOCK_BYTES        33
 
@@ -108,6 +109,13 @@ typedef struct {
     uint32_t loopStart;
     uint32_t size;
     int8_t *data;
+    /* Host only: how many of the ROM's bytes that precede the sample's
+     * data (this entry's 16-byte header, the padding and the previous
+     * entry's tail) are kept contiguously in front of `data` (data[-1] ..
+     * data[-romBefore]).  ipatix's HQ mixer reads them when a reversed
+     * uncompressed sample runs out (docs/HQ-MIXER-ACCURACY.md, section 2);
+     * 0 for a sample loaded from a .wav / .aif or built by hand. */
+    uint32_t romBefore;
 } WaveData;
 
 /* ToneData (voice/instrument definition) */
@@ -455,6 +463,12 @@ struct M4AEngine {
     uint32_t hqMutedBuffer[M4A_HQ_BUFFER_WORDS];
     uint8_t hqNoiseShapeLeft, hqNoiseShapeRight;
     uint32_t hqUnportedChannelFrames;
+    /* sp at SoundMainRAM entry: the HQ mixer's pre-cached paths (CMP, REV)
+     * decode onto the stack and skip the channel for the frame when
+     * 0x03007900 + bytes >= sp - 12 (docs/HQ-MIXER-ACCURACY.md, section
+     * 2).  A property of the game's call depth at the interrupt; the test
+     * ROM's measured value (0x03007DD0, a 1220-byte budget) is the default. */
+    uint32_t hqStackSp;
     int64_t nextVSync;           /* next m4aSoundVSync (VCOUNT 150 interrupt) */
     int64_t nextSoundMain;       /* next m4aSoundMain (VBLANK interrupt) */
     int bootStep;                /* progress through the boot-time register writes */

@@ -23,7 +23,7 @@ V_SQ1, V_SQ1_ENV, V_SQ1_SWEEP, V_SQ1_ALT = 0, 1, 2, 3
 V_SQ2, V_SQ2_ALT, V_WAVE, V_WAVE_ALT = 4, 5, 6, 7
 V_NOISE, V_NOISE7 = 8, 9
 V_PCM, V_PCM_ADSR, V_PCM_DRUM, V_PCM_CMP, V_PCM_BASS = 10, 11, 12, 13, 14
-V_PCM_FIX_LOOP = 15
+V_PCM_FIX_LOOP, V_PCM_REV = 15, 16
 
 CC_MOD, CC_VOL, CC_PAN = 1, 7, 10
 CC_BENDR, CC_LFOS, CC_MODT, CC_TUNE, CC_LFODL = 20, 21, 22, 24, 26
@@ -204,6 +204,13 @@ def build():
     add("pcm_fix_loop", pattern(V_PCM_FIX_LOOP))
     # Reverb at its maximum (step 7): the HQ seed scales by reverb >> 2 = 31.
     add("pcm_reverb_max", pattern(V_PCM, (60, 67, 55)), "-R127")
+    # Step 8: the reversed uncompressed path (the pizzicato backwards, each
+    # note running out), and the stack budget: the Bulbasaur cry (10512 Hz,
+    # ratio 0.786 at key 60) at keys where a frame's blocks exceed the HQ
+    # mixer's 1220-byte budget (keys 94: ratio 5.6, 1280+ bytes, and 96; key 72 plays) --
+    # the HQ ROM freezes those channels silent, the vanilla ROM plays them.
+    add("pcm_rev", pattern(V_PCM_REV))
+    add("pcm_cmp_hi", pattern(V_PCM_CMP, (96, 72, 94)))
 
     return tests
 
