@@ -7,26 +7,6 @@
  * Matches the SoundMainRAM mixer in m4a_1.s
  */
 
-/*
- * Advance the pulse synth's duty-cycle LFO one frame and recompute the phase
- * threshold the oscillator is compared against.  Matches the pulse path of
- * C_setup_synth in the improved mixer, which runs once per mixing frame:
- * count (the GBA reuses the sample countdown field) accumulates the LFO step,
- * the offset value is folded into a triangle wave with a bitwise NOT when
- * negative, and the result scaled by the mod amount plus the base duty gives
- * the threshold.  All arithmetic wraps at 32 bits like the ARM code.
- */
-static void m4a_pcm_synth_pulse_update(M4APCMChannel *ch)
-{
-    const uint8_t *cfg = (const uint8_t *)ch->wav->data;
-    uint32_t lfo = (uint32_t)ch->count + ((uint32_t)cfg[3] << 24);
-    ch->count = (int32_t)lfo;
-    uint32_t folded = lfo + ((uint32_t)cfg[5] << 24);
-    if ((int32_t)folded < 0)
-        folded = ~folded;
-    ch->synthPulseDuty = ((uint32_t)cfg[2] << 24) + (folded >> 8) * cfg[4];
-}
-
 void m4a_pcm_channel_start(M4APCMChannel *ch, WaveData *wav, uint8_t type)
 {
     m4a_pcm_channel_start_at(ch, wav, type, 0);
@@ -72,11 +52,10 @@ void m4a_pcm_channel_start_at(M4APCMChannel *ch, WaveData *wav, uint8_t type,
          * GBA mixer only does this for the exact descriptor value 2. */
         if (waveType == 2)
             ch->fw = 0x40000000u;
-        /* Prime the duty threshold so the note doesn't render against a
-         * zero threshold before the first engine tick (on the GBA the frame
-         * that initializes the channel also runs C_setup_synth). */
-        if (ch->synthType == M4A_SYNTH_PULSE)
-            m4a_pcm_synth_pulse_update(ch);
+        /* The pulse's duty threshold is computed by the mixer at each
+         * mixed frame (C_setup_synth, m4a_synth_pulse_setup): count starts
+         * at 0 (size - offset) and advances there, not here. */
+        ch->synthPulseDuty = 0;
     }
 
     /* Check for loop - GBA checks wav->status bits 14-15 (0xC000) */
@@ -195,11 +174,6 @@ void m4a_pcm_channel_tick(M4APCMChannel *ch, uint8_t masterVolume)
     uint32_t vol = ((uint32_t)(masterVolume + 1) * envVol) >> 4;
     ch->envelopeVolumeRight = ((uint32_t)ch->rightVolume * vol) >> 8;
     ch->envelopeVolumeLeft = ((uint32_t)ch->leftVolume * vol) >> 8;
-
-    /* Golden Sun pulse synth: the duty-cycle LFO advances once per frame,
-     * mirroring C_setup_synth running once per SoundMainRAM call. */
-    if (ch->synthType == M4A_SYNTH_PULSE && ch->wav)
-        m4a_pcm_synth_pulse_update(ch);
 }
 
 /*

@@ -24,6 +24,7 @@ V_SQ2, V_SQ2_ALT, V_WAVE, V_WAVE_ALT = 4, 5, 6, 7
 V_NOISE, V_NOISE7 = 8, 9
 V_PCM, V_PCM_ADSR, V_PCM_DRUM, V_PCM_CMP, V_PCM_BASS = 10, 11, 12, 13, 14
 V_PCM_FIX_LOOP, V_PCM_REV = 15, 16
+V_SYNTH_PULSE, V_SYNTH_PULSE_LFO, V_SYNTH_SAW, V_SYNTH_TRI = 17, 18, 19, 20
 
 CC_MOD, CC_VOL, CC_PAN = 1, 7, 10
 CC_BENDR, CC_LFOS, CC_MODT, CC_TUNE, CC_LFODL = 20, 21, 22, 24, 26
@@ -211,6 +212,15 @@ def build():
     # the HQ ROM freezes those channels silent, the vanilla ROM plays them.
     add("pcm_rev", pattern(V_PCM_REV))
     add("pcm_cmp_hi", pattern(V_PCM_CMP, (96, 72, 94)))
+    # Step 9: the HQ mixer's synth paths (accuracy_micro_synth.inc: voices
+    # 17-20, zero-size samples).  HQ-only rows: the vanilla ROM plays a
+    # zero-size sample as a click, so accuracy.py skips synth_* unless
+    # --mixer hq.  The release 165 runs the volume rounding through its
+    # range; key 48 puts the saw's and triangle's jumps at a slow phase step.
+    add("synth_pulse", pattern(V_SYNTH_PULSE))
+    add("synth_pulse_lfo", pattern(V_SYNTH_PULSE_LFO))
+    add("synth_saw", pattern(V_SYNTH_SAW))
+    add("synth_tri", pattern(V_SYNTH_TRI))
 
     return tests
 

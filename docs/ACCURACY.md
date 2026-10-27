@@ -133,7 +133,12 @@ shorter file.
   an uncompressed sample played backwards, which no vanilla music does)
   and `pcm_cmp_hi` (the Bulbasaur cry at keys 96 / 72 / 94: the HQ
   mixer's stack budget freezes the two high notes silent; the vanilla ROM
-  plays them), both step 8.  Ids are line numbers in `micro.cfg`.
+  plays them), both step 8; `synth_pulse`, `synth_pulse_lfo`, `synth_saw`, `synth_tri`
+  (voices 17–20: Golden Sun synth descriptors from
+  `accuracy_micro_synth.inc`, for the HQ mixer's synth paths, step 9) —
+  **HQ-only rows**: the vanilla ROM plays a zero-size sample as a click,
+  so `accuracy.py` runs `synth_*` only with `--mixer hq`.  Ids are line
+  numbers in `micro.cfg`.
 - **Songs** (`songs.json`, `{"name", "seconds"}`): mus_littleroot,
   mus_weather_groudon (pure PSG with pseudo-echo), mus_vs_wild
   (DirectSound-heavy with reverb), mus_mt_chimney (noise), mus_rg_vs_trainer
@@ -338,7 +343,12 @@ SoundMainRAM_Unk1, Unk2) translated with the register names kept.
   tick clears it; it persists across notes.
 - **Golden Sun synths** (zero-size DirectSound samples, `mix_synth`) are
   the one deliberate extension in the mixer (stock behaviour would be a
-  one-sample click).  Phase step = `divFreq · frequency` (scaled).
+  one-sample click).  The oscillators are ipatix's HQ mixer's
+  (`plugin/m4a_synth.h`, measured bit-exact against the HQ test ROM:
+  `docs/HQ-MIXER-ACCURACY.md`, step 9) under vanilla's accumulate: phase
+  step = `(divFreq · frequency) << 3` per sample, the pulse's duty LFO
+  advanced by the mixer once per mixed frame, the saw's filter state
+  mixed at `floor(v / 2)`.
 
 ### Samples and the voicegroup loader
 

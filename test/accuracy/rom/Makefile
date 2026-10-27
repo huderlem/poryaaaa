@@ -117,7 +117,7 @@ $(BUILD)/crt0.o: crt0.s
 	$(AS) $(ASFLAGS) -o $@ $<
 $(BUILD)/m4a_1.o: $(M4A_1_SRC)
 	$(call PREPROC_AS,$<)
-$(BUILD)/sound_data.s: sound_data.s accuracy_micro.inc $(BUILD)/micro_song_table.inc
+$(BUILD)/sound_data.s: sound_data.s accuracy_micro.inc accuracy_micro_synth.inc $(BUILD)/micro_song_table.inc
 	@mkdir -p $(@D)
 	sed -e 's|@ROMDIR@|$(ABS_ROMDIR)|g' -e 's|@BUILD@|$(ABS_BUILD)|g' $< > $@
 $(BUILD)/sound_data.o: $(BUILD)/sound_data.s

@@ -57,6 +57,8 @@ writes "mixer": "hq" into the report: a separate baseline family
 (baselines/<date>_hq-*.json), never compared against a vanilla one.
 --engine-mixer vanilla|hq overrides what the engine is asked for (the
 default follows --mixer); "engine_mixer" in the report records it.
+The synth_* micro rows (the HQ mixer's synth paths, zero-size samples the
+vanilla ROM plays as a click) run only with --mixer hq.
 
 Typical use (after `make` in test/accuracy/rom and building mgba_render and
 poryaaaa_render):
@@ -154,9 +156,14 @@ def second_cry_ok(name, s):
     return True
 
 
+HQ_ONLY_PREFIX = "synth_"   # rows that only mean something on the HQ ROM (vanilla plays a zero-size sample as a click)
+
+
 def build_tests(args):
     tests = []
     for i, (name, opts) in enumerate(parse_cfg(os.path.join(MICRO_DIR, "micro.cfg"))):
+        if name.startswith(HQ_ONLY_PREFIX) and args.mixer != "hq":
+            continue                     # the id (its line) is still taken: the ROM's table has every row
         vg, vol, rev, ext = mid2agb_opts(opts)
         tests.append(dict(name=name, group="micro", type="micro", id=i,
                           midi=os.path.join(MICRO_DIR, name + ".mid"),
@@ -254,6 +261,9 @@ def make_overlay(pokeemerald, root):
     for entry in os.listdir(src_vg):
         link(os.path.join(src_vg, entry), os.path.join(vgdir, entry))
     link(os.path.join(ROM_DIR, "accuracy_micro.inc"), os.path.join(vgdir, "accuracy_micro.inc"))
+    # The micro voicegroup's synth descriptors, in the file the loader reads
+    # inline set_synth_* definitions from (the pokeemerald-expansion layout).
+    link(os.path.join(ROM_DIR, "accuracy_micro_synth.inc"), os.path.join(sound, "direct_sound_synth_data.inc"))
     return root
 
 

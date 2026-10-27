@@ -1,5 +1,6 @@
 #include "m4a_mixer.h"
 #include "m4a_channel.h"
+#include "m4a_synth.h"
 #include "m4a_tables.h"
 #include <string.h>
 
@@ -124,45 +125,50 @@ static int32_t unk2(M4AEngine *engine, M4APCMChannel *r4, int32_t r3)
     return engine->decodingBuffer[r3 & 0x3F];
 }
 
-/* ---- Golden Sun synth voices (ipatix improved mixer; not in m4a_1.s) ----
- * One generated value per output sample, accumulated like a sample.  The
- * oscillator phase (fw, one period = 2^32) advances by the sample step
- * (divFreq * frequency, as for a sample) << 3 per output sample: the pitch
- * of a 64-sample looped wave at the descriptor's header frequency. */
+/* ---- Golden Sun synth voices (ipatix's mixer; not in m4a_1.s) ----
+ * The HQ mixer's synth oscillators (m4a_synth.h, measured against the HQ
+ * test ROM: docs/HQ-MIXER-ACCURACY.md, step 9) run under vanilla's
+ * accumulate: one generated value per output sample, mixed like a sample.
+ * As in C_setup_synth, the pulse's duty LFO advances once per mixed frame
+ * (here every frame: vanilla has no volume-zero skip); the saw's filter
+ * state is mixed at the halved volume (floor(v / 2), the HQ mixer's
+ * `mov r11, r11, lsr#1`), the pulse at +-64 and the triangle at +-128
+ * unhalved.  Vanilla's ror-8 packing runs on every sample, so a zero saw
+ * state is accumulated (as 0) rather than skipped. */
 static void mix_synth(const M4AEngine *engine, M4APCMChannel *ch, int8_t *r5, int8_t *bufB,
                       int spv, uint32_t r10, uint32_t r11)
 {
-    uint32_t step = ((uint32_t)engine->pcmDivFreq * ch->frequency) << 3;
+    uint32_t step8 = ((uint32_t)engine->pcmDivFreq * ch->frequency) << 3;
+    uint32_t r7 = ch->fw;
+    int32_t r2 = ch->count;
+    uint32_t duty = 0;
+    if (ch->synthType == M4A_SYNTH_PULSE) {
+        duty = m4a_synth_pulse_setup(ch);
+        r2 = ch->count;
+    } else if (ch->synthType == M4A_SYNTH_SAW) {
+        r10 = ((r10 >> 16) >> 1) << 16;
+        r11 = ((r11 >> 16) >> 1) << 16;
+    }
     for (int i = 0; i < spv; i += 4) {
-        uint32_t r6 = ld32(r5), r7 = ld32(bufB);
+        uint32_t a = ld32(r5), b = ld32(bufB);
         for (int k = 0; k < 4; k++) {
-            uint32_t phase = ch->fw;
             int32_t value;
-            if (ch->synthType == M4A_SYNTH_PULSE) {
-                value = (phase < ch->synthPulseDuty) ? 64 : -64;
-                phase += step;
-            } else if (ch->synthType == M4A_SYNTH_SAW) {
-                phase += step;
-                int32_t raw = (int32_t)(phase >> 24) - 0x70
-                            - (int32_t)((phase << 1) >> 27);
-                ch->count = raw + (ch->count >> 1);
-                value = ch->count >> 1;
-            } else {
-                phase += step;
-                if ((int32_t)phase < 0)
-                    value = 0x180 - (int32_t)(phase >> 23);
-                else
-                    value = (int32_t)(phase >> 23) - 0x80;
-            }
-            ch->fw = phase;
-            r6 = m4a_mixer_acc(r6, r10, value);
-            r7 = m4a_mixer_acc(r7, r11, value);
+            if (ch->synthType == M4A_SYNTH_PULSE)
+                value = m4a_synth_pulse_sample(&r7, duty, step8);
+            else if (ch->synthType == M4A_SYNTH_SAW)
+                value = m4a_synth_saw_sample(&r7, &r2, step8);
+            else
+                value = m4a_synth_triangle_sample(&r7, step8);
+            a = m4a_mixer_acc(a, r10, value);
+            b = m4a_mixer_acc(b, r11, value);
         }
-        st32(r5, r6);
-        st32(bufB, r7);
+        st32(r5, a);
+        st32(bufB, b);
         r5 += 4;
         bufB += 4;
     }
+    ch->fw = r7;
+    ch->count = r2;
 }
 
 /* SoundMainRAM_Unk1: TONEDATA_TYPE_CMP / TONEDATA_TYPE_REV channels. */

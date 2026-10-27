@@ -2219,15 +2219,22 @@ static void test_golden_sun_synth(void)
             ASSERT_EQ(engine.pcmChannels[0].fw, 0x40000000u,
                       "gs synth: triangle 90-degree phase start");
         }
+        float outL[8192], outR[8192];
         if (expectType[v] == M4A_SYNTH_PULSE) {
-            /* First duty threshold from duty.bin's descriptor: the LFO
+            /* The duty threshold is C_setup_synth's, computed at each mixed
+             * frame, so there is none before the first: then the LFO
              * accumulator advances one step (0x20 << 24), the offset
              * (0x10 << 24) is added, and the positive result scaled by the
              * mod amount 0x80: (0x30000000 >> 8) * 0x80 = 0x18000000. */
+            ASSERT_EQ(engine.pcmChannels[0].synthPulseDuty, 0u,
+                      "gs synth: no pulse duty threshold before the first mixed frame");
+            ASSERT_EQ(engine.pcmChannels[0].count, 0, "gs synth: the LFO accumulator starts at 0");
+            advance_frames(&engine, 1, outL, outR);
             ASSERT_EQ(engine.pcmChannels[0].synthPulseDuty, 0x18000000u,
-                      "gs synth: initial pulse duty threshold");
+                      "gs synth: the first mixed frame's pulse duty threshold");
+            ASSERT_EQ((uint32_t)engine.pcmChannels[0].count, 0x20000000u,
+                      "gs synth: the LFO advanced one step at the first mixed frame");
         }
-        float outL[8192], outR[8192];
         if (expectType[v] == M4A_SYNTH_TRIANGLE) {
             /* The first mixed frame keeps the 90-degree start: the first
              * output is the zero crossing, not the negative peak. */
@@ -3491,27 +3498,176 @@ static void test_hq_mixer(void)
         ASSERT(ok, "hq rev end: the loader's ROM bytes before the data");
     }
 
-    /* The frame: an unported path (a synth, step 9) leaves the channel
-     * untouched and is counted; a ported one advances. */
+    /* The synth paths (step 9), worked from C_setup_synth .. C_synth_triangle_loop
+     * at volumes L 3 / R 5 (r11 = 0x00030005, unhalved: the synth test
+     * precedes the halving), pcmDivFreq 1 so the phase step is frequency << 3.
+     *
+     * Pulse, 50% duty and no LFO (descriptor 0x80, 0, 0x80, 0, 0, 0):
+     * init replaces the type byte with SPL (a FIX voice loses its bit);
+     * frequency 0x10000000 -> the phase steps by 0x80000000: phase 0 is
+     * below the threshold 0x80000000 (+64: 0x00030005 * 64 = 0x00C00140),
+     * phase 0x80000000 is not (-64: the packed subtract borrows,
+     * 0xFF3FFEC0), alternating; after 8 samples the phase wrapped to 0, the
+     * LFO accumulator (count) stayed 0 (step 0), sampleStor is the
+     * threshold's low byte (0) and the pointer still the descriptor. */
     {
+        static const uint8_t desc[] = { 0x80, 0x00, 0x80, 0x00, 0x00, 0x00 };
+        WaveData *wd = make_synth_wave(desc, sizeof(desc));
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX);
+        m4a_hq_channel_init(&ch);
+        ASSERT_EQ(ch.type, VOICE_TYPE_SPL, "hq synth init: the type byte becomes SPL (FIX dropped)");
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x10000000;
+        ch.envelopeVolumeLeft = 3; ch.envelopeVolumeRight = 5;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq pulse: the path is ported");
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((i & 1) ? 0xFF3FFEC0u : 0x00C00140u)) ok = 0;
+        ASSERT(ok, "hq pulse: +-64 * v at the packed word, compared before the advance");
+        ASSERT_EQ(ch.synthPulseDuty, 0x80000000u, "hq pulse: the threshold = base duty << 24");
+        ASSERT_EQ(ch.fw, 0u, "hq pulse: the phase after 8 half-period steps");
+        ASSERT_EQ(ch.count, 0, "hq pulse: no LFO step, count unchanged");
+        ASSERT_EQ(ch.sampleStor, 0, "hq pulse: sampleStor = the threshold's low byte");
+        ASSERT(ch.currentPointer == wd->data, "hq pulse: the pointer stays at the descriptor");
+        free(wd);
+    }
+
+    /* The pulse LFO (descriptor 0x80, 0, 0x20, 0x10, 0x80, 0x40): once per
+     * MIXED frame count += 0x10 << 24, t = count + 0x40 << 24, folded when
+     * negative (mvnmi), threshold = (t >> 8) * 0x80 + 0x20 << 24:
+     * frames 1..3 give t = 0x50000000 / 0x60000000 / 0x70000000 ->
+     * 0x48000000 / 0x50000000 / 0x58000000; frame 4's t = 0x80000000 is
+     * negative, ~t = 0x7FFFFFFF -> 0x5FFFFF80.  A volume-zero frame is
+     * skipped before C_setup_synth and does not advance the LFO. */
+    {
+        static const uint8_t desc[] = { 0x80, 0x00, 0x20, 0x10, 0x80, 0x40 };
+        WaveData *wd = make_synth_wave(desc, sizeof(desc));
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0;
+        ch.envelopeVolumeLeft = 3; ch.envelopeVolumeRight = 5;
+        static const uint32_t want[4] = { 0x48000000u, 0x50000000u, 0x58000000u, 0x5FFFFF80u };
+        int ok = 1;
+        for (int f = 0; f < 4; f++) {
+            if (f == 2) {
+                ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 0;
+                m4a_hq_mix_channel(&e, &ch, buf);
+                if (ch.count != 0x20000000) ok = 0;
+                ch.envelopeVolumeLeft = 3; ch.envelopeVolumeRight = 5;
+            }
+            m4a_hq_mix_channel(&e, &ch, buf);
+            if (ch.synthPulseDuty != want[f]) ok = 0;
+        }
+        ASSERT(ok, "hq pulse LFO: the thresholds of four mixed frames, the fold, no step on a skipped frame");
+        ASSERT_EQ((uint32_t)ch.count, 0x40000000u, "hq pulse LFO: count after four mixed frames");
+        free(wd);
+    }
+
+    /* Saw (descriptor 0x80, 1): the volume halved to floor(v / 2) per side
+     * (lsr #1, bic #0xFF00: 0x00030005 -> 0x00010002); per sample the phase
+     * advances first (frequency 0x02000000 -> 0x10000000, a 16-sample
+     * period), raw = (phase >> 24) - 0x70 - ((phase << 1) >> 27), state =
+     * raw + (state >> 1), mixed as the state: from 0 the states are -100,
+     * -138, -145, -137, -121, -101, -79, -24 (the eighth sample's raw is
+     * 0x80 - 0x70 - 0 = 16), e.g. 0x00010002 * -100 = 0xFF9BFF38.  The
+     * state is stored in count, sampleStor is the low byte of the last
+     * phase << 1 (0).  A state of exactly 0 is skipped (mlane): from count
+     * -32 at phase 0x70000000 the first sample's raw 16 + (-32 >> 1) = 0
+     * leaves the word alone. */
+    {
+        static const uint8_t desc[] = { 0x80, 0x01, 0x00, 0x00, 0x00, 0x00 };
+        WaveData *wd = make_synth_wave(desc, sizeof(desc));
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x02000000;
+        ch.envelopeVolumeLeft = 3; ch.envelopeVolumeRight = 5;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq saw: the path is ported");
+        static const uint32_t want[8] = { 0xFF9BFF38u, 0xFF75FEECu, 0xFF6EFEDEu, 0xFF76FEEEu,
+                                          0xFF86FF0Eu, 0xFF9AFF36u, 0xFFB0FF62u, 0xFFE7FFD0u };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != want[i]) ok = 0;
+        ASSERT(ok, "hq saw: the filter state at the halved volume");
+        ASSERT_EQ(ch.count, -24, "hq saw: the state carried in count");
+        ASSERT_EQ(ch.fw, 0x80000000u, "hq saw: the phase after 8 steps");
+        ASSERT_EQ(ch.sampleStor, 0, "hq saw: sampleStor = low byte of the last phase << 1");
+        ch.count = -32; ch.fw = 0x70000000u;
+        buf[0] = 0x12345678u;
+        m4a_hq_mix_channel(&e, &ch, buf);
+        ASSERT_EQ(buf[0], 0x12345678u, "hq saw: a zero state is not accumulated (mlane)");
+        free(wd);
+    }
+
+    /* Triangle (descriptor 0x80, 2): the phase starts at 0x40000000 (init),
+     * advances first; phase >= 0 gives (phase >> 23) - 0x80, phase < 0
+     * gives 0x180 - (phase >> 23): at steps of 0x10000000 the samples 32,
+     * 64, 96, 128 (the peak at exactly 0x80000000, one above int8), 96, 64,
+     * 32, 0 at the unhalved volume (0x00030005 * 32 = 0x006000A0);
+     * sampleStor = 0x80, count untouched. */
+    {
+        static const uint8_t desc[] = { 0x80, 0x02, 0x00, 0x00, 0x00, 0x00 };
+        WaveData *wd = make_synth_wave(desc, sizeof(desc));
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ASSERT_EQ(ch.fw, 0x40000000u, "hq triangle: the 90-degree start");
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x02000000;
+        ch.envelopeVolumeLeft = 3; ch.envelopeVolumeRight = 5;
+        ch.count = 7;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq triangle: the path is ported");
+        static const int32_t v[8] = { 32, 64, 96, 128, 96, 64, 32, 0 };
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != (uint32_t)(0x00030005u * (uint32_t)v[i])) ok = 0;
+        ASSERT(ok, "hq triangle: both slopes at the unhalved volume");
+        ASSERT_EQ(ch.fw, 0xC0000000u, "hq triangle: the phase after 8 steps");
+        ASSERT_EQ(ch.count, 7, "hq triangle: count untouched");
+        ASSERT_EQ(ch.sampleStor, (int8_t)0x80, "hq triangle: sampleStor = 0x80");
+        free(wd);
+    }
+
+    /* The frame: every path is ported, so a synth channel is mixed (its
+     * pointer stays, its phase moves) and nothing is counted as unported;
+     * a PCM channel advances. */
+    {
+        static const uint8_t desc[] = { 0x80, 0x01, 0x00, 0x00, 0x00, 0x00 };
+        WaveData *synth = make_synth_wave(desc, sizeof(desc));
         WaveData *wd = ramp_wave(12, 0, 0);
         m4a_engine_set_hq_mixer(&e, true);
         e.pcmDivFreq = 1; e.pcmSamplesPerVBlank = 8;
         M4APCMChannel *ch = &e.pcmChannels[0];
         memset(ch, 0, sizeof(*ch));
-        m4a_pcm_channel_start(ch, wd, VOICE_DIRECTSOUND);
-        ch->synthType = M4A_SYNTH_SAW;
+        m4a_pcm_channel_start(ch, synth, VOICE_DIRECTSOUND);
         ch->frequency = 0x400000; ch->leftVolume = ch->rightVolume = 127;
         ch->attack = 255; ch->decay = 255; ch->sustain = 255;
         m4a_hq_sound_main_ram(&e, 0, 7);
-        ASSERT_EQ(e.hqUnportedChannelFrames, 1, "hq frame: a synth channel is counted as unported");
-        ASSERT(ch->count == 12 && ch->currentPointer == wd->data, "hq frame: and left untouched");
-        ch->synthType = M4A_SYNTH_NONE;
+        ASSERT_EQ(e.hqUnportedChannelFrames, 0, "hq frame: a synth channel is not unported");
+        ASSERT(ch->currentPointer == synth->data && ch->fw == 8 * (0x400000u << 3),
+               "hq frame: the synth's pointer stays, its phase advanced 8 steps");
+        ASSERT_EQ(ch->type, VOICE_TYPE_SPL, "hq frame: the synth's type is SPL");
+        memset(ch, 0, sizeof(*ch));
+        m4a_pcm_channel_start(ch, wd, VOICE_DIRECTSOUND);
+        ch->frequency = 0x400000; ch->leftVolume = ch->rightVolume = 127;
+        ch->attack = 255; ch->decay = 255; ch->sustain = 255;
         m4a_hq_sound_main_ram(&e, 8, 6);
-        ASSERT_EQ(e.hqUnportedChannelFrames, 1, "hq frame: a ported channel is not counted");
+        ASSERT_EQ(e.hqUnportedChannelFrames, 0, "hq frame: a PCM channel is not counted either");
         ASSERT_EQ(ch->count, 8, "hq frame: and it advanced (envelope 255, volumes 51 / 51)");
         ASSERT_EQ(ch->envelopeVolumeLeft, 51, "hq frame: 127 * 255 * 13 >> 13 = 51");
         free(wd);
+        free(synth);
     }
 }
 

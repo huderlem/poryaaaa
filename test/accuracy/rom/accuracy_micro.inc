@@ -19,3 +19,7 @@ voice_group accuracy_micro
 	voice_directsound 60, 0, DirectSoundWaveData_sc88pro_fretless_bass, 255, 253, 0, 188 @ 14 bass
 	voice_directsound_no_resample 60, 0, DirectSoundWaveData_sc88pro_flute, 255, 0, 255, 165 @ 15 looped PCM, fixed-frequency (the HQ mixer's FIX loop)
 	voice_directsound_reverse 60, 0, DirectSoundWaveData_sc88pro_pizzicato_strings, 255, 0, 255, 0 @ 16 one-shot PCM played backwards (uncompressed REV; no vanilla music uses one)
+	voice_directsound 60, 0, DirectSoundWaveData_acc_synth_pulse, 255, 0, 255, 165     @ 17 synth: pulse, 50% duty, no LFO (accuracy_micro_synth.inc; HQ-only rows)
+	voice_directsound 60, 0, DirectSoundWaveData_acc_synth_pulse_lfo, 255, 0, 255, 165 @ 18 synth: pulse with the duty LFO (base 0x20, step 0x10, mod 0x80, offset 0x40)
+	voice_directsound 60, 0, DirectSoundWaveData_acc_synth_saw, 255, 0, 255, 165       @ 19 synth: pseudo-saw
+	voice_directsound 60, 0, DirectSoundWaveData_acc_synth_tri, 255, 0, 255, 165       @ 20 synth: triangle

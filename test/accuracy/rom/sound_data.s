@@ -14,6 +14,7 @@
 	.include "sound/direct_sound_data.inc"
 
 	.section .rodata
+	.include "@ROMDIR@/accuracy_micro_synth.inc"
 	.include "@ROMDIR@/accuracy_micro.inc"
 
 	.section .rodata

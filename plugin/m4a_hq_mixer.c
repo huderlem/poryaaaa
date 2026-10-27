@@ -1,5 +1,6 @@
 #include "m4a_hq_mixer.h"
 #include "m4a_channel.h"
+#include "m4a_synth.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,9 +57,12 @@ void m4a_hq_channel_init(M4APCMChannel *r4)
         if (r4->type & VOICE_TYPE_REV)
             r4->currentPointer = r3->data + r4->count;
     }
-    /* C_channel_init_synth: TONEDATA_TYPE_SPL and the triangle's
-     * 0x40000000 phase -- m4a_pcm_channel_start_at primes synthType / fw
-     * the same way. */
+    /* C_channel_init_synth: the channel type byte becomes TONEDATA_TYPE_SPL
+     * (strb r5: the voice's FIX / REV / CMP bits are gone, so a synth never
+     * takes those paths) and the triangle starts at 0x40000000 --
+     * m4a_pcm_channel_start_at primes synthType / fw the same way. */
+    if (r3->size == 0)
+        r4->type = VOICE_TYPE_SPL;
     r4->sampleStor = 0;                                  /* strb r5, [r4, CHN_SAMPLE_STOR] */
 }
 
@@ -541,6 +545,61 @@ static bool precache_path(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf, i
     return true;
 }
 
+/* C_setup_synth .. C_synth_triangle_loop: the synth paths, reached from
+ * C_mixing_setup_comp_rev after the step multiply and BEFORE the volume
+ * halving, so r11 is the unhalved 00LL00RR; r3 = the sample pointer = the
+ * descriptor (count and the pointer are stored back by C_mixing_end_store:
+ * the pointer unchanged, count as the pulse's LFO accumulator / the saw's
+ * filter state).  The oscillators are m4a_synth.h's; per path:
+ *
+ * pulse (data[1] == 0), 8 samples an iteration (the frame is a multiple
+ * of 8 in HQ mode):
+ *   cmp r7, r6 / addlo \reg, \reg, r11, lsl#6 / subhs \reg, \reg, r11, lsl#6
+ *   adds r7, r7, r4, lsl#3
+ * i.e. +-64 * v at the packed word (the subtract borrows across the
+ * halves exactly as mla with -64 does); r6 = the threshold, whose low
+ * byte C_end_mixing stores as CHN_SAMPLE_STOR.
+ *
+ * saw (data[1] == 1), 4 an iteration: the volume halved to floor(v / 2)
+ * per side (mov r11, r11, lsr#1 / bic r11, r11, #0xFF00), then per sample
+ *   mlane \reg, r11, r2, \reg     @ the filter state, skipped when 0
+ * with r6 = r7 << 1 left from the last sample (its low byte stored).
+ *
+ * triangle (anything else), 4 an iteration: mla \reg, r11, r9, \reg at
+ * the unhalved volume; r6 = 0x80 stored. */
+static void synth_path(M4APCMChannel *r4, uint32_t *r5, int32_t r8, uint32_t r7,
+                       uint32_t r4step, uint32_t r11)
+{
+    const uint8_t *r3 = (const uint8_t *)r4->currentPointer;   /* the descriptor */
+    uint32_t step8 = r4step << 3;
+    int32_t r2 = r4->count;
+    uint32_t r6;
+    uint8_t r12 = r3[1];                                 /* ldrb r12, [r3, #SYNTH_TYPE] */
+    if (r12 == 0) {
+        r6 = m4a_synth_pulse_setup(r4);                  /* r2 (count) advanced in the channel */
+        r2 = r4->count;
+        for (int32_t i = 0; i < r8; i++)
+            r5[i] = mla(r5[i], r11, m4a_synth_pulse_sample(&r7, r6, step8));
+    } else if (r12 == 1) {                               /* C_check_synth_saw: subs r12, #1 */
+        uint32_t r11h = (r11 >> 1) & ~0xFF00u;
+        r6 = 0;
+        for (int32_t i = 0; i < r8; i++) {
+            int32_t v = m4a_synth_saw_sample(&r7, &r2, step8);
+            r6 = r7 << 1;                                /* mov r6, r7, lsl#1 */
+            if (v != 0)                                  /* mlane */
+                r5[i] = mla(r5[i], r11h, v);
+        }
+    } else {                                             /* C_synth_triangle */
+        r6 = 0x80;
+        for (int32_t i = 0; i < r8; i++)
+            r5[i] = mla(r5[i], r11, m4a_synth_triangle_sample(&r7, step8));
+    }
+    /* C_end_mixing / C_mixing_end_store */
+    r4->fw = r7;
+    r4->sampleStor = (int8_t)(uint8_t)r6;
+    r4->count = r2;
+}
+
 bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
 {
     /* C_mixing_setup */
@@ -553,12 +612,13 @@ bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
     /* tst CMP|REV; bne C_mixing_setup_comp_rev; tst FIX; bne C_setup_fixed_freq_mixing */
     if (!(r0 & (VOICE_TYPE_CMP | VOICE_TYPE_REV)) && (r0 & VOICE_TYPE_FIX))
         return fix_path(r4, buf, r8, r4->count, r4->currentPointer, r11);
-    if (r4->synthType != M4A_SYNTH_NONE)                 /* TONEDATA_TYPE_SPL -> C_setup_synth */
-        return false;
-
     /* C_mixing_setup_comp_rev */
     uint32_t r7 = r4->fw;
     uint32_t r4step = (uint32_t)engine->pcmDivFreq * r4->frequency;   /* mul r4, lr, r12 */
+    if (r0 & VOICE_TYPE_SPL) {                           /* tst r0, SPL; bne C_setup_synth */
+        synth_path(r4, buf, r8, r7, r4step, r11);
+        return true;
+    }
     if (r0 & VOICE_TYPE_FIX)
         r4step = 0x800000u;                              /* tst r0, FIX; movne r4, #0x800000 */
     /* Mixing goes with volume ranges 0-127: movs lsr #1 / adc #0x8000 /

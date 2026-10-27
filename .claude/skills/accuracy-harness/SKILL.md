@@ -259,11 +259,12 @@ audio frame).  A differing ring: `--pcm-log` (HQ mode adds `ss=`, `cnt=`,
 `fw=` per channel and `ns=` per frame) against the probe's `C_end_mixing`
 / `C_downsampler_return` registers says whether the channel state, the
 buffer or the downsampler went wrong; the mix buffer's last four words
-are the `C_end_mixing` line's r0, r1, r10, lr.  A channel the port does
-not have yet is left unmixed and counted (`Note: HQ mixer: N
-channel-frames ...`); such a row is silent on that channel, and the PSG
-write diff of a song with frozen channels moves (MPlayMain's bookkeeping),
-which is not a timing bug.
+are the `C_end_mixing` line's r0, r1, r10, lr.  Every mixer path is
+ported (step 9), so `Note: HQ mixer: N channel-frames ...` should never
+print; if it does, a row is silent on that channel and the PSG write diff
+of a song with frozen channels moves (MPlayMain's bookkeeping), which is
+not a timing bug.  The `synth_*` micro rows run only with `--mixer hq`
+(the vanilla ROM plays a zero-size sample as a click).
 
 **Run it**: `build/probe/mgba_probe build/accuracy/rom/accuracy_test.gba
 build/probe/<name>.txt <frames> <type> <id> build/probe/syms.nm`.
@@ -350,9 +351,15 @@ is mgba's DAC stream through the engine's own m4a_blip, the reference since
 ## Add a test
 
 - Micro-test: add a voice to `test/accuracy/rom/accuracy_micro.inc` if
-  needed, add a song in `tools/gen_micro_midis.py`, run it, rebuild the ROM
-  (`cmake --build build --target accuracy_rom`), run the harness with
-  `--update-refs`, commit the new FLAC in `test/accuracy/refs/micro/`.
+  needed (a synth descriptor: `accuracy_micro_synth.inc`, one `set_synth_*`
+  line per label, assembled into the ROMs and read by the loader as the
+  overlay's `direct_sound_synth_data.inc`), add a song in
+  `tools/gen_micro_midis.py`, run it, rebuild the ROM
+  (`cmake --build build --target accuracy_rom`; both ROMs when the HQ one
+  is in use), run the harness with `--update-refs` (both families), commit
+  the new FLAC in `test/accuracy/refs/micro/` (and `micro-hq/`).  A row
+  named `synth_*` is HQ-only (`accuracy.py`'s `HQ_ONLY_PREFIX`): skipped
+  unless `--mixer hq`.
 - Vanilla song: append `{"name": "mus_xxx", "seconds": N}` to
   `test/accuracy/songs.json`. Id and mid2agb options are looked up
   automatically; the compiled `.s` is already in `build/accuracy/rom/songs/`.

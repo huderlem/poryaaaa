@@ -58,6 +58,11 @@ extern "C" {
  * is zero (the loader clears the bit when a compressed sample fell back to
  * its uncompressed source). */
 #define VOICE_TYPE_CMP              0x20
+/* TONEDATA_TYPE_SPL: the HQ mixer's synth channel.  Its SF_START pass
+ * replaces the channel type byte with this value for a zero-size sample
+ * (m4a_hq_channel_init), so the voice's FIX / REV / CMP bits never reach
+ * the synth paths.  Vanilla mode classifies synths by synthType alone. */
+#define VOICE_TYPE_SPL              0x40
 
 /* DPCM (aif2pcm/wav2agb `--compress`) sample layout: 64 samples per block,
  * 33 bytes each -- one raw sample, then 4-bit deltas (the second byte's low

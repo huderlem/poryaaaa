@@ -275,8 +275,10 @@ of 4), so a frame mixes exactly `frameLength` samples or stops at the
 data's end — a per-sample model with the loop reset and the stop at
 `count == 0` is exact.  The block's `mlane` skips a zero sample (a no-op);
 the remainder's `mla` does not.  `fw` and `sampleStor` are not written
-(the path skips `C_end_mixing`); the FIX test precedes the synth test in
-`C_mixing_setup`, so a FIX synth voice takes this path.
+(the path skips `C_end_mixing`).  The FIX test precedes the synth test in
+`C_mixing_setup`, but no synth reaches it: `C_channel_init_synth` replaces
+the channel's type byte with `TONEDATA_TYPE_SPL` (an earlier reading here,
+"a FIX synth voice takes this path", was wrong — corrected in step 9).
 
 ### The pre-cached paths (CMP, REV)
 
@@ -366,17 +368,41 @@ the remainder's `mla` does not.  `fw` and `sampleStor` are not written
 
 ### The synth paths (SPL)
 
-As the engine's extension already has them (`mix_synth`,
-`m4a_pcm_synth_pulse_update`): pulse `±64 × v` against a duty threshold
-recomputed once per frame from the descriptor (`count` as the LFO
-accumulator), saw with the `count` filter state and the half-volume, triangle
-`±128 × v`, phase step `step << 3` per sample, 8 (pulse) or 4 samples per
-iteration.  Differences to check against the extension: the pulse compares
-`phase < duty` *before* advancing, the triangle's sign test is on the
-pre-advance phase (`adds` then `rsbpl / submi` on the result), the saw
-filter is `state = raw + (state asr 1)` with `mlane` skipping zero.  The
-extension was written from this code and cross-checked with agbplay; HQ
-mode makes it measurable for the first time (step 9).
+Ported in step 9 (`plugin/m4a_synth.h` holds the oscillators, shared with
+the vanilla-mode extension; `synth_path` in `m4a_hq_mixer.c` the loops),
+measured −inf on the four synth rows at the first run:
+
+- Reached from `C_mixing_setup_comp_rev` after the step multiply and
+  **before the volume halving**: the pulse and triangle mix at the
+  unhalved `v` (0..127 per side), the saw halves it itself
+  (`lsr #1; bic #0xFF00` → `floor(v / 2)`).  `r3` is the sample pointer =
+  the descriptor; `C_mixing_end_store` writes it back unchanged and
+  `count` as the pulse's LFO accumulator / the saw's filter state.
+- **Pulse**: `C_setup_synth` runs once per *mixed* frame (a frame the
+  volume-zero skip drops does not advance the LFO): `count += data[3] <<
+  24`, `t = count + data[5] << 24`, `mvnmi` folds a negative `t` to `~t`,
+  threshold `= (t >> 8) × data[4] + data[2] << 24`.  Per sample `cmp r7,
+  r6` (unsigned, *before* the advance) then `addlo / subhs r11 << 6`:
+  `±64 × v` at the packed word, the subtract borrowing across the halves
+  exactly as `mla` with −64.  `sampleStor` gets the threshold's low byte.
+- **Saw**: the advance first, `raw = (phase >> 24) − 0x70 − ((phase << 1)
+  >> 27)`, `state = raw + (state asr 1)`, `mlane` with the state itself
+  (skipped when 0); `sampleStor` = the low byte of the last `phase << 1`.
+- **Triangle**: the advance first, the sign of the *advanced* phase picks
+  `(phase >> 23) − 0x80` or `0x180 − (phase >> 23)` (an earlier reading
+  here said "pre-advance": the flags are the `adds` result's); the peak at
+  exactly 0x80000000 is +128; `sampleStor` = 0x80.
+- 8 (pulse) or 4 samples per iteration, so the frame length must be a
+  multiple of 8 (the 7884 Hz snap).
+
+The extension (written from this code and cross-checked with agbplay)
+differed in two places, both re-derived in step 9: its pulse LFO advanced
+at every envelope tick and once more at note start (one step ahead of the
+mixer, and advancing through volume-zero frames), and its saw mixed
+`state >> 1` at the full volume where the mixer mixes the state at
+`floor(v / 2)`.  Measured against the HQ ROM, the re-derived extension
+(the same oscillators under vanilla's 8-bit accumulate) sits at −32..−34
+dB on the four rows: the mixer difference, informational.
 
 ### Volume-zero and frame-length constraints
 
@@ -569,10 +595,12 @@ the PSG rows exactly as today.
   mixer computes its two volumes itself and stores them into
   `envelopeVolumeRight/Left` for `--pcm-log` (the log's columns keep their
   meaning: the per-side volumes the mixer used).
-- **Synth voices**: the HQ mixer's synth loops are the measured truth; the
-  vanilla-mode extension (`mix_synth`) keeps working as today.  Once the HQ
-  synth is bit-exact, re-derive the extension from the shared code (same
-  oscillator, vanilla accumulate) and record whatever changed.
+- **Synth voices**: the HQ mixer's synth loops are the measured truth
+  (step 9: `synth_path` in `m4a_hq_mixer.c`, −inf on the four rows); the
+  oscillators live in `plugin/m4a_synth.h` and the vanilla-mode extension
+  (`mix_synth`) runs the same ones under vanilla's accumulate (its LFO and
+  saw arithmetic re-derived from the measured code, its own unit tests
+  kept).
 - **Shadow pool / polyphony debug**: the HQ pass mixes the shadow channels
   into a discarded buffer as the vanilla pass does (`mutedFrame` → a muted
   HQ buffer); the invert mode's downsampler output is the audible one.
@@ -618,7 +646,7 @@ path from `--pcm-log` (frequency × divFreq / 2^23) rather than guessing.
 | compressed reverse + the negative block | reversed cries, `cry_pidgey_echo_start_chorus` (two channels ending in different frames) | — (step 8: −inf; the whole end frame on open bus) |
 | uncompressed reverse | none in vanilla (reversed cries are DPCM) | `pcm_rev` (voice 16, `voice_directsound_reverse` on the pizzicato) — step 8, −inf with the loader's preceding bytes |
 | stack budget exceeded | none | `pcm_cmp_hi` (the Bulbasaur cry at keys 96 / 72 / 94: the two high notes frozen silent on the HQ ROM) — step 8, −inf |
-| synth pulse / saw / triangle, duty LFO | none | `synth_pulse`, `synth_pulse_lfo`, `synth_saw`, `synth_tri` — `.bin` descriptors in the micro voicegroup (the repo's `duty.bin` / `saw.bin` / `triangle.bin` layouts); **vanilla-ROM rows of these are not meaningful** (a click) and are skipped unless `--mixer hq` |
+| synth pulse / saw / triangle, duty LFO | none | `synth_pulse` (voice 17: 50 %, no LFO), `synth_pulse_lfo` (18: base 0x20, step 0x10, mod 0x80, offset 0x40 — the fold reached every 16 frames), `synth_saw` (19), `synth_tri` (20) — `set_synth_*` descriptors in `accuracy_micro_synth.inc` (assembled into both ROMs, read by the loader as the overlay's `direct_sound_synth_data.inc`); **HQ-only rows**: the vanilla ROM plays a zero-size sample as a click, so `accuracy.py` skips `synth_*` unless `--mixer hq` — added in step 9, −inf |
 | frame lengths ≠ 224 | none | step 11 |
 
 The micro-test additions change the ROM (both builds, since they share the
@@ -956,9 +984,43 @@ the reversed layout, the open-bus end (both forms), the stack skip, the
 uncompressed reverse with the rebuilt header and with the loader's
 bytes; unit 1988/1988.
 
-**Step 9 — synths.**  The four synth micro-tests in the HQ ROM; the HQ
-synth loops bit-exact; then the vanilla-mode extension re-derived from the
-shared oscillator code (its own unit tests kept).
+**Step 9 — synths.**  Done 2026-10-27.  `plugin/m4a_synth.h` (the three
+oscillators and the pulse's `C_setup_synth`, registers as names) and
+`synth_path` in `plugin/m4a_hq_mixer.c` (the dispatch on the SPL type
+byte after the step multiply and before the halving, the three loops, the
+`C_end_mixing` state: `fw`, `sampleStor` = the threshold's low byte / the
+last `phase << 1` / 0x80, `count`); `m4a_hq_channel_init` replaces the
+type byte with `VOICE_TYPE_SPL` (new define) for a zero-size sample, as
+`C_channel_init_synth` does — so the doc's "a FIX synth takes the FIX
+path" was wrong, corrected in section 2.  Rows: `accuracy_micro_synth.inc`
+(the `set_synth_pulse` / `_saw` / `_triangle` macros assembling the
+loader's in-memory WaveData byte for byte, four descriptors; included by
+`sound_data.s` before the voicegroup, linked by the overlay as
+`sound/direct_sound_synth_data.inc`), voices 17–20, `synth_pulse`,
+`synth_pulse_lfo`, `synth_saw`, `synth_tri` (ids 37–40), HQ-only
+(`accuracy.py`'s `HQ_ONLY_PREFIX`); both ROMs rebuilt (symbols unchanged;
+vanilla sha256 `6d53e9862beb…`, HQ `f47dea23ff9f…`; canaries pcm /
+pcm_cmp / cry_bulbasaur byte-identical on both), `--update-refs` both
+families (41 HQ micro rows, 37 vanilla; the old FLACs unchanged).
+Measured: all four rows −inf on the HQ ROM at the first run (no
+correction needed).  The vanilla-mode extension re-derived from
+`m4a_synth.h` (the pulse LFO now advances in the mixer once per mixed
+frame, no priming at note start — `m4a_pcm_synth_pulse_update` removed
+from `m4a_channel.c`; the saw mixes the state at `floor(v / 2)`), −32..−34
+dB against the HQ ROM (the 8-bit accumulate; informational).  Unit tests:
+the pulse frame (±64 × v with the packed borrow, the state after), the LFO
+over four mixed frames with the fold and a volume-zero frame that does not
+advance it, the saw's eight states at the halved volume and the `mlane`
+zero skip, the triangle's two slopes and the +128 peak, the frame test
+(nothing is unported now); the Golden Sun tests re-derived (the threshold
+appears at the first mixed frame); unit 2014/2014, blip 49112/0, songs
+571/571 on both ROMs.  Gate, vanilla: claim_check 59 diffed, 1 moved
+(pcm_psg's known 4 cycles), 63/72, 0 regressions and no row moved vs
+`2026-10-27_step8-cmp-rows`; baseline `2026-10-27_step9-synth-rows`.  HQ:
+62 diffed, 1 moved (pcm_psg), 72/76 (the four synth rows −inf; left:
+mt_chimney / credits / se_contest_place at the floor and se_faint −49.2,
+open), 0 regressions vs `2026-10-27_hq-precached`; baseline
+`2026-10-27_hq-synths`.
 
 **Step 10 — the plugin, renderer, config, state, docs.**  Section 5's
 surfaces; `--input midi --mixer hq` run and its baseline family; README and
@@ -994,10 +1056,10 @@ time with `claim_check.sh --mixer hq`; then the HQ baseline is final.
   limitation; no vanilla corpus row should reach it.
 - **Compressed loops are not looped** in HQ — a behaviour difference hackers
   may hit with looped compressed samples; stock HQ behaviour, reproduce it.
-- **The eventide synth extension** may turn out to differ from the measured
-  HQ synth in rounding (e.g. the saw's `mlane` zero skip, the pulse's DC);
-  step 9 settles it, and the vanilla-mode extension follows the measured
-  code.
+- **The eventide synth extension** did differ from the measured HQ synth
+  (the pulse LFO one step ahead and advancing on unmixed frames, the saw's
+  `state >> 1` at full volume instead of the state at `floor(v / 2)`);
+  step 9 re-derived it from the shared oscillator code (section 2).
 - **IWRAM layout / probe labels** all move; every probe recipe in the
   skills needs the HQ addresses alongside the vanilla ones.
 - **Other HQ variants in the wild**: ipatix's master branch (`ENABLE_REVERB
