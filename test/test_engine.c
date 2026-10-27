@@ -3193,6 +3193,16 @@ static void test_hq_mixer(void)
         ASSERT_EQ(e.hqBuffer[1], 0xFFF3FFF4u, "hq seed: a negative sum borrows from the high half");
         ASSERT(A[48] == 0 && B[48] == 0 && B[49] == 0, "hq seed: the slot was overwritten with the (zero) output after the taps were read");
         ASSERT(A[0] == 3, "hq seed: the next slot is only read");
+        /* Reverb 127: the factor is 127 >> 2 = 31 (vanilla's 127 / 4 =
+         * 31.75 rounds differently); the same taps give 10 * 31 = 310 and
+         * -31 with the borrow. */
+        memset(e.hqBuffer, 0, sizeof(e.hqBuffer));
+        e.reverb.amount = 127;
+        A[0] = 3; B[0] = 4; B[48] = 5; A[48] = -2;
+        A[1] = 0; B[1] = 0; B[49] = -1; A[49] = 0;
+        m4a_hq_downsample(&e, 48, 2);
+        ASSERT_EQ(e.hqBuffer[0], 0x01360136u, "hq seed: reverb 127 scales by 31");
+        ASSERT_EQ(e.hqBuffer[1], 0xFFE0FFE1u, "hq seed: -31 with the borrow");
     }
 
     /* The FIX path: the 12-sample ramp, frame 8, volumes 2 / 2 unhalved.

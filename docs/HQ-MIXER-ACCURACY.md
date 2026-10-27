@@ -120,6 +120,11 @@ Consequences to port:
   half.  Vanilla scales by `reverb >> 9` with a round-toward-zero.  Level
   127 becomes 31 (vanilla 127/4 = 31.75): slightly less reverb, different
   rounding.  With `reverb == 0` the seed is 0 (the taps are still read).
+  **Confirmed (step 7)**: with the FIX drums mixed, mus_littleroot,
+  mus_vs_wild (reverb-heavy) and mus_credits have their ring slots
+  byte-identical to the ROM's over the whole probe (1193 / 1193 / 596
+  frames) — the taps, the `>> 2` scaling, the borrow and the one-frame
+  delay as written here, at the games' reverb levels.
 - **The mix buffer is seeded, not cleared** (with `ENABLE_REVERB 1`); the
   first frame's buffer is BSS zero.
 - **Downsampler** per channel side (left uses the whole word `w`, right
@@ -566,7 +571,7 @@ path from `--pcm-log` (frequency × divFreq / 2^23) rather than guessing.
 | unbuffered loop: sample end inside a frame | `pcm_adsr`, `pcm_drum`? | — |
 | volume-zero freeze | none | `pcm_vol0` (VOL 0 for a few ticks mid-note, then back), `pcm_slow_attack` (attack 1–2) |
 | FIX path (block + remainder, alignment variants) | `pcm_drum` (voice 12, `no_resample`); every vanilla song through its drumset (`voice_keysplit_all voicegroup_*_drumset`: 26 `no_resample` voices in emerald_1 alone, the FRLG drumset's kick and snares in rg_vs_trainer); se_faint's rs_sfx_1 has none | `pcm_fix_loop` (voice 15, the flute looped at its own rate; the remainder's `loopStart` reset) — added in step 6 |
-| reverb seed | `pcm_reverb`, mus_littleroot, mus_vs_wild | `pcm_reverb_max` (`-R127`: the `>> 2` scaling) |
+| reverb seed | `pcm_reverb`, mus_littleroot, mus_vs_wild, mus_credits | `pcm_reverb_max` (`-R127`: the `>> 2` scaling at 31) — added in step 7 |
 | saturation | none deliberate | `pcm_clip` (6+ notes at velocity 127, VOL 127: expect clipping, not wrap) |
 | 16-bit half overflow / borrow | every row with negative samples | `pcm_clip` with a pan test |
 | compressed forward | `pcm_cmp`, every forward cry | — |
@@ -844,6 +849,25 @@ frame test's unported example is now CMP); unit 1962/1962.
 `pcm_reverb`, `pcm_reverb_max`, mus_littleroot, mus_vs_wild, mus_credits.
 Prediction to write down first: the songs reach their vanilla floor
 (−49..−55 dB); a level error shows as `gm` ≫ raw.
+
+**Step 7 — done 2026-10-27.**  A verification step: the seed was ported
+in step 4 and no engine change was needed.  The songs' prediction was
+already met by step 6 (littleroot −54.4, vs_wild −53.7, credits −47.7,
+`gm` equal to raw everywhere); the check that settles it is the ring:
+littleroot, vs_wild and credits re-probed on the HQ ROM with the ring
+dump are byte-identical to the engine's slots over the whole run (1193 /
+1193 / 596 frames), so the taps, the `>> 2` factor, the borrow and the
+one-frame delay hold at the games' reverb levels (section 2).  The
+`pcm_reverb_max` row (`-R127`, the standard pattern; id 34) was predicted
+−inf or the floor and reads −68.5 on HQ: the floor (ring identical in all
+177 frames, the one error frame 64 = the probe's single crossing at cycle
+17751296, pcm's), −inf on vanilla.  Both ROMs rebuilt (symbols unchanged;
+vanilla sha256 `4501e5289d08…`, HQ `6cdb5ad99540…`; canaries
+byte-identical), refs updated on both families (35 micro rows).
+Baselines `2026-10-27_step7-reverb-max-row` (vanilla 61/70) and
+`2026-10-27_hq-reverb-check` (HQ 43/70), 0 regressions on either.  Unit
+tests: the seed at reverb 127 (factor 31, 310 and −31 with the borrow);
+unit 1964/1964.
 
 **Step 8 — compressed and reversed samples.**  Forward DPCM with the zero
 fill and immediate stop (`pcm_cmp`, forward cries), then the reversed

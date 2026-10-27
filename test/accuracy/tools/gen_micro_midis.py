@@ -202,6 +202,8 @@ def build():
     # The FIX path with a loop (step 6): the flute at its own rate, the key
     # ignored; each note outlives the 1874 samples (0.14 s) and loops.
     add("pcm_fix_loop", pattern(V_PCM_FIX_LOOP))
+    # Reverb at its maximum (step 7): the HQ seed scales by reverb >> 2 = 31.
+    add("pcm_reverb_max", pattern(V_PCM, (60, 67, 55)), "-R127")
 
     return tests
 
