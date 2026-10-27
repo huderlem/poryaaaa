@@ -85,6 +85,7 @@ set(ENGINE_SOURCES
     plugin/m4a_channel.c
     plugin/m4a_tables.c
     plugin/m4a_mixer.c
+    plugin/m4a_hq_mixer.c
     plugin/m4a_blip.c
     plugin/m4a_gba.c
     plugin/m4a_psg.c

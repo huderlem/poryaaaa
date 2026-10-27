@@ -1,6 +1,7 @@
 #include "m4a_engine.h"
 #include "m4a_channel.h"
 #include "m4a_mixer.h"
+#include "m4a_hq_mixer.h"
 #include "m4a_reverb.h"
 #include "m4a_tables.h"
 #include <string.h>
@@ -526,7 +527,10 @@ static void sound_main(M4AEngine *engine)
     int offset = 0;
     if (counter - 1 > 0)
         offset = (engine->pcmDmaPeriod - (counter - 1)) * engine->pcmSamplesPerVBlank;
-    m4a_sound_main_ram(engine, offset, counter);
+    if (engine->hqMixer)
+        m4a_hq_sound_main_ram(engine, offset, counter);
+    else
+        m4a_sound_main_ram(engine, offset, counter);
     if (engine->frameEndHook)
         engine->frameEndHook(engine, engine->frameEndHookUser);
     if (engine->frameLogHook)
@@ -707,6 +711,8 @@ void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode)
 {
     if (mode < M4A_PCM_FREQ_MODE_MIN || mode > M4A_PCM_FREQ_MODE_MAX)
         mode = M4A_PCM_FREQ_MODE_DEFAULT;
+    if (engine->hqMixer && mode == 2)
+        mode = M4A_PCM_FREQ_MODE_DEFAULT;   /* 7884 Hz: 0x84 samples, not a multiple of 8 */
     if (mode == engine->pcmFreqMode)
         return;
     engine->pcmFreqMode = (uint8_t)mode;
@@ -726,10 +732,17 @@ void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode)
 
 void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on)
 {
-    /* The boot table is replayed by m4a_engine_boot; the mixer selection
-     * that later steps add (docs/HQ-MIXER-ACCURACY.md, section 5) reads
-     * the flag each frame. */
+    /* The boot table is replayed by m4a_engine_boot; sound_main reads the
+     * flag each frame.  The HQ-only state starts as the ROM's BSS. */
     engine->hqMixer = on;
+    memset(engine->hqBuffer, 0, sizeof(engine->hqBuffer));
+    memset(engine->hqMutedBuffer, 0, sizeof(engine->hqMutedBuffer));
+    engine->hqNoiseShapeLeft = engine->hqNoiseShapeRight = 0;
+    engine->hqUnportedChannelFrames = 0;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        engine->pcmChannels[i].sampleStor = 0;
+    if (on && engine->pcmFreqMode == 2)
+        m4a_engine_set_pcm_freq_mode(engine, M4A_PCM_FREQ_MODE_DEFAULT);
 }
 
 void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm)

@@ -129,10 +129,13 @@ Consequences to port:
   after `maxLines`); saturate `t` to 31 bits (`adds t2 = t + t; eorvs t =
   0xC0000000 ^ (t2 asr 31)` → `0x3FFFFFFF` on positive overflow,
   `0xC0000000` on negative); output byte = bits 23..30 of `t`; new state =
-  `t & 0x007F0000`.  **(quirk)** for the left side the right half of the
-  word rides along in the low 16 bits of `t`, so right-channel content can
-  carry into the left output (at most one unit of the 7-bit residual per
-  sample) — port the word arithmetic, never split the channels first.
+  `t & 0x007F0000`.  The right half of the word rides along in the low 16
+  bits of the left side's `t`, but the residual's low half is always 0 and
+  the output and the new residual only read bits 16 and up, so it never
+  reaches the left output (step 4 corrected the earlier reading of this as
+  a quirk); the one place right-channel content enters the left half is
+  the accumulate's borrow (`mla` of a negative product), which the word
+  arithmetic reproduces — port the words, never split the channels first.
 - **Saturation replaces the 8-bit wrap**: a loud mix clips at ±full scale
   instead of wrapping.  The 16-bit halves themselves still wrap during
   accumulation (`mla` on packed words), and an overflowing right half
@@ -175,7 +178,9 @@ and mixes).  Differences:
   the last base sample of the linear interpolation, zeroed at init and
   carried **across frames** — HQ keeps `base` and points `ptr` at the *next*
   sample, where vanilla reloads `data[ptr]` each frame.  New channel state
-  for the engine.
+  for the engine.  A consequence (measured, step 4): a note's first source
+  sample is interpolated from the zeroed base, so every note starts with a
+  one-source-sample ramp from 0 instead of vanilla's step onto `data[0]`.
 - The loop flag comes from `WaveData.flags` bits 6..7 (`lsr #6` of the
   byte at offset 3 → the two loop bits of the 16-bit status), as vanilla.
 
@@ -218,11 +223,16 @@ and mixes).  Differences:
   `≥ 2.0` (pointer += `fw >> 23` each sample).  The block is pasted over
   the NOP slots once per change (`previous_fast_code`), which has no
   behavioural effect beyond selecting the block.
-  **(quirk)** the `mulne` / `mlane` conditions are the flags left by the
-  *previous* sample's `subpls` / `adds`: after a step where the new
-  `diff == 0`, the multiply is skipped and `r9` keeps the previous output
-  value, whose `asr #22` is 0 or −1 — a flat negative run comes out one
-  unit (at double scale) low.  Port the condition codes.
+  **(quirk)** the `mulne` condition is the flags left by the *previous*
+  sample's `subpls` / `adds`: after a step where the new `diff == 0`, the
+  multiply is skipped and `r9` keeps the previous output value, whose
+  `asr #22` is 0 or −1 — a flat negative run comes out one unit (at
+  double scale) low; the `mlane` condition is the output itself (`adds
+  r9`), a no-op skip.  **Measured (step 4)**: the first sample of each
+  8-sample iteration takes its flags from the loop's `subs r8, r8, #8`
+  instead, so it always multiplies — pcm frame 64 was off by one output
+  sample until the port did the same.  Port the condition codes, and the
+  loop structure they live in.
 - **Else the unbuffered loop**: one sample per iteration, mixed *before*
   the end check; at a loop end `ptr −= loopLen; count += loopLen` (a
   relative wrap, not a reset to `loopStart`; the vanilla while-loop for
@@ -347,7 +357,13 @@ PSG-frame events cross nowhere on either).  No DMA3 term: a DMA3 block is
 just another stretch of the instruction stream the timer overflow waits
 out, and the `ENABLE_DMA` variants of step 1 differ only through it (pcm's
 frames 63–68 are the HQ run's one crossing, `first at cycle 17751296`,
-frame 64).
+frame 64).  **Step 4 put numbers on the floor rows**: with the ring slots
+byte-identical to the ROM's in every frame (`tools/hq_ring_compare.py`),
+pcm / pcm_reverb (one crossing in frame 63's SoundMain, audio frame 64),
+pan (107 → 108), lfo_delay (127 → 128), pcm_chord (112 → 113) and bend
+(7 → 8) each keep a single-frame residual of one DAC step — −66 to −88 dB
+null, passing, where vanilla has them at −inf.  The crossings sit inside
+the HQ mixer's longer SoundMain; they are the reference's, not the port's.
 
 **Not output-neutral: `ENABLE_DMA`** (measured in step 1).  The DMA3 copy
 and the CPU copy read the same bytes, but the two ROMs' references differ:
@@ -669,6 +685,49 @@ channels are skipped with a counter in the log).  Measure: `pcm_bass`,
 formula, the noise-shaping state across a frame boundary, the borrow quirk,
 the `diff == 0` quirk, the volume-zero freeze), each checked against the
 assembly by hand in the test's comment.
+
+**Step 4 — done 2026-10-26.**  `plugin/m4a_hq_mixer.{h,c}` (ported from
+the newmix file, credit ipatix; registers kept as names, every label a
+comment, flags as named booleans): `m4a_hq_channel_init` (the SF_START
+part the vanilla start pass lacks: CMP from the sample's flag, the reverse
+pointer, `sampleStor`), `m4a_hq_channel_volumes` (`>> 13`), `m4a_hq_mix_channel`
+(C_mixing_setup's volume-zero skip and halving, the `umlal` advance, the
+fast loop's `< 1.0` block with the `mulne` / iteration-boundary flags, the
+unbuffered loop with its relative loop wrap and silent end),
+`m4a_hq_downsample` (saturation, the 7-bit residuals in
+`engine->hqNoiseShapeLeft/Right`, the four taps and the `reverb >> 2`
+seed with the packed-word borrow, written back into `engine->hqBuffer`)
+and `m4a_hq_sound_main_ram` (the frame; the shadow pool into
+`hqMutedBuffer`).  `sound_main` dispatches on `engine->hqMixer`;
+`m4a_engine_set_hq_mixer` resets the HQ state and snaps `pcmFreqMode 2`.
+A channel on a path not ported yet (FIX, CMP / REV, synth, the `>= 1.0`
+blocks) is left untouched for the frame and counted in
+`engine->hqUnportedChannelFrames` (the renderer prints the count).
+`--pcm-log` adds `ss= cnt= fw=` per channel and `ns=` per frame in HQ
+mode; `HQ_DEBUG=1` in the environment dumps the mix buffer and the ring
+slot per frame, which `tools/hq_ring_compare.py` sets against the probe's
+new `ringA= / ringB=` dump at `C_downsampler_return`; `tools/frame_diff.py`
+finds the differing output frames.  Measured: vanilla `claim_check` 0
+moved on 59 logs, 57/66, no row moved.  HQ 29/66 (from 17): the 17 PSG
+rows and `vol`, `vel`, `lfo_vib`, `lfo_trem`, `lfo_pan`, `tune` at −inf,
+`pcm` −71.4, `pcm_reverb` −72.3, `pcm_chord` −88.1, `pan` −74.7, `bend`
+−76.1, `lfo_delay` −66.1 (the floor rows, section 3; their ring slots equal
+the ROM's in all 177 frames), `se_faint` −49.2.  Predicted −inf for `pcm`,
+`pcm_bass`, `pcm_adsr`: `pcm` is the floor; `pcm_bass` (step 1.26) and
+`pcm_adsr` (step 1.0 exactly) are `>= 1.0` rows, step 5's.  One bug found
+by measurement: the iteration-boundary flags (section 2).  Every row with
+an unported channel renders that channel silent, so those rows read 0 dB
+(the cries, pcm_cmp / drum / hi / bass, the songs) — not regressions, the
+step 5–9 queue; and seven PSG logs (the five songs, cry_over_se / bgm) show
+moved writes (93–532 cycles) because a frozen channel never ends and
+MPlayMain's channel bookkeeping costs differ: the HQ "0 moved" gate holds
+for every log without unported channel-frames (the 26 others) and is
+expected back once the paths exist.  Baseline `2026-10-26_hq-mixer-skeleton`.
+Unit tests `test_hq_mixer` (40 assertions: volumes, init, the fast block,
+the diff-0 quirk across an iteration boundary, volume zero, the unbuffered
+end and wrap, the downsampler's residual carry and both saturations, the
+seed and its borrow, the frame and the unported count); unit 1947/1947,
+blip 49112/0, songs 561/561.
 
 **Step 5 — the `[1.0, 2.0)` and `≥ 2.0` blocks, direct-from-ROM reads.**
 `pcm_hi`, `pcm_chord`, the new `pcm_ratio_1x` / `pcm_short_loop` rows.

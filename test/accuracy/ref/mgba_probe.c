@@ -309,6 +309,16 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 			fprintf(gOut, " r0=%08X r1=%08X r2=%08X r3=%08X r4=%08X r5=%08X r6=%08X r7=%08X r8=%08X r9=%08X r10=%08X r11=%08X r12=%08X sp=%08X lr=%08X",
 			        cpu->gprs[0], cpu->gprs[1], cpu->gprs[2], cpu->gprs[3], cpu->gprs[4], cpu->gprs[5], cpu->gprs[6], cpu->gprs[7],
 			        cpu->gprs[8], cpu->gprs[9], cpu->gprs[10], cpu->gprs[11], cpu->gprs[12], cpu->gprs[13], cpu->gprs[14]);
+			if (!strcmp(name, "C_downsampler_return")) {
+				/* the ring slot the downsampler just wrote: r9 = its end on the A side, B is PCM_DMA_BUF_SIZE further */
+				uint32_t n = rd32(ADDR_gSoundInfo + 0x10), e = cpu->gprs[9];
+				if (n >= 8 && n <= 0x2C0) {
+					fprintf(gOut, " ringA=");
+					for (uint32_t i = e - n; i < e; ++i) fprintf(gOut, "%02X", rd8(i));
+					fprintf(gOut, " ringB=");
+					for (uint32_t i = e - n; i < e; ++i) fprintf(gOut, "%02X", rd8(i + 0x630));
+				}
+			}
 			if (!strcmp(name, "C_select_highspeed_codepath_vla_r3")) {
 				/* the decoded DPCM block buffer on the stack: sp .. r10 (the saved sp - 8 of C_data_load_comp_rev) */
 				uint32_t a = cpu->gprs[13], e = cpu->gprs[10];

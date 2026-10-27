@@ -235,8 +235,26 @@ compares two corpora (boot writes, per-frame entries and PSG writes).  The
 HQ-mixer ROM: `build/probe-hq/syms.nm` from its ELF plus the same
 CgbSound_ lines (CgbSound did not move); the probe breaks on the HQ
 mixer's `C_*` / `F_*` labels at the IWRAM copy and logs every register,
-`sp` at SoundMainRAM entry and the decoded DPCM buffer
-(`docs/HQ-MIXER-ACCURACY.md`, step 2).
+`sp` at SoundMainRAM entry, the decoded DPCM buffer and the ring slot it
+wrote (`docs/HQ-MIXER-ACCURACY.md`, step 2).
+
+**Debugging an HQ-mixer row** (`accuracy.py --mixer hq`): first
+`tools/frame_diff.py <ref.wav> <out.wav>` for the differing frames; then
+`HQ_DEBUG=1 build/poryaaaa_render ... --hq-mixer 2> ring.txt` (one
+`HQRING` line per frame with the ring slot, one `HQDBG` line with the mix
+buffer words) and a probe run of that test on the HQ ROM, and
+`tools/hq_ring_compare.py <probe .txt> ring.txt`.  Identical rings with a
+single differing frame of one DAC step = the scheduler floor (the frame's
+timer-0 slot crossing in the `.events` file, one engine frame before the
+audio frame).  A differing ring: `--pcm-log` (HQ mode adds `ss=`, `cnt=`,
+`fw=` per channel and `ns=` per frame) against the probe's `C_end_mixing`
+/ `C_downsampler_return` registers says whether the channel state, the
+buffer or the downsampler went wrong; the mix buffer's last four words
+are the `C_end_mixing` line's r0, r1, r10, lr.  A channel the port does
+not have yet is left unmixed and counted (`Note: HQ mixer: N
+channel-frames ...`); such a row is silent on that channel, and the PSG
+write diff of a song with frozen channels moves (MPlayMain's bookkeeping),
+which is not a timing bug.
 
 **Run it**: `build/probe/mgba_probe build/accuracy/rom/accuracy_test.gba
 build/probe/<name>.txt <frames> <type> <id> build/probe/syms.nm`.

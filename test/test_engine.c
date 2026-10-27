@@ -5,6 +5,7 @@
 #include "m4a_engine.h"
 #include "m4a_channel.h"
 #include "m4a_mixer.h"
+#include "m4a_hq_mixer.h"
 #include "m4a_tables.h"
 #include "m4a_song.h"
 #include "m4a_sequencer.h"
@@ -2896,6 +2897,242 @@ static WaveData *ramp_wave(int n, int looped, uint32_t loopStart)
         wd->data[i] = (int8_t)(10 * (i + 1));
     wd->data[n] = 0;   /* the byte after the data: wav2agb's padding */
     return wd;
+}
+
+/* The HQ mixer (plugin/m4a_hq_mixer.c, docs/HQ-MIXER-ACCURACY.md): each
+ * expected value is worked by hand from the assembly in the comments. */
+static void test_hq_mixer(void)
+{
+    printf("Testing the HQ mixer (ipatix rev 4.0) arithmetic...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    m4a_engine_set_hq_mixer(&e, true);
+    e.pcmDivFreq = 1;
+    e.pcmSamplesPerVBlank = 8;
+    static uint32_t buf[64];
+
+    /* C_channel_vol_calc: v = env * (mv + 1) = 255 * 13 = 3315;
+     * L = 127 * 3315 >> 13 = 51, R = 64 * 3315 >> 13 = 25. */
+    {
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        ch.envelopeVolume = 255; ch.leftVolume = 127; ch.rightVolume = 64;
+        m4a_hq_channel_volumes(&ch, 12);
+        ASSERT_EQ(ch.envelopeVolumeLeft, 51, "hq vol: left = (leftVolume * env * (mv + 1)) >> 13");
+        ASSERT_EQ(ch.envelopeVolumeRight, 25, "hq vol: right likewise");
+    }
+
+    /* C_channel_init: a REV voice's pointer becomes data + count (size -
+     * offset); a sample whose WaveData.type bit 0 is set OR-s CMP into the
+     * voice type; sampleStor is cleared. */
+    {
+        WaveData *wd = ramp_wave(12, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start_at(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_REV, 2);
+        ch.sampleStor = 7;
+        m4a_hq_channel_init(&ch);
+        ASSERT(ch.currentPointer == wd->data + 10, "hq init: reverse pointer = data + (size - offset)");
+        ASSERT_EQ(ch.count, 10, "hq init: count = size - offset");
+        ASSERT_EQ(ch.sampleStor, 0, "hq init: sampleStor cleared");
+        wd->type = 1;
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ASSERT(ch.type & VOICE_TYPE_CMP, "hq init: compression follows the sample's flag");
+        free(wd);
+    }
+
+    /* The fast loop's < 1.0 block at half speed on an unlooped 12-sample
+     * ramp 10..120 (count 12 > advance 4), sampleStor 0 from init, volumes
+     * 2 / 2 halved to 1 / 1 (ceil): sample 0 interpolates from the stored
+     * base 0 (output 0, not mixed), then 10, 20, 30, ... at double scale;
+     * the state after: fw 0, count 8, pointer data + 4, base 40. */
+    {
+        WaveData *wd = ramp_wave(12, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN;
+        ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq fast: the path is ported");
+        int ok = 1;
+        for (int i = 0; i < 8; i++)
+            if (buf[i] != ((uint32_t)(10 * i) << 16 | (uint32_t)(10 * i))) ok = 0;
+        ASSERT(ok, "hq fast: 0, 10, 20 .. 70 at double scale, packed L << 16 | R");
+        ASSERT_EQ(ch.fw, 0, "hq fast: fw after the frame");
+        ASSERT_EQ(ch.count, 8, "hq fast: count -= advance");
+        ASSERT(ch.currentPointer == wd->data + 4, "hq fast: pointer += advance");
+        ASSERT_EQ(ch.sampleStor, 40, "hq fast: the base sample carried to the next frame");
+        free(wd);
+    }
+
+    /* The mulne quirk: a flat run of -10 at half speed with the base already
+     * -10 (diff 0).  Each advance lands on diff 0 and skips the next
+     * sample's multiply, so r9 keeps the previous output (-20), whose asr
+     * #22 is -1: -21 instead of -20.  The first sample of each 8-sample
+     * iteration always multiplies (the loop's subs r8).  Two iterations:
+     * -20 -20 -21 -20 -21 -20 -21 -20 | -20 -20 -21 -20 -21 -20 -21 -20.
+     * Packed at volume 1 / 1 the negative product borrows: -20 ->
+     * 0xFFEBFFEC, -21 -> 0xFFEAFFEB. */
+    {
+        static WaveData wd;
+        static int8_t flat[40];
+        memset(flat, -10, sizeof(flat));
+        wd.size = 32; wd.data = flat;
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        ch.wav = &wd; ch.currentPointer = flat; ch.count = 32; ch.sampleStor = -10;
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        e.pcmSamplesPerVBlank = 16;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        static const uint32_t want[16] = {
+            0xFFEBFFECu, 0xFFEBFFECu, 0xFFEAFFEBu, 0xFFEBFFECu, 0xFFEAFFEBu, 0xFFEBFFECu, 0xFFEAFFEBu, 0xFFEBFFECu,
+            0xFFEBFFECu, 0xFFEBFFECu, 0xFFEAFFEBu, 0xFFEBFFECu, 0xFFEAFFEBu, 0xFFEBFFECu, 0xFFEAFFEBu, 0xFFEBFFECu };
+        int ok = 1;
+        for (int i = 0; i < 16; i++) if (buf[i] != want[i]) ok = 0;
+        ASSERT(ok, "hq fast: diff-0 skip gives -21 after an advance, never at an iteration's first sample");
+        e.pcmSamplesPerVBlank = 8;
+    }
+
+    /* Volume zero: the channel is skipped for the frame, nothing advances. */
+    {
+        WaveData *wd = ramp_wave(12, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x400000; ch.fw = 123; ch.sampleStor = 9;
+        memset(buf, 0x11, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq vol0: skipped, not unported");
+        ASSERT(buf[0] == 0x11111111u && ch.fw == 123 && ch.count == 12 && ch.currentPointer == wd->data
+               && ch.sampleStor == 9, "hq vol0: buffer and position untouched");
+        free(wd);
+    }
+
+    /* The unbuffered loop at step 1.0 on an unlooped 4-sample ramp (count 4
+     * <= advance 8): 0 (from the stored base 0), 20, 40, 60, then count
+     * reaches 0 at the fourth advance: status 0, the rest of the frame
+     * untouched, nothing stored back. */
+    {
+        WaveData *wd = ramp_wave(4, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        ASSERT(buf[0] == 0 && buf[1] == 0x00140014u && buf[2] == 0x00280028u && buf[3] == 0x003C003Cu
+               && buf[4] == 0, "hq unbuffered: 0, 20, 40, 60 then the end");
+        ASSERT_EQ(ch.status, 0, "hq unbuffered: the channel stops at the sample's end");
+        ASSERT(ch.count == 4 && ch.currentPointer == wd->data && ch.fw == 0, "hq unbuffered: no state stored at the end");
+        free(wd);
+    }
+
+    /* The same ramp looped over all 4 samples: at count 0 the pointer steps
+     * back by the loop length and count += 4, the base continuing from the
+     * last sample (40 -> 80 at double scale), then 20, 40, 60 again; after
+     * the frame fw 0, base 40, count 4, pointer data. */
+    {
+        WaveData *wd = ramp_wave(4, 1, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN | CHN_LOOP; ch.frequency = 0x800000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        static const uint32_t want[8] = { 0, 0x00140014u, 0x00280028u, 0x003C003Cu, 0x00500050u, 0x00140014u, 0x00280028u, 0x003C003Cu };
+        int ok = 1;
+        for (int i = 0; i < 8; i++) if (buf[i] != want[i]) ok = 0;
+        ASSERT(ok, "hq unbuffered: the loop wraps relative to the pointer");
+        ASSERT(ch.status == (CHN_ENV_SUSTAIN | CHN_LOOP) && ch.fw == 0 && ch.sampleStor == 40 && ch.count == 4
+               && ch.currentPointer == wd->data, "hq unbuffered: state after a wrapped frame");
+        free(wd);
+    }
+
+    /* The downsampler: int16 halves to int8 (>> 7) with the 7-bit residual
+     * carried (0x400000 twice -> 0, 1), saturation to 31 bits on either
+     * side (0x7FFF0000 -> 0x7F with residual 0x7F; 0x80010000 -> 0x80), the
+     * right half from w << 16, the residuals kept across frames. */
+    {
+        memset(e.pcmBuffer, 0, sizeof(e.pcmBuffer));
+        e.hqNoiseShapeLeft = e.hqNoiseShapeRight = 0;
+        e.reverb.amount = 0;
+        static const uint32_t words[8] = { 0x00400000u, 0x00400000u, 0x7FFF0000u, 0x00800000u,
+                                           0x80010000u, 0x00000040u, 0x0000FFC0u, 0x00800000u };
+        memcpy(e.hqBuffer, words, sizeof(words));
+        m4a_hq_downsample(&e, 0, 7);
+        const int8_t *A = e.pcmBuffer, *B = e.pcmBuffer + GBA_PCM_DMA_BUF_SIZE;
+        ASSERT(B[0] == 0 && B[1] == 1, "hq ds: left 64 + 64 carries the residual into a 1");
+        ASSERT_EQ(B[2], 127, "hq ds: positive saturation");
+        ASSERT_EQ(B[3], 1, "hq ds: 0x7F residual + 128 -> 1 (0x7F0000 + 0x800000 = 0xFF0000: bits 23..30 = 1)");
+        ASSERT_EQ(B[4], -128, "hq ds: negative saturation");
+        ASSERT(A[5] == 0 && A[6] == 0, "hq ds: right 64 then -64: 0x400000 + 0xFFC00000 = 0, byte 0");
+        ASSERT(A[0] == 0 && A[2] == 0 && A[3] == 0, "hq ds: the right side ignores the left half");
+        ASSERT_EQ(e.hqNoiseShapeLeft, 0x00, "hq ds: left residual after the frame");
+        ASSERT_EQ(e.hqNoiseShapeRight, 0x00, "hq ds: right residual after the frame");
+        int ok = 1;
+        for (int i = 0; i < 8; i++) if (e.hqBuffer[i] != 0) ok = 0;
+        ASSERT(ok, "hq ds: reverb 0 seeds the next frame with zeros");
+        /* residual across frames: 0x200000 per sample reaches 0x800000 every 4th */
+        for (int i = 0; i < 8; i++) e.hqBuffer[i] = 0x00200000u;
+        m4a_hq_downsample(&e, 8, 6);
+        ASSERT(B[8] == 0 && B[9] == 0 && B[10] == 0 && B[11] == 1 && B[15] == 1, "hq ds: a 1/4 LSB signal yields a 1 every 4th sample");
+        for (int i = 0; i < 8; i++) e.hqBuffer[i] = 0x00200000u;
+        e.hqNoiseShapeLeft = 0x60;    /* three quarters already accumulated */
+        m4a_hq_downsample(&e, 16, 5);
+        ASSERT(B[16] == 1 && B[17] == 0, "hq ds: the residual byte carries the fraction into the next frame");
+    }
+
+    /* The reverb seed: taps next A, next B, this slot's old B, old A per
+     * sample, times reverb >> 2 in both halves (12 for amount 50): a sum
+     * of 10 -> 0x00780078; a sum of -1 -> 0xFFF3FFF4 (the borrow).  With
+     * the buffer-position hint 2 the next slot is the ring start. */
+    {
+        int8_t *A = e.pcmBuffer, *B = e.pcmBuffer + GBA_PCM_DMA_BUF_SIZE;
+        memset(e.pcmBuffer, 0, sizeof(e.pcmBuffer));
+        memset(e.hqBuffer, 0, sizeof(e.hqBuffer));
+        e.hqNoiseShapeLeft = e.hqNoiseShapeRight = 0;
+        e.reverb.amount = 50;
+        /* the slot at 48 (counter 2: the last one), next = ring start */
+        A[0] = 3; B[0] = 4; B[48] = 5; A[48] = -2;        /* sample 0: 10 */
+        A[1] = 0; B[1] = 0; B[49] = -1; A[49] = 0;        /* sample 1: -1 */
+        m4a_hq_downsample(&e, 48, 2);
+        ASSERT_EQ(e.hqBuffer[0], 0x00780078u, "hq seed: sum 10 * 12 in both halves");
+        ASSERT_EQ(e.hqBuffer[1], 0xFFF3FFF4u, "hq seed: a negative sum borrows from the high half");
+        ASSERT(A[48] == 0 && B[48] == 0 && B[49] == 0, "hq seed: the slot was overwritten with the (zero) output after the taps were read");
+        ASSERT(A[0] == 3, "hq seed: the next slot is only read");
+    }
+
+    /* The frame: an unported path (FIX) leaves the channel untouched and
+     * is counted; a ported one advances. */
+    {
+        WaveData *wd = ramp_wave(12, 0, 0);
+        m4a_engine_set_hq_mixer(&e, true);
+        e.pcmDivFreq = 1; e.pcmSamplesPerVBlank = 8;
+        M4APCMChannel *ch = &e.pcmChannels[0];
+        memset(ch, 0, sizeof(*ch));
+        m4a_pcm_channel_start(ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX);
+        ch->frequency = 0x400000; ch->leftVolume = ch->rightVolume = 127;
+        ch->attack = 255; ch->decay = 255; ch->sustain = 255;
+        m4a_hq_sound_main_ram(&e, 0, 7);
+        ASSERT_EQ(e.hqUnportedChannelFrames, 1, "hq frame: a FIX channel is counted as unported");
+        ASSERT(ch->count == 12 && ch->currentPointer == wd->data, "hq frame: and left untouched");
+        ch->type = VOICE_DIRECTSOUND;
+        m4a_hq_sound_main_ram(&e, 8, 6);
+        ASSERT_EQ(e.hqUnportedChannelFrames, 1, "hq frame: a ported channel is not counted");
+        ASSERT_EQ(ch->count, 8, "hq frame: and it advanced (envelope 255, volumes 51 / 51)");
+        ASSERT_EQ(ch->envelopeVolumeLeft, 51, "hq frame: 127 * 255 * 13 >> 13 = 51");
+        free(wd);
+    }
 }
 
 static void test_mixer_arithmetic(void)
@@ -8064,6 +8301,7 @@ int main(void)
     test_pcm_dpcm();
     test_pcm_dpcm_reverse_walk();
     test_mixer_arithmetic();
+    test_hq_mixer();
     test_song_parser();
     test_sequencer_tempo();
     test_sequencer_notes();

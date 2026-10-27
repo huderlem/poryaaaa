@@ -971,15 +971,21 @@ static void pcm_log_cb(M4AEngine *engine, void *user)
     if (!sPcmLog)
         return;
     long long frame = (engine->gba.now - 124773) / GBA_CYCLES_PER_FRAME + 1;
-    fprintf(sPcmLog, "f %lld\n", frame);
+    fprintf(sPcmLog, "f %lld", frame);
+    if (engine->hqMixer)   /* HQ mode: the downsampler's noise-shape residuals after the frame */
+        fprintf(sPcmLog, " ns=%02X,%02X", engine->hqNoiseShapeLeft, engine->hqNoiseShapeRight);
+    fputc('\n', sPcmLog);
     for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
         const M4APCMChannel *ch = &engine->pcmChannels[i];
         if (!ch->status)
             continue;
-        fprintf(sPcmLog, "%d st=%02X k=%u mk=%u t=%d v=%u env=%u vr=%u vl=%u er=%u el=%u f=%u\n",
+        fprintf(sPcmLog, "%d st=%02X k=%u mk=%u t=%d v=%u env=%u vr=%u vl=%u er=%u el=%u f=%u",
                 i, ch->status, ch->key, ch->midiKey, ch->trackIndex, ch->velocity, ch->envelopeVolume,
                 ch->rightVolume, ch->leftVolume, ch->envelopeVolumeRight, ch->envelopeVolumeLeft,
                 ch->frequency);
+        if (engine->hqMixer)   /* HQ mode: CHN_SAMPLE_STOR and the position */
+            fprintf(sPcmLog, " ss=%d cnt=%d fw=%u", ch->sampleStor, ch->count, ch->fw);
+        fputc('\n', sPcmLog);
     }
 }
 
@@ -995,6 +1001,15 @@ static void pcm_log_open(M4AEngine *engine, const char *path)
 static void pcm_log_close(void)
 {
     if (sPcmLog) { fclose(sPcmLog); sPcmLog = NULL; }
+}
+
+/* HQ-mixer mode: the paths the port does not have yet leave the channel
+ * untouched for the frame (docs/HQ-MIXER-ACCURACY.md, step 4); say so. */
+static void hq_report(const M4AEngine *engine)
+{
+    if (engine->hqMixer && engine->hqUnportedChannelFrames)
+        fprintf(stderr, "Note: HQ mixer: %u channel-frames on paths not ported yet (left unmixed)\n",
+                engine->hqUnportedChannelFrames);
 }
 
 static int grow_buffers(float **l, float **r, uint64_t *cap, uint64_t need, uint64_t limit)
@@ -1258,6 +1273,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
         sPsgLog.f = NULL;
     }
     pcm_log_close();
+    hq_report(&engine);
     if (song2) {
         m4a_sequencer_detach(&seq2);
         voicegroup_free(vg2);
@@ -2416,6 +2432,7 @@ oom:
         sPsgLog.f = NULL;
     }
     pcm_log_close();
+    hq_report(&engine);
     if (timingSong) {
         m4a_sequencer_detach(&timingSeq);
         m4a_song_free(timingSong);

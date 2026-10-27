@@ -64,6 +64,8 @@ extern "C" {
  * nibble first, then high nibble before low nibble for the rest) indexed into
  * gDeltaEncodingTable.  Matches SoundMainRAM_Unk2 in m4a_1.s. */
 #define M4A_DPCM_BLOCK_SAMPLES      64
+/* The HQ mixer's frame buffer: the largest sound-mode frame (42048 Hz, 0x2C0 samples). */
+#define M4A_HQ_BUFFER_WORDS         0x2C0
 #define M4A_DPCM_BLOCK_BYTES        33
 
 /* Golden Sun synth instruments (ipatix improved-mixer feature).
@@ -268,6 +270,10 @@ typedef struct {
      * filter state, exactly like the GBA improved mixer reuses those fields. */
     uint8_t synthType;
     uint32_t synthPulseDuty; /* pulse: phase threshold; recomputed every tick */
+    /* HQ-mixer mode: CHN_SAMPLE_STOR (SoundChannel byte 0x3F), the base
+     * sample of the linear interpolation carried across frames (the HQ
+     * mixer points currentPointer at the *next* sample). */
+    int8_t sampleStor;
 } M4APCMChannel;
 
 /* CGB Channel (square, noise, programmable wave) */
@@ -439,6 +445,16 @@ struct M4AEngine {
     int8_t decodingBuffer[M4A_DPCM_BLOCK_SAMPLES];
     /* A discarded frame the muted pool mixes into (polyphony debug). */
     int8_t mutedFrame[GBA_PCM_DMA_BUF_SIZE * 2];
+    /* HQ-mixer mode (m4a_hq_mixer.c): hq_buffer_ptr, the 32-bit mix buffer
+     * (int16 left << 16 | int16 right per output sample) that carries the
+     * next frame's reverb seed between frames; the muted pool's copy; the
+     * downsampler's noise-shape residuals (SoundInfo bytes 0xE / 0xF); and
+     * the count of channel-frames that hit a path the port does not have
+     * yet (left untouched for the frame). */
+    uint32_t hqBuffer[M4A_HQ_BUFFER_WORDS];
+    uint32_t hqMutedBuffer[M4A_HQ_BUFFER_WORDS];
+    uint8_t hqNoiseShapeLeft, hqNoiseShapeRight;
+    uint32_t hqUnportedChannelFrames;
     int64_t nextVSync;           /* next m4aSoundVSync (VCOUNT 150 interrupt) */
     int64_t nextSoundMain;       /* next m4aSoundMain (VBLANK interrupt) */
     int bootStep;                /* progress through the boot-time register writes */
@@ -800,9 +816,11 @@ void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode);
 int m4a_pcm_freq_mode_hz(int mode);
 int m4a_pcm_freq_mode_from_hz(double hz);
 
-/* HQ-mixer mode (docs/HQ-MIXER-ACCURACY.md, section 5).  Selects the HQ
- * ROM's boot timeline; call before m4a_engine_boot (the boot replays the
- * table once).  Off by default. */
+/* HQ-mixer mode (docs/HQ-MIXER-ACCURACY.md, section 5): the HQ ROM's boot
+ * timeline (call before m4a_engine_boot; the boot replays the table once)
+ * and ipatix's mixer in place of SoundMainRAM.  Resets the HQ-only state;
+ * the 7884 Hz PCM rate (mode 2) is not supported by the HQ mixer (its
+ * frame is not a multiple of 8) and snaps to the default.  Off by default. */
 void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on);
 
 /* Set voicegroup (must be loaded by voicegroup_loader) */
