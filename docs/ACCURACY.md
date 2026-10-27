@@ -12,7 +12,11 @@ measurement, prediction and review in order) is in git history up to
 commit `8654e9c`. Procedures for running the harness and attributing a
 residual are in the `accuracy-harness` skill
 (`.claude/skills/accuracy-harness/SKILL.md`); the code-review procedure is
-in `review-against-source`.
+in `review-against-source`.  The second engine configuration, HQ-mixer
+mode (ipatix's High-Quality Audio Mixer as the pret wiki installs it,
+`engine->hqMixer`, off by default), has its own document with the same
+structure: `docs/HQ-MIXER-ACCURACY.md`.  Everything here applies to both
+modes unless that document says otherwise; only the mixer differs.
 
 Contents:
 
@@ -32,9 +36,9 @@ Contents:
 
 - **mgba 0.10.5 is the reference**, not real hardware.  The reference
   renderer captures mgba's raw DAC stream and resamples it with the
-  engine's own resampler (`plugin/m4a_blip.c`), so both sides go through
+  engine's own resampler (`plugin/m4a_resampler.c`), so both sides go through
   one bit-exact resampler and the comparison measures only the GBA-side
-  model.  Its version string is `mGBA 0.10.5+m4a_blip`;
+  model.  Its version string is `mGBA 0.10.5+m4a_resampler`;
   `mgba_render --native-resampler` gives mgba's own sinc output for
   listening.
 - **The test ROM** (`test/accuracy/rom/`) is built with agbcc from the
@@ -63,7 +67,7 @@ Contents:
 | piece | what it is |
 |---|---|
 | `test/accuracy/rom/` | the test ROM (`main.c`, `crt0.s`, `rom.ld`, `sound_data.s`, `accuracy_micro.inc`, `micro/*.mid` + `micro.cfg`) |
-| `test/accuracy/ref/mgba_render.c` | headless mgba render of the ROM at 48 kHz from frame 0, via `mAVStream.postAudioFrame` (one int16 pair per 65536 Hz DAC sample) into `m4a_blip` |
+| `test/accuracy/ref/mgba_render.c` | headless mgba render of the ROM at 48 kHz from frame 0, via `mAVStream.postAudioFrame` (one int16 pair per 65536 Hz DAC sample) into `m4a_resampler` |
 | `test/accuracy/ref/mgba_probe.c` | libmgba debugger probe: breakpoints on ROM labels, IO-write log, scheduler lateness (section 2, "Probe") |
 | `build/poryaaaa_render` | the engine's CLI renderer (`cmd/poryaaaa_render.c`) |
 | `test/accuracy/tools/accuracy.py` | renders both sides, aligns, measures, writes `build/accuracy/report.json` and a table |
@@ -73,7 +77,7 @@ Contents:
 | `test/accuracy/songs.json` | the corpus beyond the micro-tests |
 | `test/accuracy/baselines/` | saved reports (`<date>_<name>.json` / `.txt`) |
 | `poryaaaa_unit_tests` | `test/test_engine.c` |
-| `poryaaaa_blip_tests` | `m4a_blip` against mgba's blip_buf, bit-exact |
+| `poryaaaa_resampler_tests` | `m4a_resampler` against mgba's resampler, bit-exact |
 | `poryaaaa_song_tests build/accuracy/rom` | the `.s` parser against the ROM: every song (micro, vanilla music, SE, phonemes) relocated to its map address and compared byte for byte |
 
 Build: `cmake -B build -DACCURACY_POKEEMERALD_DIR=~/pokeemerald
@@ -110,6 +114,18 @@ shorter file.
   baseline family** (`baselines/<date>_midi-path-*`; the report's
   `"input"`, `"midi_quantize"`, `"gba_start_delay"`, `"gba_tempo_grid"`
   fields say which form) and are never compared with song-input reports.
+- **`--mixer hq`**: the HQ-mixer test ROM and `poryaaaa_render --hq-mixer`
+  (`docs/HQ-MIXER-ACCURACY.md`, section 4): a third axis of the baseline
+  family (`baselines/<date>_hq-*` for song input, `_hq-midi-path-*` for
+  MIDI input; the report's `"mixer"` field).  `compare_reports.py` refuses
+  to compare across `"input"` or `"mixer"`.
+- **`--pcm-rate <hz>`**: a test ROM built at another DirectSound mix rate
+  (`make RATE=<hz>`, `build/accuracy/rom[-hq]-<hz>`; `docs/HQ-MIXER-ACCURACY.md`,
+  section 4) and `poryaaaa_render --pcm-mix-rate <hz>`: a fourth axis
+  (`baselines/<date>_[hq-]<hz>-*`; the report's `"pcm_rate"` field, which
+  `compare_reports.py` also refuses to cross).  Measured at 21024 Hz on
+  both ROMs (step 11 there); the rate's micro references are not
+  committed.
 
 ### Corpus
 
@@ -207,7 +223,7 @@ What the engine models, measured with the probe:
 
 - **DAC at 65536 Hz.**  Emerald's `SOUND_MODE_DA_BIT_8` writes
   SOUNDBIAS_H = 0x40, so mgba samples every 256 cycles: four samples per
-  1024-cycle sample event, blip frames of 2048 cycles.
+  1024-cycle sample event, resampler frames of 2048 cycles.
 - **Output arithmetic**: squares / wave / noise are unipolar 0..15 ×
   8 × (1 + NR50 volume), then >> 2 (SOUNDCNT_H); PCM is int8 << 2; the sum
   + bias 0x200 is clamped to 0..0x3FF, then × 48 to int16.
@@ -280,14 +296,15 @@ DMA ring, the SOUNDBIAS stage and the boot replay above.
 renderer keeps its output, so output sample s is ROM time s · 2²⁴ / rate.
 The frame sequencer is hooked into `m4a_gba_run` ahead of a same-cycle
 sample event.  `m4a_engine_process` runs `run_until(now + 1024)` until the
-blip has enough samples, so the machine is up to a blip frame past a
+resampler has enough samples, so the machine is up to a resampler frame past a
 sample's cycle when that sample is returned (this matters for when host
 events land, section 5).
 
 ### Output stage
 
-- `plugin/m4a_blip.{h,c}`: an MIT reimplementation of blip_buf's
-  fast linear-delta path (the engine's resampler, and the reference's).
+- `plugin/m4a_resampler.{h,c}`: the two-tap linear delta-buffer
+  resampler, bit-exact with mgba's fast path (the engine's resampler, and
+  the reference's).
 - `plugin/m4a_psg.{h,c}`: the PSG ported from mgba `src/gb/audio.c` with
   GBA register semantics; two instances (the real one and the
   polyphony-debug shadow).
@@ -302,6 +319,15 @@ events land, section 5).
   m4aSoundMode's surround (DMA off, ring cleared, timer reload, DMA on,
   timer on one period later; the VCOUNT 159 wait is not modeled).  Config
   `pcm_mix_rate` / `--pcm-mix-rate` snap to the nearest table rate.
+  Before the boot replay has started, a rate change only sets the numbers
+  (the mode word is m4aSoundInit's own; the boot table turns the DMA and
+  timer on at the ROM's cycles, and its first `SampleFreqSet` pass runs at
+  the 224-sample period whatever the rate, as SoundInit's does); the ring
+  is `engine->pcmDmaBufSize` samples per side (1584, or 7 frames in HQ
+  mode at another rate).  The 21024 Hz builds of both test ROMs have their
+  own measured boot tables; other non-default rates replay the 13379 Hz
+  table of the mixer (`docs/HQ-MIXER-ACCURACY.md`, section 5 and
+  appendix B).
 
 ### Mixer (SoundMainRAM)
 
@@ -644,8 +670,8 @@ On the corpus this form is the `--song` render sample for sample.
   ROM starts the song, frame 3's SoundMain at `ROM_FIRST_TICK_CYCLE` =
   124773 + 2 · 280896 + 160 · 1232 + 197 = 883882 cycles.  Every event is
   dispatched `midiOrigin` = floor((883882 − 2048) · rate / 2²⁴) samples
-  later (2522 at 48 kHz): the last sample at least one blip frame before
-  that SoundMain, because the machine runs up to a blip frame past a
+  later (2522 at 48 kHz): the last sample at least one resampler frame before
+  that SoundMain, because the machine runs up to a resampler frame past a
   sample's cycle when the sample is dispatched (the nominal 2529 would put
   every first note one frame late).  The fade and natural tail move with
   it; an explicit `--total-duration-seconds` does not.
@@ -663,7 +689,7 @@ On the corpus this form is the `--song` render sample for sample.
     ceil(1.25 n); the game is 0.46 % slower than the MIDI's tempo map
     (59.7275 Hz VBlank).
   - Every event of grid frame j is dispatched at
-    `gba_tempo_grid_sample(j)` (the same blip-frame guard); several ticks
+    `gba_tempo_grid_sample(j)` (the same resampler-frame guard); several ticks
     of one frame share one sample, in order.  Loop passes add whole clocks
     (`gba_tempo_grid_pass_clock`); the loop-count fade and the natural tail
     move onto the grid.
@@ -763,6 +789,16 @@ first MTrk, and the host's order inside one tick.
   se_rain_stop fail the worst-1 s gate at it.  Not modeled: it would need
   instruction timing.  Confirm a suspected floor run with the probe's
   `.events` slot crossings.
+- **Channels above `maxPcmChannels`** (both mixers): SoundMainRAM
+  envelopes and mixes exactly `maxChans` channels, so a channel above a
+  lowered limit freezes with its status untouched; both ports process every
+  ON channel.  Reachable only by lowering the limit while notes play
+  (allocation is bounded by the limit); recorded by the step 12 review of
+  `docs/HQ-MIXER-ACCURACY.md`, not changed.
+- **Malformed loop data** (both mixers): a looped sample with `loopStart >
+  size` gives SoundMainRAM a negative loop length (the pointer moves
+  forward at the end and reads past the data); the ports clear the loop
+  flag and stop the channel at the end.  No pokeemerald sample has one.
 - **HQ mode's open bus is mgba's**: the HQ mixer's reversed end frame
   decodes every block of that frame from a wrapped address past the ROM;
   the port reproduces mgba's `GBALoadBad` (the prefetch word two

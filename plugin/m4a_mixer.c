@@ -34,7 +34,7 @@
  * clobber) that buffer exactly like sDecodingBuffer.
  */
 
-#define BUF GBA_PCM_DMA_BUF_SIZE
+#define BUF (engine->pcmDmaBufSize)   /* PCM_DMA_BUF_SIZE: the B half's offset */
 
 static inline uint32_t ld32(const int8_t *p)
 {
@@ -59,7 +59,7 @@ static inline uint32_t ror(uint32_t w, unsigned bits)
 /* _081DD174 / _081DD4F4: the channel stops in the middle of a word.  n is
  * the number of samples already rotated into the word before the one just
  * mixed (r5 >> 30); the remaining rotation lines the lanes up. */
-static inline void finish_word(int8_t *r5, uint32_t r6, uint32_t r7, int n)
+static inline void finish_word(const M4AEngine *engine, int8_t *r5, uint32_t r6, uint32_t r7, int n)
 {
     unsigned r0 = (unsigned)(3 - n) << 3;
     st32(r5 + BUF, ror(r7, r0));
@@ -364,7 +364,7 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
 stop_special:                                            /* _081DD4F4: mov r2, 0 */
     r2 = 0;
     r4->status = 0;
-    finish_word(r5, r6, r7, n);
+    finish_word(engine, r5, r6, r7, n);
 done_special:                                            /* _081DD4F0 */
     *pr2 = r2;
     *pr3 = data + i3;

@@ -20,7 +20,7 @@
  *     2 << resolution pending samples are produced: PSG (>> psgShift) plus
  *     FIFO (<< 2), SOUNDBIAS added and clamped to 10 bits, scaled by
  *     mgba's output gain (x48) and fed to the band-limited resampler as
- *     level deltas; blip frames are 2048 cycles.
+ *     level deltas; resampler frames are 2048 cycles.
  *
  * The m4a driver side (SoundMain at VBlank, m4aSoundVSync at VCOUNT 150)
  * lives in m4a_engine.c; this module only knows about the ring buffer it is
@@ -29,7 +29,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "m4a_blip.h"
+#include "m4a_resampler.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,8 +42,11 @@ extern "C" {
 #define GBA_FIFO_WORDS        8        /* 32 bytes */
 #define GBA_MAX_SAMPLES       16       /* per 1024-cycle sample event */
 #define GBA_SAMPLE_EVENT      1024     /* cycles between sample events */
-#define GBA_BLIP_FRAME        2048     /* cycles per resampler frame */
-#define GBA_PCM_DMA_BUF_SIZE  1584     /* m4a's PCM_DMA_BUF_SIZE, samples per side */
+#define GBA_RESAMPLER_FRAME        2048     /* cycles per resampler frame */
+#define GBA_PCM_DMA_BUF_SIZE  1584     /* m4a's PCM_DMA_BUF_SIZE, samples per side (the game's) */
+/* The largest ring the engine mixes into: the HQ mixer at another rate uses 7
+ * frames (the wiki's PCM_DMA_BUF_SIZE table; 42048 Hz -> 7 * 0x2C0). */
+#define GBA_PCM_DMA_BUF_MAX   (7 * 0x2C0)
 
 /* One 32-bit FIFO word: four consecutive PCM samples (int8 on the
  * hardware; held sign-extended here). */
@@ -84,9 +87,9 @@ typedef struct {
     int masterVolume;           /* mgba GBA_AUDIO_VOLUME_MAX = 0x100 */
 
     /* Resampler */
-    M4ABlip *left, *right;
+    M4AResampler *left, *right;
     int16_t lastLeft, lastRight;
-    int clock;                  /* cycles into the current blip frame */
+    int clock;                  /* cycles into the current resampler frame */
     double hostRate;
 
     /* SOUNDCNT_H routing (Emerald: A right, B left, both full, PSG 100%) */

@@ -38,6 +38,10 @@ Audio options:
   --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates
                               5734 7884 10512 13379 15768 18157 21024 26758 31536 36314
                               40137 42048 (nearest is used; default: 13379)
+  --hq-mixer                  ipatix HQ-mixer mode (the pret wiki's HQ mixer; default: the
+                              vanilla pokeemerald mixer)
+  --hq-stack-sp <addr>        HQ mode: sp at SoundMainRAM entry, the pre-cached paths' stack
+                              budget (default 0x03007DD0, the test ROM's; see docs/HQ-MIXER-ACCURACY.md)
   --tail <seconds>            Silence after last event, no loop markers (default: 3.0)
 
 Opt-in effect features (off by default; extend the stock m4a engine):
@@ -164,6 +168,7 @@ The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings ca
 | `respect_base_midi_key` | `0` | Opt-in: treat a PCM voice's key as the sample's base MIDI note so pressed notes play at the intended pitch |
 | `portamento` | `0` | Opt-in: enable the portamento glide effect (CC 5 = glide time in ticks) |
 | `pwm` | `0` | Opt-in: enable pulse-width modulation on CGB square channels (CC 0x17 / 0x19) |
+| `hq_mixer` | `0` | Mix DirectSound (PCM) with [ipatix's HQ mixer](https://github.com/ipatix/gba-hq-mixer) as the pret wiki installs it, instead of the stock mixer (see [HQ mixer mode](#hq-mixer-mode-ipatix)); `pcm_mix_rate` 7884 is not available in this mode and snaps to 13379 |
 | `quantize_events` | `transport` | Hold MIDI events to the next GBA frame: `transport` (while the DAW transport plays; never in the standalone), `on` (always), `off` (never) |
 | `sound_data_paths` | *(auto)* | Extra `.inc` files for sample symbols (semicolon-separated, relative to project root) |
 | `voicegroup_paths` | *(auto)* | Extra voicegroup search directories or files |
@@ -179,7 +184,7 @@ The plugin opens a settings panel built with [Dear ImGui](https://github.com/oco
 - **General** tab — **Project Root** / **Voicegroup**: edit and press **Reload** to apply; **Song Volume** (0–127), **Reverb** (0–127), **Polyphony**, and **PCM Mix Rate** take effect immediately
 - **Voices** tab — inspect and edit individual voices in the loaded voicegroup
 - **Polyphony** tab — realtime monitor for debugging polyphony overflow
-- **Options** menu — toggle the opt-in effect features (Respect Base MIDI Key, Portamento, Pulse-Width Modulation) and choose **Quantize to GBA Frames** (Follow Transport / Always / Never); hover an item for help text. Changes take effect immediately (the quantize choice at the next audio block) and are saved per project.
+- **Options** menu — toggle the opt-in effect features (Respect Base MIDI Key, Portamento, Pulse-Width Modulation), **HQ Mixer (ipatix)**, and choose **Quantize to GBA Frames** (Follow Transport / Always / Never); hover an item for help text. Changes take effect immediately (the quantize choice at the next audio block) and are saved per project.
 
 On Windows the GUI is embedded inside the DAW's FX window. On Linux/macOS it opens as a floating window.
 
@@ -300,6 +305,14 @@ Both ways of defining synth voices are recognized:
 
 - **Binary samples**: a `.bin` sample with size 0 whose data bytes select the waveform and pulse parameters, referenced from `direct_sound_data.inc` like any other sample.
 - **Assembly macros**: inline `set_synth_pulse p1, p2, p3, p4`, `set_synth_saw`, and `set_synth_triangle` definitions, auto-discovered from `sound/direct_sound_synth_data.inc`. The alias names `set_synth_custom`, `set_synth_25`, and `set_synth_50` are also accepted.
+
+In the stock mixer the synth tones are an extension (the stock engine would play a zero-size sample as a click); in HQ mixer mode they are the HQ mixer's own synth paths, measured against the ROM.
+
+### HQ mixer mode (ipatix)
+
+Many hacks install [ipatix's High-Quality Audio Mixer](https://github.com/ipatix/gba-hq-mixer) following the [pret wiki](https://github.com/pret/pokeemerald/wiki/Implementing-ipatix's-High-Quality-Audio-Mixer): a replacement for the game's `SoundMainRAM` that mixes the DirectSound (PCM) channels into a 16-bit buffer and quantizes once, with noise shaping and saturation, so chords no longer wrap or pick up 8-bit rounding noise per channel. Poryaaaa reproduces that mixer (HQ-Mixer rev 4.0 as the wiki installs it, with reverb and the DMA copy enabled) as an opt-in mode, off by default: **Options → HQ Mixer (ipatix)** in the plugin, `hq_mixer=1` in `poryaaaa.cfg`, or `--hq-mixer` with `poryaaaa_render`. The choice is saved in the DAW project state.
+
+What changes with the mode: only the PCM mix (the sequencer, the PSG channels, the reverb taps and the timing are the same). The HQ mixer has no 7884 Hz mix rate (its frame is not a multiple of 8 samples), so that rate is not offered while the mode is on; a looped compressed sample does not loop (the mixer has no support for it); and samples that need more than the mixer's stack budget in a frame are skipped for that frame, as on the GBA (the budget is the test ROM's; `--hq-stack-sp` sets the `sp` value for another ROM). Both modes null against mgba on the project's test ROMs, at the games' 13379 Hz mix rate and at 21024 Hz (the wiki's example of a raised engine rate, where the HQ mixer's DMA ring grows to 7 frames as the wiki prescribes; the other table rates are mixed through the same code but are unmeasured); the details, the measurements and the known residuals are in [docs/HQ-MIXER-ACCURACY.md](docs/HQ-MIXER-ACCURACY.md).
 
 ## GBA source reference
 

@@ -35,7 +35,7 @@
  * not modeled.
  */
 
-#define BUF GBA_PCM_DMA_BUF_SIZE
+#define BUF (engine->pcmDmaBufSize)   /* PCM_DMA_BUF_SIZE: the B half's offset */
 
 /* C_channel_state_loop, the SF_START branch (section 2, "Channel init").
  * m4a_pcm_channel_start_at has already turned the XCMD 0x0D start offset
@@ -267,6 +267,14 @@ static bool fix_path(M4APCMChannel *r4, uint32_t *r5, int32_t r8, int32_t r2, in
         loopStart = r4->wav->data + r4->wav->loopStart;  /* add r3, r0 (not compressed) */
         loopLen = (int32_t)(r4->wav->size - r4->wav->loopStart);
     }
+    /* Host guard, not in the source: a FIX channel started at its size
+     * (an XCMD start offset clamped to the end) enters with count 0, which
+     * the length check turns into 0x3FFFFFFF blocks (the ROM reads through
+     * memory until the frame is full).  Stop the channel instead. */
+    if (r2 <= 0) {
+        r4->status = 0;
+        return true;
+    }
     for (;;) {
         /* C_fixed_mixing_length_check */
         int32_t lr = ((r2 > r8 ? r8 : r2) - 1) >> 2;
@@ -319,7 +327,9 @@ static bool fix_path(M4APCMChannel *r4, uint32_t *r5, int32_t r8, int32_t r2, in
 #define HQ_BLK          64                /* BDPCM_BLK_SIZE */
 #define HQ_BLK_STRIDE   0x21              /* BDPCM_BLK_STRIDE */
 #define HQ_STACK_BOUND  0x03007900u       /* stack_boundary_literal */
-#define HQ_STACK_MAX    0x600             /* > any budget below the IRQ stack top */
+#define HQ_STACK_MAX    0x700             /* 0x03008000 - HQ_STACK_BOUND: the largest budget
+                                           * any sp in IWRAM allows, so the host cap never
+                                           * skips a frame the ROM's check would mix */
 
 /* delta_lookup_table as F_decode_compressed indexes it.  The first pair's
  * delta is `ldrb r1, [r12, r3]` with the WHOLE second byte of the block,

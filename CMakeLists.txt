@@ -86,7 +86,7 @@ set(ENGINE_SOURCES
     plugin/m4a_tables.c
     plugin/m4a_mixer.c
     plugin/m4a_hq_mixer.c
-    plugin/m4a_blip.c
+    plugin/m4a_resampler.c
     plugin/m4a_gba.c
     plugin/m4a_psg.c
     plugin/m4a_song.c
@@ -305,7 +305,7 @@ set(ACCURACY_POKEEMERALD_DIR "" CACHE PATH "pokeemerald tree used to build the a
 set(ACCURACY_MGBA_DIR "" CACHE PATH "mgba source tree containing build/libmgba-static.a")
 
 if(ACCURACY_MGBA_DIR)
-    add_executable(mgba_render test/accuracy/ref/mgba_render.c plugin/m4a_blip.c)
+    add_executable(mgba_render test/accuracy/ref/mgba_render.c plugin/m4a_resampler.c)
     target_include_directories(mgba_render PRIVATE
         ${CMAKE_SOURCE_DIR}/plugin
         ${ACCURACY_MGBA_DIR}/include
@@ -323,15 +323,15 @@ if(ACCURACY_MGBA_DIR)
         endif()
     endforeach()
 
-    # Bit-exactness test of the engine's resampler against blip_buf's fast
-    # linear path (the LGPL reference is only ever linked into this test).
-    add_executable(poryaaaa_blip_tests
-        test/test_blip.c
-        plugin/m4a_blip.c
+    # Bit-exactness test of the engine's resampler against mgba's (blip_buf's
+    # fast linear path); the reference is linked into this test only.
+    add_executable(poryaaaa_resampler_tests
+        test/test_resampler.c
+        plugin/m4a_resampler.c
     plugin/m4a_gba.c
         ${ACCURACY_MGBA_DIR}/src/third-party/blip_buf/blip_buf.c
     )
-    target_include_directories(poryaaaa_blip_tests PRIVATE
+    target_include_directories(poryaaaa_resampler_tests PRIVATE
         plugin
         ${ACCURACY_MGBA_DIR}/include
         ${ACCURACY_MGBA_DIR}/build/include
@@ -368,6 +368,26 @@ if(ACCURACY_POKEEMERALD_DIR)
         COMMENT "Accuracy: checking the .s song parser against the HQ ROM"
         VERBATIM
     )
+    # Both ROMs at another DirectSound mix rate (RATE=<hz>; docs/HQ-MIXER-ACCURACY.md,
+    # step 11): accuracy_rom_<hz> / accuracy_rom_hq_<hz> into rom-<hz> / rom-hq-<hz>,
+    # what accuracy.py --pcm-rate <hz> plays.
+    set(ACCURACY_PCM_RATES "21024" CACHE STRING "extra sound-mode rates (Hz) to build the accuracy test ROMs at")
+    foreach(_hz ${ACCURACY_PCM_RATES})
+        add_custom_target(accuracy_rom_${_hz}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/accuracy/rom-${_hz}
+            COMMAND $(MAKE) -C ${CMAKE_CURRENT_SOURCE_DIR}/test/accuracy/rom RATE=${_hz}
+                    POKEEMERALD=${ACCURACY_POKEEMERALD_DIR} BUILD=${CMAKE_BINARY_DIR}/accuracy/rom-${_hz}
+            COMMENT "Building the accuracy test ROM at ${_hz} Hz with agbcc"
+            VERBATIM
+        )
+        add_custom_target(accuracy_rom_hq_${_hz}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/accuracy/rom-hq-${_hz}
+            COMMAND $(MAKE) -C ${CMAKE_CURRENT_SOURCE_DIR}/test/accuracy/rom MIXER=hq RATE=${_hz}
+                    POKEEMERALD=${ACCURACY_POKEEMERALD_DIR} BUILD=${CMAKE_BINARY_DIR}/accuracy/rom-hq-${_hz}
+            COMMENT "Building the HQ-mixer accuracy test ROM at ${_hz} Hz with agbcc"
+            VERBATIM
+        )
+    endforeach()
 endif()
 
 if(ACCURACY_POKEEMERALD_DIR AND ACCURACY_MGBA_DIR)

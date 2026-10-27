@@ -245,8 +245,15 @@ static void render_general_tab(M4AGuiState *gui)
         int cur = gui->settings.pcmFreqMode;
         if (cur < M4A_PCM_FREQ_MODE_MIN || cur > M4A_PCM_FREQ_MODE_MAX)
             cur = M4A_PCM_FREQ_MODE_DEFAULT;
+        /* The HQ mixer has no 7884 Hz mode (mode 2): the engine and the
+         * plugin snap it to the default, so the combo offers and shows the
+         * same thing while HQ mode is on. */
+        if (gui->settings.hqMixer && cur == 2)
+            cur = M4A_PCM_FREQ_MODE_DEFAULT;
         if (ImGui::BeginCombo("PCM Mix Rate", names[cur])) {
             for (int m = M4A_PCM_FREQ_MODE_MIN; m <= M4A_PCM_FREQ_MODE_MAX; m++) {
+                if (gui->settings.hqMixer && m == 2)
+                    continue;
                 bool selected = (m == cur);
                 if (ImGui::Selectable(names[m], selected)) {
                     gui->settings.pcmFreqMode = (uint8_t)m;
@@ -261,7 +268,8 @@ static void render_general_tab(M4AGuiState *gui)
             "Rate the DirectSound (PCM) channels are mixed at: the m4a sound mode's\n"
             "frequency setting (SOUND_MODE_FREQ_xxxxx).  Pokemon games use 13379 Hz,\n"
             "so high notes alias as in-game; a game that sets a higher rate sounds\n"
-            "cleaner, at a CPU cost it would pay too.");
+            "cleaner, at a CPU cost it would pay too.  (7884 Hz is not offered\n"
+            "while the HQ Mixer is on: its frame is not a multiple of 8 samples.)");
     }
 }
 
@@ -692,6 +700,18 @@ static void render_menu_bar(M4AGuiState *gui)
         toggle_menu_item(gui, "Pulse-Width Modulation", &gui->settings.pwmEnabled,
             "Enable pulse-width modulation on the CGB square channels\n"
             "(CC 0x17 = duty-cycle pattern, CC 0x19 = modulation speed).");
+        ImGui::Separator();
+        toggle_menu_item(gui, "HQ Mixer (ipatix)", &gui->settings.hqMixer,
+            "Mix the DirectSound (PCM) channels with ipatix's High-Quality Audio\n"
+            "Mixer, as the pret wiki installs it in pokeemerald, instead of the\n"
+            "stock SoundMainRAM: a 16-bit mix with one final quantization, so\n"
+            "chords no longer wrap or add 8-bit rounding noise per channel.\n"
+            "Use it when your project has the HQ mixer installed.  PSG channels\n"
+            "are unaffected; 7884 Hz is not an HQ mix rate (it snaps to 13379).");
+        if (gui->settings.hqMixer && gui->settings.pcmFreqMode == 2) {
+            gui->settings.pcmFreqMode = M4A_PCM_FREQ_MODE_DEFAULT;
+            gui->settingsChanged = true;
+        }
         ImGui::Separator();
         if (ImGui::BeginMenu("Quantize to GBA Frames")) {
             uint8_t *mode = &gui->settings.eventLatchMode;

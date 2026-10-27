@@ -5,13 +5,25 @@
 # song table, every vanilla song compiled with mid2agb exactly as the game
 # does) plus the micro-test voicegroup and songs under micro/.
 #
-#   make POKEEMERALD=~/pokeemerald [BUILD=build] [MIXER=vanilla|hq]
+#   make POKEEMERALD=~/pokeemerald [BUILD=build] [MIXER=vanilla|hq] [RATE=<hz>]
 #
 # MIXER=hq builds the same ROM with ipatix's HQ mixer installed the way the
 # pret wiki describes (docs/HQ-MIXER-ACCURACY.md, section 4): hq/m4a_1.s in
 # place of the tree's src/m4a_1.s, the two-line m4a.c change (hq/m4a.c.sed)
 # and the atomic DmaSetUnchecked (hq/include/gba/macro.h first on the
 # include path).  Everything else, AgbMain included, is the vanilla build.
+#
+# RATE=<hz> (default 13379, the games' rate) builds the ROM at another
+# sound-mode rate (5734 10512 13379 15768 18157 21024 26758 31536 36314 40137
+# 42048; 7884 only with MIXER=vanilla): m4aSoundInit's m4aSoundMode word gets
+# SOUND_MODE_FREQ_<hz> (m4a.c line 79, the wiki's "engine rate" line; SoundInit's
+# own SampleFreqSet(SOUND_MODE_FREQ_13379) is untouched, as in the game).  With
+# MIXER=hq the wiki's two rate-dependent sizes follow: hq_buffer_ptr[] is the
+# rate's frame length and PCM_DMA_BUF_SIZE becomes 7 frames (the wiki's table,
+# docs/HQ-MIXER-ACCURACY.md appendix C) in both include/gba/m4a_internal.h and
+# constants/m4a_constants.inc (generated copies under $(BUILD), first on the
+# include paths).  A vanilla ROM at another rate keeps the define at 1584
+# (the game's pcmDmaPeriod = 1584 / frame rule).
 #
 # Requires: agbcc installed in <pokeemerald>/tools/agbcc, the pokeemerald tools
 # built (mid2agb, gbafix) and libagbsyscall built, arm-none-eabi binutils.
@@ -22,6 +34,36 @@ SHELL := /bin/bash
 POKEEMERALD ?= $(HOME)/pokeemerald
 BUILD ?= build
 MIXER ?= vanilla
+RATE ?= 13379
+
+# gPcmSamplesPerVBlankTable: the frame length (samples per VBlank) of each
+# sound-mode rate, as the HQ mixer's FRAME_LENGTH_* table and the wiki give it.
+FRAME_5734  := 0x60
+FRAME_7884  := 0x84
+FRAME_10512 := 0xB0
+FRAME_13379 := 0xE0
+FRAME_15768 := 0x108
+FRAME_18157 := 0x130
+FRAME_21024 := 0x160
+FRAME_26758 := 0x1C0
+FRAME_31536 := 0x210
+FRAME_36314 := 0x260
+FRAME_40137 := 0x2A0
+FRAME_42048 := 0x2C0
+FRAME := $(FRAME_$(RATE))
+ifeq ($(FRAME),)
+$(error RATE must be one of the m4a sound-mode rates (5734 7884 10512 13379 15768 18157 21024 26758 31536 36314 40137 42048))
+endif
+ifeq ($(MIXER)_$(RATE),hq_7884)
+$(error the HQ mixer does not support 7884 Hz (frame 0x84 is not a multiple of 8))
+endif
+# The wiki's PCM_DMA_BUF_SIZE for the HQ mixer with reverb: 7 frames at a raised
+# (or lowered) rate; the game's 1584 (7 * 224 + 16) stays at the default rate.
+ifeq ($(RATE),13379)
+HQ_PCM_DMA_BUF_SIZE := 1584
+else
+HQ_PCM_DMA_BUF_SIZE := $(shell printf '%d' $$((7 * $(FRAME))))
+endif
 
 AGBCC    := $(POKEEMERALD)/tools/agbcc
 PREFIX   ?= arm-none-eabi-
@@ -43,12 +85,28 @@ ifeq ($(MIXER),hq)
 HQ_CPPFLAGS := -iquote $(ABS_ROMDIR)/hq/include
 M4A_1_SRC   := $(ABS_ROMDIR)/hq/m4a_1.s
 M4A_C_SRC   := $(BUILD)/m4a.c
+M4A_C_SED   := -f hq/m4a.c.sed -e 's/hq_buffer_ptr\[0xE0\]/hq_buffer_ptr[$(FRAME)]/'
+ifneq ($(RATE),13379)
+# The resized ring: generated m4a_internal.h (C) and m4a_constants.inc (the
+# mixer's .include, redirected to the copy) with the wiki's value.
+HQ_CPPFLAGS := -iquote $(ABS_BUILD)/include $(HQ_CPPFLAGS)
+M4A_1_SRC   := $(ABS_BUILD)/m4a_1.s
+M4A_HDR_DEP := $(BUILD)/include/gba/m4a_internal.h
+endif
 else ifeq ($(MIXER),vanilla)
 HQ_CPPFLAGS :=
 M4A_1_SRC   := $(POKEEMERALD)/src/m4a_1.s
 M4A_C_SRC   := $(POKEEMERALD)/src/m4a.c
+M4A_C_SED   :=
+ifneq ($(RATE),13379)
+M4A_C_SRC   := $(BUILD)/m4a.c
+endif
 else
 $(error MIXER must be vanilla or hq)
+endif
+ifneq ($(RATE),13379)
+# m4aSoundInit's mode word only (the `| SOUND_MODE_FREQ_13379` line).
+M4A_C_SED += -e 's/| SOUND_MODE_FREQ_13379$$/| SOUND_MODE_FREQ_$(RATE)/'
 endif
 
 CPPFLAGS := $(HQ_CPPFLAGS) -iquote $(POKEEMERALD)/include -Wno-trigraphs -DMODERN=0 \
@@ -94,10 +152,23 @@ endef
 
 $(BUILD)/main.o: main.c
 	$(call COMPILE_C,$(CC1))
-$(BUILD)/m4a.c: $(POKEEMERALD)/src/m4a.c hq/m4a.c.sed
+$(BUILD)/m4a.c: $(POKEEMERALD)/src/m4a.c hq/m4a.c.sed Makefile
 	@mkdir -p $(@D)
-	sed -f hq/m4a.c.sed $< > $@
-$(BUILD)/m4a.o: $(M4A_C_SRC) $(if $(HQ_CPPFLAGS),hq/include/gba/macro.h)
+	sed $(M4A_C_SED) $< > $@
+	@grep -q 'SOUND_MODE_FREQ_$(RATE)$$' $@ || { echo "rate line not patched in $@" >&2; exit 1; }
+$(BUILD)/include/gba/m4a_internal.h: $(POKEEMERALD)/include/gba/m4a_internal.h Makefile
+	@mkdir -p $(@D)
+	sed -e 's/^#define PCM_DMA_BUF_SIZE 1584\b/#define PCM_DMA_BUF_SIZE $(HQ_PCM_DMA_BUF_SIZE)/' $< > $@
+	@grep -q '^#define PCM_DMA_BUF_SIZE $(HQ_PCM_DMA_BUF_SIZE)\b' $@ || { echo "PCM_DMA_BUF_SIZE not patched in $@" >&2; exit 1; }
+$(BUILD)/m4a_constants.inc: $(POKEEMERALD)/constants/m4a_constants.inc Makefile
+	@mkdir -p $(@D)
+	sed -e 's/^\(\s*\.equiv PCM_DMA_BUF_SIZE,\s*\)1584\b/\1$(HQ_PCM_DMA_BUF_SIZE)/' $< > $@
+	@grep -q 'PCM_DMA_BUF_SIZE, $(HQ_PCM_DMA_BUF_SIZE)\b' $@ || { echo "PCM_DMA_BUF_SIZE not patched in $@" >&2; exit 1; }
+$(BUILD)/m4a_1.s: hq/m4a_1.s $(BUILD)/m4a_constants.inc Makefile
+	@mkdir -p $(@D)
+	sed -e 's|^\(\s*\.include "\)constants/m4a_constants.inc"|\1$(ABS_BUILD)/m4a_constants.inc"|' $< > $@
+	@grep -q '$(ABS_BUILD)/m4a_constants.inc' $@ || { echo "include not redirected in $@" >&2; exit 1; }
+$(BUILD)/m4a.o: $(M4A_C_SRC) $(if $(HQ_CPPFLAGS),hq/include/gba/macro.h) $(M4A_HDR_DEP)
 	$(call COMPILE_C,$(CC1_OLD))
 $(BUILD)/m4a_tables.o: $(POKEEMERALD)/src/m4a_tables.c
 	$(call COMPILE_C,$(CC1))
@@ -116,7 +187,7 @@ $(BUILD)/crt0.o: crt0.s
 	@mkdir -p $(@D)
 	$(AS) $(ASFLAGS) -o $@ $<
 $(BUILD)/m4a_1.o: $(M4A_1_SRC)
-	$(call PREPROC_AS,$<)
+	$(call PREPROC_AS,$(abspath $<))
 $(BUILD)/sound_data.s: sound_data.s accuracy_micro.inc accuracy_micro_synth.inc $(BUILD)/micro_song_table.inc
 	@mkdir -p $(@D)
 	sed -e 's|@ROMDIR@|$(ABS_ROMDIR)|g' -e 's|@BUILD@|$(ABS_BUILD)|g' $< > $@

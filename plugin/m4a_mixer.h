@@ -21,7 +21,7 @@ extern "C" {
 void m4a_sound_main_ram(M4AEngine *engine, int frameOffset, int pcmDmaCounter);
 
 /* The mix of a single channel into one frame of a buffer laid out like the
- * DMA ring: `frame` holds the right (A) bytes, `frame + GBA_PCM_DMA_BUF_SIZE`
+ * DMA ring: `frame` holds the right (A) bytes, `frame + pcmDmaBufSize` (PCM_DMA_BUF_SIZE)
  * the left (B) bytes.  The envelope step is not run here. */
 void m4a_mixer_mix_channel(M4AEngine *engine, M4APCMChannel *ch, int8_t *frame);
 

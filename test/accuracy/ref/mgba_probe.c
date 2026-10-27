@@ -116,6 +116,7 @@ static long gFrames;
 struct Sym { uint32_t addr; const char* name; };
 static struct Sym gSyms[256]; static int gNumSyms;
 static int gHqMixer;   /* HQ mixer labels present: log sp at SoundMainRAM_Buffer, the registers at C_* / F_* */
+static uint32_t gDma1Sad, gDma2Sad;   /* REG_DMA1SAD / REG_DMA2SAD as SoundInit wrote them: B = A + PCM_DMA_BUF_SIZE */
 
 #define MAX_FRAMES 4096
 #define MAX_WRITES 96
@@ -285,6 +286,11 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 	struct FrameRec* fr = frameFor(t, &rel);
 	if (reason == DEBUGGER_ENTER_WATCHPOINT) {
 		fprintf(gOut, "%10d f%u v%3d W %08X <- %08X (old %08X)\n", t, fc, vc, info->address, info->type.wp.newValue, info->type.wp.oldValue);
+		/* SoundInit's DMA source addresses: pcmBuffer and pcmBuffer + PCM_DMA_BUF_SIZE
+		 * (the B half's offset for the ring dump; 1584 in the game, 7 frames in an
+		 * HQ ROM built at another rate). */
+		if (info->address == 0x040000BC) gDma1Sad = info->type.wp.newValue;
+		if (info->address == 0x040000C8) gDma2Sad = info->type.wp.newValue;
 		if (fr && info->address >= 0x04000060 && info->address < 0x040000A0 && fr->numWrites < MAX_WRITES) {
 			fr->writes[fr->numWrites].reg = (uint8_t) (info->address & 0xFF);
 			fr->writes[fr->numWrites].value = (uint8_t) info->type.wp.newValue;
@@ -310,13 +316,15 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 			        cpu->gprs[0], cpu->gprs[1], cpu->gprs[2], cpu->gprs[3], cpu->gprs[4], cpu->gprs[5], cpu->gprs[6], cpu->gprs[7],
 			        cpu->gprs[8], cpu->gprs[9], cpu->gprs[10], cpu->gprs[11], cpu->gprs[12], cpu->gprs[13], cpu->gprs[14]);
 			if (!strcmp(name, "C_downsampler_return")) {
-				/* the ring slot the downsampler just wrote: r9 = its end on the A side, B is PCM_DMA_BUF_SIZE further */
+				/* the ring slot the downsampler just wrote: r9 = its end on the A side, B is
+				 * PCM_DMA_BUF_SIZE further (DMA2SAD - DMA1SAD; 0x630 in the game's build) */
 				uint32_t n = rd32(ADDR_gSoundInfo + 0x10), e = cpu->gprs[9];
+				uint32_t bOff = (gDma2Sad > gDma1Sad && gDma2Sad - gDma1Sad <= 0x2000) ? gDma2Sad - gDma1Sad : 0x630;
 				if (n >= 8 && n <= 0x2C0) {
 					fprintf(gOut, " ringA=");
 					for (uint32_t i = e - n; i < e; ++i) fprintf(gOut, "%02X", rd8(i));
 					fprintf(gOut, " ringB=");
-					for (uint32_t i = e - n; i < e; ++i) fprintf(gOut, "%02X", rd8(i + 0x630));
+					for (uint32_t i = e - n; i < e; ++i) fprintf(gOut, "%02X", rd8(i + bOff));
 				}
 			}
 			if (!strcmp(name, "C_select_highspeed_codepath_vla_r3")) {

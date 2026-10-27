@@ -42,7 +42,16 @@ exit path and what it stores, the arithmetic quirks (`bic 0x3F800000`,
 `tst 0x80; addne`, the word-sized xpi store), the first-call setups, the
 shared buffers, and host-pointer or UB hazards.  For the sequencer the
 equivalent is MPlayMain and the ply_* handlers; for the PSG, mgba's
-`src/gb/audio.c`; for CgbSound, m4a.c's CgbSound.
+`src/gb/audio.c`; for CgbSound, m4a.c's CgbSound.  For the HQ mixer
+(`plugin/m4a_hq_mixer.c`, `plugin/m4a_synth.h`): the vendored newmix file
+`test/accuracy/rom/hq/m4a_1.s` lines 88-1210 (`SoundMainRAM` ..
+`SoundMainRAM_End`; the label map is appendix A of
+`docs/HQ-MIXER-ACCURACY.md`), never ipatix's master branch or eventide's
+copy; the checks are the condition codes (`mulne` / `mlane` / `subpls`
+and whose flags they read), the packed-word borrows, the self-modified
+block selection, the stack check against `0x03007900`, the open-bus
+decode of the reversed end frame, and every store at `C_end_mixing` /
+`C_mixing_end_store` / the three status-0 stores.
 
 **Reviewer 2: the data and plumbing around it.**  Loader struct layouts
 and field values against `m4a_internal.h`, the sample converter
@@ -51,7 +60,10 @@ and the ROM's placement (`sound/direct_sound_data.inc`), with the test ROM
 and map available for byte checks (`build/accuracy/rom/accuracy_test.gba`,
 `build/accuracy/rom/accuracy_test.map`); any option or enum against
 its m4a.c origin; plugin state save/load byte order and old-save
-compatibility (`plugin/m4a_plugin.c` state_save / state_load), config keys,
+compatibility (`plugin/m4a_plugin.c` state_save / state_load: the bytes
+appended after `maxPcmChannels` in order -- base key, portamento, PWM,
+the mix rate float, the latch byte, the HQ-mixer byte -- each optional on
+load), config keys,
 GUI bounds, CLI messages; and a grep for stale uses of removed fields
 across plugin/, cmd/, test/.
 
@@ -79,7 +91,7 @@ For each claim, in order of expected impact:
    it.
 
 Then refresh the baseline from a full default harness run, re-run
-`poryaaaa_unit_tests`, `poryaaaa_blip_tests` and `poryaaaa_song_tests
+`poryaaaa_unit_tests`, `poryaaaa_resampler_tests` and `poryaaaa_song_tests
 build/accuracy/rom`, and commit the fixes, the doc changes and the
 baseline together.
 

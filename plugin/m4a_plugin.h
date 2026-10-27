@@ -23,6 +23,10 @@ typedef struct {
     bool respectBaseMidiKey;
     bool portamentoEnabled;
     bool pwmEnabled;
+    /* HQ-mixer mode (ipatix's HQ mixer in place of SoundMainRAM; persisted;
+     * default off).  7884 Hz is not an HQ mix rate: pcmFreqMode 2 snaps to
+     * the default whenever this goes on (hq_snap_pcm_mode). */
+    bool hqMixer;
     /* MIDI event latch override (M4ALatchMode: transport / on / off;
      * persisted).  Written by the main thread (GUI, state load), read and
      * applied by plugin_process at the top of each block and at each

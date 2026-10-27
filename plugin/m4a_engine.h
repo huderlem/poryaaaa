@@ -432,19 +432,24 @@ struct M4AEngine {
      * docs/HQ-MIXER-ACCURACY.md).  Off (the default) the engine is the
      * vanilla pokeemerald engine.  On, m4a_engine_boot replays the HQ test
      * ROM's boot timeline (the larger IWRAM copy moves m4aSoundInit's
-     * register writes, and the final timer-0 start by +4 cycles); the
-     * mixer itself follows in later steps of that document. */
+     * register writes, and the final timer-0 start by +4 cycles) and
+     * sound_main mixes through m4a_hq_sound_main_ram (m4a_hq_mixer.c)
+     * instead of m4a_sound_main_ram.  Set through m4a_engine_set_hq_mixer. */
     bool hqMixer;
     int32_t pcmSamplesPerVBlank; /* samples mixed per VBlank frame */
     int32_t pcmFreq;             /* SoundInfo.pcmFreq for that count */
     int32_t pcmDivFreq;          /* SoundInfo.divFreq */
-    uint8_t pcmDmaPeriod;        /* VBlanks per DMA restart (PCM_DMA_BUF_SIZE / spv) */
+    /* PCM_DMA_BUF_SIZE of the configuration: the game's 1584 (vanilla at any
+     * rate, the HQ mixer at 13379 Hz) or, HQ at another rate, 7 frames as the
+     * wiki resizes the define (docs/HQ-MIXER-ACCURACY.md, appendix C). */
+    int32_t pcmDmaBufSize;
+    uint8_t pcmDmaPeriod;        /* VBlanks per DMA restart (pcmDmaBufSize / spv) */
     int8_t pcmDmaCounter;        /* SoundInfo.pcmDmaCounter */
 
     /* Output stage: the GBA hardware the mixed PCM and the PSG go through
      * (timer-driven FIFOs, DAC sample grid, bias, host-rate resampler), the
      * PCM ring buffer SoundMain writes (A = right, then B = left, each
-     * GBA_PCM_DMA_BUF_SIZE samples), and the scheduler state for the driver's two
+     * pcmDmaBufSize samples), and the scheduler state for the driver's two
      * per-frame interrupts.  See m4a_gba.h and the scheduler notes in
      * m4a_engine.c. */
     M4AGbaAudio gba;
@@ -453,11 +458,11 @@ struct M4AEngine {
     M4APsg psg[2];
     /* SoundInfo.pcmBuffer: the DMA ring, A (right) then B (left), int8 as
      * the hardware FIFOs read it. */
-    int8_t pcmBuffer[GBA_PCM_DMA_BUF_SIZE * 2];
+    int8_t pcmBuffer[GBA_PCM_DMA_BUF_MAX * 2];
     /* sDecodingBuffer: the one DPCM block decoder shared by every channel. */
     int8_t decodingBuffer[M4A_DPCM_BLOCK_SAMPLES];
     /* A discarded frame the muted pool mixes into (polyphony debug). */
-    int8_t mutedFrame[GBA_PCM_DMA_BUF_SIZE * 2];
+    int8_t mutedFrame[GBA_PCM_DMA_BUF_MAX * 2];
     /* HQ-mixer mode (m4a_hq_mixer.c): hq_buffer_ptr, the 32-bit mix buffer
      * (int16 left << 16 | int16 right per output sample) that carries the
      * next frame's reverb seed between frames; the muted pool's copy; the

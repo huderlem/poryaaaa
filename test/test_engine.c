@@ -251,6 +251,60 @@ static void test_engine_init(void)
     m4a_engine_set_pcm_freq_mode(&engine, 99);
     ASSERT_EQ(engine.pcmSamplesPerVBlank, 224, "pcm freq modes: out of range selects the default");
 
+    /* PCM_DMA_BUF_SIZE per configuration (docs/HQ-MIXER-ACCURACY.md, step
+     * 11): the game's 1584 for vanilla at any rate and for HQ at 13379 Hz;
+     * 7 frames (the wiki's table) for HQ at another rate, whichever of the
+     * two setters comes last. */
+    ASSERT_EQ(engine.pcmDmaBufSize, 1584, "ring size: vanilla 13379 = 1584");
+    m4a_engine_set_pcm_freq_mode(&engine, 7);                 /* 21024 Hz */
+    ASSERT_EQ(engine.pcmDmaBufSize, 1584, "ring size: vanilla 21024 keeps 1584");
+    ASSERT_EQ(engine.pcmDmaPeriod, 4, "ring size: vanilla 21024 DMA period 1584 / 352");
+    m4a_engine_set_hq_mixer(&engine, true);                   /* HQ after the rate */
+    ASSERT_EQ(engine.pcmDmaBufSize, 2464, "ring size: HQ 21024 = 7 * 352");
+    ASSERT_EQ(engine.pcmDmaPeriod, 7, "ring size: HQ 21024 DMA period 7");
+    ASSERT_EQ(engine.gba.ringSize, 2464, "ring size: the DMA reader follows");
+    m4a_engine_set_pcm_freq_mode(&engine, 4);
+    ASSERT_EQ(engine.pcmDmaBufSize, 1584, "ring size: HQ 13379 = 1584 (the game's define stays)");
+    ASSERT_EQ(engine.pcmDmaPeriod, 7, "ring size: HQ 13379 DMA period 7");
+    m4a_engine_set_pcm_freq_mode(&engine, 12);                /* the rate after HQ */
+    ASSERT_EQ(engine.pcmDmaBufSize, 7 * 704, "ring size: HQ 42048 = 7 * 704 (the largest ring)");
+    ASSERT(7 * 704 <= GBA_PCM_DMA_BUF_MAX, "ring size: the buffers hold the largest ring");
+    m4a_engine_set_hq_mixer(&engine, false);
+    ASSERT_EQ(engine.pcmDmaBufSize, 1584, "ring size: back to vanilla = 1584");
+    ASSERT_EQ(engine.pcmDmaPeriod, 2, "ring size: vanilla 42048 DMA period 1584 / 704");
+    m4a_engine_set_pcm_freq_mode(&engine, 4);
+
+    /* Re-applying the current mixer setting keeps the HQ state the ROM
+     * carries across frames (the reverb seed in hq_buffer, the noise-shape
+     * residuals, CHN_SAMPLE_STOR): the plugin re-applies its settings on
+     * every GUI change, which must not disturb a playing note.  Switching
+     * the mode does reset it (the ROM's BSS at install). */
+    m4a_engine_set_hq_mixer(&engine, true);
+    engine.hqBuffer[3] = 0x11;
+    engine.hqNoiseShapeLeft = 5;
+    engine.hqNoiseShapeRight = 6;
+    engine.pcmChannels[2].sampleStor = 0x22;
+    m4a_engine_set_hq_mixer(&engine, true);
+    ASSERT_EQ(engine.hqBuffer[3], 0x11, "hq re-apply: hq_buffer kept");
+    ASSERT_EQ(engine.hqNoiseShapeLeft, 5, "hq re-apply: noise-shape left kept");
+    ASSERT_EQ(engine.hqNoiseShapeRight, 6, "hq re-apply: noise-shape right kept");
+    ASSERT_EQ(engine.pcmChannels[2].sampleStor, 0x22, "hq re-apply: sampleStor kept");
+    ASSERT(engine.hqMixer, "hq re-apply: still on");
+    m4a_engine_set_hq_mixer(&engine, false);
+    ASSERT_EQ(engine.hqBuffer[3], 0, "hq switch: hq_buffer reset");
+    ASSERT_EQ(engine.hqNoiseShapeLeft, 0, "hq switch: noise-shape reset");
+    ASSERT_EQ(engine.pcmChannels[2].sampleStor, 0, "hq switch: sampleStor reset");
+    /* 7884 Hz (mode 2) is not an HQ rate: snapped to the default both ways. */
+    m4a_engine_set_pcm_freq_mode(&engine, 2);
+    ASSERT_EQ(engine.pcmSamplesPerVBlank, 132, "hq snap: vanilla takes 7884 Hz");
+    m4a_engine_set_hq_mixer(&engine, true);
+    ASSERT_EQ(engine.pcmFreqMode, M4A_PCM_FREQ_MODE_DEFAULT, "hq snap: HQ on in mode 2 snaps to the default");
+    ASSERT_EQ(engine.pcmSamplesPerVBlank, 224, "hq snap: 224 samples");
+    m4a_engine_set_pcm_freq_mode(&engine, 2);
+    ASSERT_EQ(engine.pcmFreqMode, M4A_PCM_FREQ_MODE_DEFAULT, "hq snap: mode 2 under HQ stays the default");
+    m4a_engine_set_hq_mixer(&engine, false);
+    m4a_engine_set_pcm_freq_mode(&engine, 4);
+
     /* Verify CGB channel types */
     ASSERT_EQ(engine.cgbChannels[0].type, 1, "cgb ch0 type");
     ASSERT_EQ(engine.cgbChannels[1].type, 2, "cgb ch1 type");
@@ -793,6 +847,11 @@ static void test_portamento(void)
     /* Render a bit, then play a legato (zero-gap) note a fifth up */
     m4a_engine_process(&engine, outL, outR, 256);
     int8_t *posBefore = first->currentPointer;
+    /* The mixer's own channel state travels with the position: the type
+     * bits its init added (CMP here, as the HQ mixer's would) and the
+     * interpolation base. */
+    first->type |= VOICE_TYPE_CMP;
+    first->sampleStor = 0x33;
     m4a_engine_note_off(&engine, 0, 60);
     m4a_engine_note_on(&engine, 0, 67, 100);
 
@@ -806,6 +865,8 @@ static void test_portamento(void)
      * position, and the old channel is silenced (only one channel active) */
     ASSERT_EQ(second->status & ~CHN_LOOP, CHN_ENV_SUSTAIN, "portamento: inherited note is in sustain");
     ASSERT(second->currentPointer == posBefore, "portamento: inherited sample position");
+    ASSERT(second->type & VOICE_TYPE_CMP, "portamento: inherited the mixer's type bits");
+    ASSERT_EQ(second->sampleStor, 0x33, "portamento: inherited CHN_SAMPLE_STOR");
     {
         int active = 0;
         for (int i = 0; i < MAX_PCM_CHANNELS; i++)
@@ -3256,6 +3317,24 @@ static void test_hq_mixer(void)
         free(wd);
     }
 
+    /* A FIX channel with nothing left at entry (started at its size): the
+     * host guard stops it instead of the source's 0x3FFFFFFF-block read. */
+    {
+        WaveData *wd = ramp_wave(6, 0, 0);
+        M4APCMChannel ch;
+        memset(&ch, 0, sizeof(ch));
+        m4a_pcm_channel_start_at(&ch, wd, VOICE_DIRECTSOUND | VOICE_TYPE_FIX, 6);
+        m4a_hq_channel_init(&ch);
+        ch.status = CHN_ENV_SUSTAIN; ch.frequency = 0x400000;
+        ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 2;
+        memset(buf, 0, sizeof(buf));
+        ASSERT(m4a_hq_mix_channel(&e, &ch, buf), "hq fix count 0: handled");
+        int ok = 1;
+        for (int i = 0; i < 8; i++) if (buf[i] != 0) ok = 0;
+        ASSERT(ok && ch.status == 0, "hq fix count 0: stopped, nothing mixed");
+        free(wd);
+    }
+
     /* The FIX loop: the 6-sample ramp looped from sample 2 (length 4):
      * 10..40, 50, 60 then the loop start (absolute) 30, 40; after: count
      * 2, pointer data + 4. */
@@ -3423,6 +3502,14 @@ static void test_hq_mixer(void)
         for (int i = 0; i < 8; i++) if (buf[i] != 0) ok = 0;
         ASSERT(ok && ch.count == 128 && ch.currentPointer == dpcm && ch.fw == 5 && ch.sampleStor == 3,
                "hq budget: the channel is frozen for the frame");
+        /* The same frame with sp at the top of IWRAM (budget 0x6F4, above
+         * the old 0x600 host cap) is mixed, as the ROM's check allows:
+         * the host cap is 0x700, beyond any budget an IWRAM sp gives. */
+        e.hqStackSp = 0x03008000u;
+        memset(buf, 0, sizeof(buf));
+        m4a_hq_mix_channel(&e, &ch, buf);
+        ASSERT(ch.count != 128 || ch.fw != 5 || ch.status == 0, "hq budget: a larger budget mixes the frame");
+        e.hqStackSp = M4A_HQ_STACK_SP_DEFAULT;
     }
 
     /* Uncompressed reverse: the 12-sample ramp from its end, words
@@ -6623,7 +6710,7 @@ static void latch_hook(M4AEngine *e, void *user)
 
 /*
  * poryaaaa_render --gba-start-delay puts MIDI time 0 at output sample
- * O = floor((883882 - GBA_BLIP_FRAME) * rate / 2^24): the last sample a blip
+ * O = floor((883882 - GBA_RESAMPLER_FRAME) * rate / 2^24): the last sample a resampler
  * frame before frame 3's SoundMain, the ROM's first song tick.  That rests on
  * the dispatch granularity: after the kept boot and O samples the machine
  * must be past frame 2's SoundMain and short of frame 3's, so an event
@@ -6658,7 +6745,7 @@ static void test_gba_start_delay_origin(void)
             m4a_engine_set_quantize_events(&engine, q == 1);
             m4a_engine_program_change(&engine, 0, 0);
 
-            int origin = (int)((double)(soundMain3 - GBA_BLIP_FRAME) * rates[r] / (double)GBA_CPU_HZ);
+            int origin = (int)((double)(soundMain3 - GBA_RESAMPLER_FRAME) * rates[r] / (double)GBA_CPU_HZ);
             float *buf = malloc(sizeof(float) * (size_t)(origin + 4096) * 2);
             m4a_engine_process(&engine, buf, buf + origin + 4096, origin);
             snprintf(msg, sizeof(msg), "%d Hz%s: sample %d dispatched after frame 2's SoundMain",
@@ -6672,7 +6759,7 @@ static void test_gba_start_delay_origin(void)
             /* Run to just past frame 3's SoundMain: the note's channel has
              * been through SoundMainRAM (START taken), i.e. it plays on the
              * ROM's first tick frame. */
-            int more = (int)((double)(soundMain3 - engine.gba.now + 2 * GBA_BLIP_FRAME) * rates[r] / GBA_CPU_HZ) + 1;
+            int more = (int)((double)(soundMain3 - engine.gba.now + 2 * GBA_RESAMPLER_FRAME) * rates[r] / GBA_CPU_HZ) + 1;
             m4a_engine_process(&engine, buf, buf + origin + 4096, more);
             snprintf(msg, sizeof(msg), "%d Hz%s: frame 3's SoundMain has run", rates[r], q ? " latched" : "");
             ASSERT(engine.gba.now >= soundMain3 && engine.nextSoundMain == soundMain3 + GBA_CYCLES_PER_FRAME, msg);
@@ -6694,7 +6781,7 @@ static void test_gba_start_delay_origin(void)
  * plays it: tempoC += tempoI once per frame (MPlayStart's 150 before the first
  * TEMPO), a tick each time tempoC reaches 150, a TEMPO changing only the next
  * frame's add; grid frame 0 is frame 3.  The event is dispatched at the last
- * sample a blip frame before that frame's SoundMain, the --gba-start-delay
+ * sample a resampler frame before that frame's SoundMain, the --gba-start-delay
  * origin's rule at every frame (docs/ACCURACY.md, the renderer's "as the game" mode).  Without the
  * flag the renderer passes the grid NULL and every exact sample through.
  */
@@ -6826,7 +6913,7 @@ static void test_gba_tempo_grid(void)
                 ASSERT(engine.gba.now > soundMain - GBA_CYCLES_PER_FRAME && engine.gba.now < soundMain
                        && engine.nextSoundMain == soundMain, msg);
                 m4a_engine_note_on(&engine, 0, 60, 127);
-                int more = (int)((double)(soundMain - engine.gba.now + 2 * GBA_BLIP_FRAME) * erates[r] / GBA_CPU_HZ) + 1;
+                int more = (int)((double)(soundMain - engine.gba.now + 2 * GBA_RESAMPLER_FRAME) * erates[r] / GBA_CPU_HZ) + 1;
                 m4a_engine_process(&engine, buf, buf + s + 8192, more);
                 bool started = false;
                 for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)

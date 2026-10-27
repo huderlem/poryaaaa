@@ -1,8 +1,9 @@
 #include "m4a_gba.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define BLIP_SIZE 0x4000
+#define RESAMPLER_SIZE 0x4000
 #define PSG_FRAME_EVENT 32768   /* PSG frame sequencer period (m4a_psg.h) */
 
 void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int8_t *ring, int ringSize,
@@ -11,10 +12,10 @@ void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int8_t *ring, int ringS
     memset(g, 0, sizeof(*g));
     g->fifoDmaCycle = -1;
     g->hostRate = hostRate;
-    g->left = m4a_blip_new(BLIP_SIZE);
-    g->right = m4a_blip_new(BLIP_SIZE);
-    m4a_blip_set_rates(g->left, GBA_CPU_HZ, hostRate);
-    m4a_blip_set_rates(g->right, GBA_CPU_HZ, hostRate);
+    g->left = m4a_resampler_new(RESAMPLER_SIZE);
+    g->right = m4a_resampler_new(RESAMPLER_SIZE);
+    m4a_resampler_set_rates(g->left, GBA_CPU_HZ, hostRate);
+    m4a_resampler_set_rates(g->right, GBA_CPU_HZ, hostRate);
 
     g->resolution = 0;
     g->sampleInterval = 512;
@@ -38,8 +39,8 @@ void m4a_gba_init(M4AGbaAudio *g, double hostRate, const int8_t *ring, int ringS
 
 void m4a_gba_destroy(M4AGbaAudio *g)
 {
-    m4a_blip_delete(g->left);
-    m4a_blip_delete(g->right);
+    m4a_resampler_delete(g->left);
+    m4a_resampler_delete(g->right);
     g->left = g->right = NULL;
 }
 
@@ -134,6 +135,7 @@ static void fifo_dma(M4AGbaAudio *g, int ch)
         g->fifoDmaCycle = g->now;
     const int8_t *base = g->ring + ch * g->ringSize;
     int limit = (2 - ch) * g->ringSize;
+    int startPos = f->srcPos;
     for (int w = 0; w < 4; w++) {
         M4AFifoWord word;
         for (int i = 0; i < 4; i++) {
@@ -142,6 +144,18 @@ static void fifo_dma(M4AGbaAudio *g, int ch)
         }
         f->srcPos += 4;
         fifo_push(f, word);
+    }
+    /* GBA_FIFO_DEBUG=1: one line per refill (cycle, channel, ring offset, the
+     * four words as the probe logs the FIFO writes), for setting the DMA
+     * cadence against an mgba_probe log. */
+    if (getenv("GBA_FIFO_DEBUG")) {
+        fprintf(stderr, "FIFODMA %lld %c %d", (long long)g->now, ch ? 'B' : 'A', startPos);
+        for (int w = 0; w < 4; w++) {
+            uint32_t v = 0;
+            for (int i = 0; i < 4; i++) v |= (uint32_t)(uint8_t)base[startPos + w * 4 + i] << (8 * i);
+            fprintf(stderr, " %08X", v);
+        }
+        fprintf(stderr, "\n");
     }
 }
 
@@ -242,16 +256,16 @@ static void sample_event(M4AGbaAudio *g)
 
     for (int i = 0; i < samples; i++) {
         int16_t l = g->curLeft[i], r = g->curRight[i];
-        if (m4a_blip_samples_avail(g->left) < BLIP_SIZE - 64) {
-            m4a_blip_add_delta(g->left, (unsigned)g->clock, l - g->lastLeft);
-            m4a_blip_add_delta(g->right, (unsigned)g->clock, r - g->lastRight);
+        if (m4a_resampler_samples_avail(g->left) < RESAMPLER_SIZE - 64) {
+            m4a_resampler_add_delta(g->left, (unsigned)g->clock, l - g->lastLeft);
+            m4a_resampler_add_delta(g->right, (unsigned)g->clock, r - g->lastRight);
             g->lastLeft = l;
             g->lastRight = r;
             g->clock += g->sampleInterval;
-            if (g->clock >= GBA_BLIP_FRAME) {
-                m4a_blip_end_frame(g->left, GBA_BLIP_FRAME);
-                m4a_blip_end_frame(g->right, GBA_BLIP_FRAME);
-                g->clock -= GBA_BLIP_FRAME;
+            if (g->clock >= GBA_RESAMPLER_FRAME) {
+                m4a_resampler_end_frame(g->left, GBA_RESAMPLER_FRAME);
+                m4a_resampler_end_frame(g->right, GBA_RESAMPLER_FRAME);
+                g->clock -= GBA_RESAMPLER_FRAME;
             }
         }
     }
@@ -322,7 +336,7 @@ int64_t m4a_gba_fifo_dma_stall(const M4AGbaAudio *g, int64_t from, int64_t to)
 
 int m4a_gba_samples_avail(const M4AGbaAudio *g)
 {
-    return m4a_blip_samples_avail(g->left);
+    return m4a_resampler_samples_avail(g->left);
 }
 
 int m4a_gba_read(M4AGbaAudio *g, float *outL, float *outR, int count)
@@ -332,12 +346,12 @@ int m4a_gba_read(M4AGbaAudio *g, float *outL, float *outR, int count)
     while (done < count) {
         int n = count - done;
         if (n > 512) n = 512;
-        int got = m4a_blip_read_samples(g->left, tmp, n, 0);
+        int got = m4a_resampler_read_samples(g->left, tmp, n, 0);
         if (got == 0)
             break;
         for (int i = 0; i < got; i++)
             outL[done + i] = (float)tmp[i] * (1.0f / 32768.0f);
-        m4a_blip_read_samples(g->right, tmp, got, 0);
+        m4a_resampler_read_samples(g->right, tmp, got, 0);
         for (int i = 0; i < got; i++)
             outR[done + i] = (float)tmp[i] * (1.0f / 32768.0f);
         done += got;
@@ -348,8 +362,8 @@ int m4a_gba_read(M4AGbaAudio *g, float *outL, float *outR, int count)
 void m4a_gba_discard(M4AGbaAudio *g)
 {
     short tmp[512];
-    while (m4a_blip_samples_avail(g->left) > 0) {
-        int n = m4a_blip_read_samples(g->left, tmp, 512, 0);
-        m4a_blip_read_samples(g->right, tmp, n, 0);
+    while (m4a_resampler_samples_avail(g->left) > 0) {
+        int n = m4a_resampler_read_samples(g->left, tmp, 512, 0);
+        m4a_resampler_read_samples(g->right, tmp, n, 0);
     }
 }

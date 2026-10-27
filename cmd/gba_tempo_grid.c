@@ -84,7 +84,7 @@ uint64_t gba_tempo_grid_sample(int64_t frame, double sampleRate)
 {
     if (frame == GBA_TEMPO_GRID_NEVER)
         return UINT64_MAX / 4;
-    return (uint64_t)((double)(ROM_FIRST_TICK_CYCLE - GBA_BLIP_FRAME
+    return (uint64_t)((double)(ROM_FIRST_TICK_CYCLE - GBA_RESAMPLER_FRAME
                                + frame * (int64_t)GBA_CYCLES_PER_FRAME)
                       * sampleRate / (double)GBA_CPU_HZ);
 }

@@ -1475,16 +1475,16 @@ static M4ASong *load_timing_song(const char *midiPath, bool extendedClocks, int 
  * ROM's first song tick is frame 3's SoundMain (MPlayStart runs on frame 2):
  * 124773 + 2 x 280896 + 160 x 1232 + 197 = 883882 cycles, m4a_engine.c's
  * FRAME1_START and SOUNDMAIN_FRAME_OFFSET.  An event dispatched after s
- * output samples finds the machine up to one blip frame (GBA_BLIP_FRAME)
- * past sample s's cycle, since m4a_engine_process runs it until the blip
+ * output samples finds the machine up to one resampler frame (GBA_RESAMPLER_FRAME)
+ * past sample s's cycle, since m4a_engine_process runs it until the resampler
  * holds the samples; an event at MIDI time 0 must still precede that
- * SoundMain, so the origin is the last sample a blip frame before it
+ * SoundMain, so the origin is the last sample a resampler frame before it
  * (2522 at 48 kHz, dispatched at cycle 882538; docs/ACCURACY.md, the renderer's "as the game" mode).
  * ROM_FIRST_TICK_CYCLE is in gba_tempo_grid.h.
  */
 static uint64_t gba_start_delay_samples(double sampleRate)
 {
-    return (uint64_t)((double)(ROM_FIRST_TICK_CYCLE - GBA_BLIP_FRAME) * sampleRate
+    return (uint64_t)((double)(ROM_FIRST_TICK_CYCLE - GBA_RESAMPLER_FRAME) * sampleRate
                       / (double)GBA_CPU_HZ);
 }
 
@@ -2186,7 +2186,7 @@ int main(int argc, char *argv[])
     }
 
     /* --gba-tempo-grid: every event moves from its exact-tempo sample to the
-     * ROM's frame for its song tick (gba_tempo_grid.h): the sample a blip
+     * ROM's frame for its song tick (gba_tempo_grid.h): the sample a resampler
      * frame before that frame's SoundMain, relative to the origin's, so
      * grid frame 0 is MIDI time 0 and --gba-start-delay below still adds O.
      * Several ticks in one frame share one sample, in order.  The natural
@@ -2305,6 +2305,7 @@ oom:
     m4a_engine_set_pwm_enabled(&engine, pwm);
     m4a_engine_set_pcm_freq_mode(&engine, pcmFreqMode);
     m4a_engine_set_hq_mixer(&engine, hqMixer);
+    engine.hqStackSp = hqStackSp;
     /* --psg-log on the MIDI path too, opened before the boot as the song
      * path does, so the two logs compare line for line (probe_diff.py). */
     if (psgLogPath) {

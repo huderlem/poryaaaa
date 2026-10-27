@@ -1,37 +1,39 @@
-# poryaaaa HQ-mixer accuracy: the plan
+# poryaaaa HQ-mixer accuracy: how it works
 
 poryaaaa reproduces vanilla pokeemerald's m4a engine closely enough to null
-against mgba 0.10.5 (`docs/ACCURACY.md`).  This document plans the same
-result for a second engine configuration: pokeemerald with **ipatix's
+against mgba 0.10.5 (`docs/ACCURACY.md`).  This document describes the
+same result for a second engine configuration: pokeemerald with **ipatix's
 High-Quality Audio Mixer** installed as the pret wiki describes
 (<https://github.com/pret/pokeemerald/wiki/Implementing-ipatix's-High-Quality-Audio-Mixer>),
-selectable in poryaaaa as an "HQ mixer mode" option that is off by default.
+selectable in poryaaaa as "HQ mixer mode" (`engine->hqMixer`; the plugin's
+**Options → HQ Mixer (ipatix)**, `hq_mixer` in `poryaaaa.cfg`,
+`poryaaaa_render --hq-mixer`), off by default.
 
-It is written for agents working one step at a time, in the order of
-section 7, each step directed by the user.  Everything the vanilla effort
-settled (ground truth, metric, harness, probe, the sequencer, CgbSound, the
-timing model, the MIDI path, the working rules) carries over unchanged and
-is not repeated here; read `docs/ACCURACY.md` first, then this.  Sections
-1 to 3 are what was read from the sources before any code was written;
-every statement of the form "the mixer does X" in them is a reading of the
-assembly and is **to be confirmed by measurement** in its step, as the
-working rules require.  As steps land, their durable findings replace the
-readings here (as `ACCURACY.md` did for its plan); measurements, predictions
-and rejected claims go in commit messages.
+Everything the vanilla effort settled (ground truth, metric, harness,
+probe, the sequencer, CgbSound, the timing model, the MIDI path, the
+working rules) carries over unchanged and is not repeated here; read
+`docs/ACCURACY.md` first, then this.  Sections 1 to 3 describe the mixer
+as it was read from the assembly **and then measured**: every "the mixer
+does X" below was confirmed against the HQ test ROM in the step that
+ported it (section 7), and where the reading was wrong the measured
+behaviour replaced it, with the correction noted.  The plan this document
+grew from, with each step's measurements, predictions and rejected
+claims, is in git history (commits "HQ mixer step 1" to "step 12",
+2026-10-26 / 27) and summarised in section 7.
 
 Contents:
 
 1. The HQ mixer: source, version, configuration, what the wiki changes
-2. How it differs from SoundMainRAM (the port specification)
-3. What carries over unchanged, and what may not
+2. How it differs from SoundMainRAM (the port)
+3. What carries over unchanged, and what moved
 4. Ground truth for HQ mode: the HQ test ROM and the harness
 5. The engine in HQ mode
-6. Coverage: mixer code paths and the tests that reach them
-7. The plan, step by step
-8. Risks and expected residuals
-9. Working rules for this effort
+6. Coverage: mixer code paths and the rows that reach them
+7. How it was done: the steps
+8. Known residuals and limitations
+9. Working rules for HQ mode
 - Appendix A: HQ mixer source map
-- Appendix B: arithmetic reference (as read)
+- Appendix B: arithmetic reference (measured)
 - Appendix C: the wiki's tables
 
 ---
@@ -70,8 +72,10 @@ Contents:
 5. Optional: a higher engine rate (`m4aSoundInit`'s `SOUND_MODE_FREQ_*`),
    with `hq_buffer_ptr` sized to the rate's frame (appendix C) and, with
    reverb, `PCM_DMA_BUF_SIZE` resized to 7 frames.  7884 Hz is unsupported
-   (its frame, 0x84, is not a multiple of 8).  The HQ test ROM stays at
-   13379 Hz; other rates are a later variant (section 7, step 11).
+   (its frame, 0x84, is not a multiple of 8).  The HQ test ROM's default
+   build stays at 13379 Hz; `make RATE=<hz>` builds the variant at another
+   rate with these two sizes applied (section 4; measured at 21024 Hz, the
+   wiki's own example rate, in step 11).
 6. `DmaSetUnchecked` in `include/gba/macro.h` writes the three DMA registers
    with one `stmia` (the mixer uses DMA3; the game's own DMA3 users must not
    be interrupted between register writes).  The test ROM has no other DMA3
@@ -83,14 +87,16 @@ Contents:
 
 ---
 
-## 2. How it differs from SoundMainRAM (the port specification)
+## 2. How it differs from SoundMainRAM (the port)
 
 This is the mixer read side by side with `plugin/m4a_mixer.c` (the vanilla
-port) and `m4a_1.s` lines 88–709.  Appendix A maps the labels; appendix B
-has the formulas.  Items marked **(quirk)** are behaviours that follow from
-the instruction encoding rather than the intent and must be ported as the
-instructions do them — the kind of thing a "cleaned-up" translation loses
-and the harness then fails on.
+port) and `m4a_1.s` lines 88–1210, as `plugin/m4a_hq_mixer.c` ports it
+(every path measured −inf or at the scheduler floor on the rows of section
+6).  Appendix A maps the labels; appendix B has the formulas.  Items
+marked **(quirk)** are behaviours that follow from the instruction
+encoding rather than the intent and are ported as the instructions do
+them — the kind of thing a "cleaned-up" translation loses and the harness
+then fails on; each such item names the instruction in the code's comment.
 
 ### Frame structure
 
@@ -197,7 +203,8 @@ and mixes).  Differences:
   advancing `fw` / `count` / `ptr` **(quirk)**: a channel at VOL 0 (or at
   the start of a slow attack while `left × v >> 13` is still 0) freezes its
   playback position and resumes where it stopped.  Vanilla keeps advancing.
-  Needs a micro-test (section 6).
+  Ported and unit-tested (the synth LFO test covers a volume-zero frame);
+  no dedicated harness row reaches it (section 6).
 - Path selection: `CMP|REV` → the pre-cached path (compressed or reversed
   data decoded / byte-reversed onto the stack, then the fast loop);
   `FIX` → the fixed-frequency path; synth (`SPL`) → the synth loops; else
@@ -407,12 +414,14 @@ dB on the four rows: the mixer difference, informational.
 ### Volume-zero and frame-length constraints
 
 Frame lengths must be multiples of 8 (the fast loop, the pulse loop) —
-every table rate but 7884 Hz is.  The engine must refuse or snap
-`pcmFreqMode 2` in HQ mode.
+every table rate but 7884 Hz is.  `m4a_engine_set_hq_mixer` and
+`m4a_engine_set_pcm_freq_mode` snap `pcmFreqMode 2` to the default in HQ
+mode; the plugin snaps its own setting the same way and its PCM Mix Rate
+combo omits 7884 Hz while the mode is on.
 
 ---
 
-## 3. What carries over unchanged, and what may not
+## 3. What carries over unchanged, and what moved
 
 **Unchanged by construction** (the sources outside the mixer are identical):
 MPlayMain and every command handler, ply_note's channel scan and steal rule,
@@ -421,28 +430,31 @@ measured cost in appendix A of `ACCURACY.md` (the mixer runs *after*
 CgbSound; nothing later in the frame is timed), `m4aSoundVSync`'s DMA
 restart and `pcmDmaCounter`, the FIFO / timer / DAC output stage, the MIDI
 path and the plugin's latch rules, the `.s` parser and the loader layouts.
-**Prediction to confirm in step 2**: the HQ ROM's PSG write cycles equal
-the vanilla ROM's on every probed test (`probe_diff.py`: 0 moved writes),
-modulo a constant boot offset if the boot moved.
+**Measured (step 2)**: the HQ ROM's PSG write lists are identical to the
+vanilla ROM's in all 67 probed logs, and the MPlayMain / CgbSound / VSync
+/ SoundMain entry cycles are identical in every frame but four of
+rg_vs_trainer (a run-out sample the two mixers end a frame apart, which
+the port reproduces by construction).
 
-**Likely to move: the boot timeline.**  `m4aSoundInit`'s `CpuCopy32` copies
+**What moved: the boot timeline.**  `m4aSoundInit`'s `CpuCopy32` copies
 0xB40 instead of 0x800 bytes (+0x340), and the crt0's BSS clear covers
-0x340 + 0x380 more IWRAM; every later boot event (SOUNDCNT writes, DMA on,
-timer on, MPlayExtender's PSG writes, the second init pass, IME) shifts by
-the extra cycles.  The first handled interrupts stay frame 2's (IME is set
-1406 cycles after frame 1's VBlank start today; later is still after), but
-the timer-0 start cycle relative to the DAC slots — and with it which
-ring byte plays in which slot — may change, as the "6 boot cycles moved
-every PCM reference" episode showed.  `m4a_engine_boot` replays measured
-constants; HQ mode needs its own measured table (step 2 → step 3).  The
-sq1 canary (pure PSG) decides at once whether the boot moved: identical
-reference → unchanged; else the probe's IO-write log gives the new cycles.
+more IWRAM, so m4aSoundInit's register block lands +2080 cycles later,
+the SampleFreqSet / MPlayExtender block −8, and the **final timer-0
+enable +4 (320682 → 320686)**; everything from frame 2's VSync DMA
+restart (cycle 590705) on is identical, cycle for cycle.  The first
+handled interrupts stay frame 2's, the first timer pass's on/off tick
+count is unchanged (7658, so the FIFO's stale content is too); the +4 is
+a timer-0 phase shift against the DAC grid, invisible to the PSG (the sq1
+canary is byte-identical) and worth one DAC step on every DirectSound
+reference.  `m4a_engine_boot` replays the HQ table (`sBootTableHq`,
+section 5) when the flag is set.
 
-**Possibly different: the PCM floor.**  mgba's scheduler lateness depends on
-the instruction stream; the HQ mixer's DMA3 halts and different loop costs
-change when timer-0 overflows land late.  So the set of −inf rows may differ
-from vanilla's, and the floor on songs may sit at a different level.  Not
-modeled, as before; attribute with `.events` slot crossings.  **Measured
+**The PCM floor** is the same mechanism at the same scale: mgba's
+scheduler lateness depends on the instruction stream, and the HQ mixer's
+DMA3 halts and loop costs move where timer-0 overflows land late, so the
+set of −inf rows differs from vanilla's and the floor on songs sits at a
+different level.  Not modeled, as before; attributed with `.events` slot
+crossings and the ring compare.  **Measured
 (step 2(f))**: the same mechanism at the same scale — timer-0 `max_late`
 10–11 cycles on both ROMs, slot crossings per test of the same order
 (vanilla / HQ: pcm 0 / 1, pcm_cmp 9 / 0, pcm_chord 6 / 0, littleroot
@@ -514,6 +526,30 @@ inputs; symlink or rebuild).  Differences from the vanilla build:
   songs: unchanged — the ROM boot-path rule holds (`AgbMain`
   instruction-identical; addresses shift because `m4a_1.o` changes size).
 
+**The rate variants** (step 11): `make RATE=<hz>` (CMake
+`accuracy_rom_<hz>` / `accuracy_rom_hq_<hz>` into `build/accuracy/rom-<hz>`
+/ `rom-hq-<hz>`, for every `<hz>` in the cache list `ACCURACY_PCM_RATES`,
+default `21024`) builds either ROM at another sound-mode rate: the
+`| SOUND_MODE_FREQ_13379` line of `m4aSoundInit`'s `m4aSoundMode` call
+becomes `SOUND_MODE_FREQ_<hz>` (the wiki's "engine rate" line, `m4a.c`
+line 79; SoundInit's own `SampleFreqSet(SOUND_MODE_FREQ_13379)` stays, as
+in the game, so the boot's first timer pass is always the 224-sample
+one).  The vanilla variant changes nothing else (`PCM_DMA_BUF_SIZE` stays
+1584, `pcmDmaPeriod` = 1584 / frame = 4 at 21024 Hz).  The HQ variant
+applies the wiki's two sizes: `hq_buffer_ptr[<frame>]` and
+`PCM_DMA_BUF_SIZE` = 7 × frame (2464 at 21024 Hz) in generated copies of
+`include/gba/m4a_internal.h` (first on `-iquote`) and
+`constants/m4a_constants.inc` (the mixer's `.include` redirected to it in a
+generated `m4a_1.s`); `SoundInfo` grows by 2 × 1760 bytes, so the IWRAM
+map after `gSoundInfo` moves (`gSoundInfo` 0x030017F0, `gMPlayInfo_BGM`
+0x03002F68 at 21024 Hz) and the probe takes the variant's own `nm`.  The
+ROM symbols (`AgbMain`, `CgbSound` 0x080010AC, `MPlayMain`, `SoundMainRAM`)
+are those of the 13379 Hz build of the same mixer, and the `.frames`
+entries (MPlayMain, CgbSound) are identical frame for frame: the timing
+model carries over; only the SoundMainRAM entry moves by 4 cycles (the
+slot-offset multiply's operand), which no write depends on.  7884 Hz is
+refused with `MIXER=hq`.
+
 **Checks after the build** (step 1; results in "Step 1 — done" below and in
 appendix B): `AgbMain` and the compiled `CgbSound`
 and `MPlayMain` unchanged address-normalised (`objdump -d`, the vanilla
@@ -535,99 +571,165 @@ one: identical MPlayMain entries and CgbSound entry cycles is the
 
 - `accuracy.py --mixer vanilla|hq` (default vanilla): selects the ROM
   (`--rom` default `build/accuracy/rom-hq/...` for hq), passes
-  `--hq-mixer` to `poryaaaa_render`, and writes `"mixer": "hq"` into the
-  report.  References are already keyed by ROM hash, so the HQ references
-  land in their own `refs/<hash-mgba>/` directory; the committed micro
-  references get a sibling `refs/micro-hq/` with its own manifest
-  (`--committed-refs` honours `--mixer`).
+  `--hq-mixer` to `poryaaaa_render`, and writes `"mixer": "hq"` and
+  `"engine_mixer"` into the report (`--engine-mixer vanilla` asks the HQ
+  ROM against the vanilla engine: an informational number, never a
+  baseline).  References are keyed by ROM hash, so the HQ references land
+  in their own `refs/<hash-mgba>/` directory; the committed micro
+  references have a sibling `refs/micro-hq/` with its own manifest
+  (`--committed-refs` honours `--mixer`); the report is
+  `build/accuracy/report-hq.json`.  The `synth_*` rows run only with
+  `--mixer hq` (`HQ_ONLY_PREFIX`).
 - **HQ reports are their own baseline family**: `baselines/<date>_hq-*.json`
-  (and the `hq-midi-path-*` family for `--input midi`).  `compare_reports.py`
-  refuses to compare reports whose `"mixer"` fields differ (as it should
-  for `"input"`; add the check).
+  for song input and `<date>_hq-midi-path-*.json` for `--input midi`.
+  `compare_reports.py` refuses to compare reports whose `"mixer"` or
+  `"input"` fields differ.
 - `claim_check.sh --mixer hq` (or `MIXER=hq`): probe logs under
-  `build/probe-hq/`, the HQ baseline, the HQ ROM.  The write-cycle diff uses
-  the HQ probe logs.
-- CMake: `accuracy_rom_hq`, `accuracy_hq` targets; `accuracy` stays vanilla.
-  `poryaaaa_song_tests build/accuracy/rom-hq` must pass too (same songs,
-  moved addresses — a free check of the relocation logic).
+  `build/probe-hq/`, the newest HQ song-input baseline (never a midi one),
+  the HQ ROM.  The write-cycle diff uses the HQ probe logs.  An HQ change
+  runs both gates: vanilla must show 0 moved writes and no row moved, HQ
+  no regression.
+- CMake: `accuracy_rom_hq`, `accuracy_song_tests_hq`, `accuracy_hq`
+  targets; `accuracy` stays vanilla.  `poryaaaa_song_tests
+  build/accuracy/rom-hq` passes (same songs, moved addresses — a free
+  check of the relocation logic).
 - The probe: `mgba_probe` takes the ROM and symbol file as arguments; the
-  HQ run needs the HQ `syms.nm` plus the HQ mixer's internal labels
-  (appendix B of `ACCURACY.md`: "moving addresses").  New probe
-  breakpoints worth having: SoundMainRAM entry (its `sp` — the stack budget)
-  and exit (the frame's mixer cost, for interest only), the three channel
-  stop stores.
+  HQ run uses `build/probe-hq/syms.nm` from the HQ ELF plus the mixer's
+  internal labels at the IWRAM copy (`C_*` / `F_*`: every register,
+  `sp` at `SoundMainRAM_Buffer`, the decoded block buffer at
+  `C_select_highspeed_codepath_vla_r3`, the ring slot written);
+  `tools/probe_corpus.sh` runs the probed corpus on either ROM and
+  `tools/probe_hq_compare.py` compares two corpora.  Engine side:
+  `HQ_DEBUG=1` dumps the ring slot, the mix buffer and each pre-cached
+  buffer per frame; `tools/hq_ring_compare.py` sets them against the
+  probe's; `tools/frame_diff.py` finds the differing frames of two WAVs;
+  `tools/hq_decode_check.py` decodes a DPCM block through the open-bus
+  model by hand.  The `accuracy-harness` skill has the recipes.
 
 ### Metric and gate
 
 Unchanged: −40 dB on `null` and `worst1s`, no gain correction, −inf for
-bit-identical.  The expectation for a correct port is the vanilla picture:
-−inf on single-voice PCM micro-tests, the PCM floor on songs and cries,
-the PSG rows exactly as today.
+bit-identical.  The result is the vanilla picture: −inf on single-voice
+PCM micro-tests not at the floor, the PCM floor on songs and cries, the
+PSG rows exactly as vanilla; 72/76 on song input, 50/54 on MIDI input
+(section 7, steps 9 and 10); at 21024 Hz 73/76 (HQ) and 60/72 (vanilla),
+every failure the floor at the 798-cycle timer's crossing rate (step 11).
 
 ---
 
 ## 5. The engine in HQ mode
 
 - **One flag**, `engine->hqMixer` (bool, default false), set through
-  `m4a_engine_set_hq_mixer(engine, bool)`, which resets the HQ-only state
-  (mix buffer, noise-shape bytes, every channel's `sampleStor`) and refuses
-  / snaps `pcmFreqMode 2` (7884 Hz).  Off: the engine is byte-identical to
-  today (the gate for every step: `claim_check` against the vanilla
-  baseline, 0 moved, no row moved).
-- **A new file**, `plugin/m4a_hq_mixer.{h,c}`: `m4a_hq_sound_main_ram(engine,
+  `m4a_engine_set_hq_mixer(engine, bool)`, which on a change of mode
+  resets the HQ-only state (mix buffers, noise-shape bytes, every
+  channel's `sampleStor`: the ROM's BSS at install) and snaps
+  `pcmFreqMode 2` (7884 Hz) to the default; re-applying the current mode
+  is a no-op (step 12: the plugin re-applies its settings on every GUI
+  change, and the seed / residuals / `CHN_SAMPLE_STOR` persist across
+  frames in the ROM).  Set before the first process
+  block it also selects the boot table (`sBootTableHq`, section 3; the
+  boot replays once).  Off, the engine is byte-identical to the vanilla
+  engine (the gate for every step: `claim_check` against the vanilla
+  baseline, 0 moved writes, no row moved).
+- **The ring size follows the configuration** (step 11):
+  `engine->pcmDmaBufSize` is `PCM_DMA_BUF_SIZE` as the ROM would define
+  it — the game's 1584 for vanilla at any rate and for HQ at 13379 Hz, 7 ×
+  frame for HQ at another rate (the wiki's table, appendix C) — and both
+  mixers' `BUF` (the B half's offset, the reverb taps) and the output
+  stage's DMA reader (`m4a_gba_set_pcm_rate`) take it; the buffers are
+  sized for the largest (`GBA_PCM_DMA_BUF_MAX`, 42048 Hz).  Whichever of
+  `m4a_engine_set_hq_mixer` / `m4a_engine_set_pcm_freq_mode` comes last
+  reprograms the ring (`pcm_reprogram`: m4aSoundMode's DMA off, ring
+  clear, SampleFreqSet, DMA on, timer on).  **Before the boot replay has
+  started, a rate change only sets the numbers**: m4aSoundInit's mode word
+  is the rate, and the boot table turns the DMA and the timer on at the
+  ROM's cycles.  (Enabling them at cycle 0, as the engine did before step
+  11 for any non-default rate, ran the FIFO through the boot and left a
+  different stale state at the final timer start: the note's ring slot
+  fetched 10 timer ticks early in vanilla and 7 late in HQ at 21024 Hz —
+  every PCM row at −20..−35 dB with a 0.5 / −0.3 ms lag.)  The boot
+  replays SoundInit's first `SampleFreqSet` pass at the 224-sample period
+  whatever the rate (`BOOT_TIMER_ON`), and the measured tables of the
+  21024 Hz ROMs (`sBootTableVanilla21024` / `sBootTableHq21024`, appendix
+  B) are selected for `pcmFreqMode 7`; every other non-default rate is
+  unmeasured and replays the mixer's 13379 Hz table (section 8).
+  `GBA_FIFO_DEBUG=1` prints every FIFO DMA refill (cycle, channel, ring
+  offset, the four words) to set the cadence against a probe log's
+  `040000A0` / `040000A4` writes.
+- **The mixer**, `plugin/m4a_hq_mixer.{h,c}`: `m4a_hq_sound_main_ram(engine,
   frameOffset, pcmDmaCounter)` with the same signature and place as
-  `m4a_sound_main_ram` (`m4a_engine.c` dispatches on the flag).  Written
-  like `m4a_mixer.c`: the register names kept, every label as a comment,
-  the condition-code quirks reproduced explicitly (a small
-  "flags" struct or the equivalent booleans for N/Z/C/V where a conditional
-  instruction depends on an earlier instruction's flags).  Header crediting
-  ipatix and the source file (section 1).
-- **New state**: `int32_t hqBuffer[GBA_PCM_DMA_BUF_SIZE]` sized to the
-  largest frame (or `pcmSamplesPerVBlank` words, resized with the rate),
-  `uint8_t noiseShapeLeft, noiseShapeRight` (SoundInfo 0xE / 0xF),
-  `int8_t sampleStor` per PCM channel (`CHN_SAMPLE_STOR`), an engine
-  `hqStackBudget` (bytes; default the test ROM's measured value, step 2),
-  and the compressed-pointer convention (a sample index from init: the
-  vanilla port already stores `data + index`, so the same representation
-  serves; `CHN_SPECIAL` is unused in HQ mode).
+  `m4a_sound_main_ram` (`sound_main` in `m4a_engine.c` dispatches on the
+  flag).  Written like `m4a_mixer.c`: the register names kept, every label
+  as a comment, the condition-code quirks as named booleans where a
+  conditional instruction depends on an earlier instruction's flags.
+  Header crediting ipatix and the source file (section 1).  Its parts:
+  `m4a_hq_channel_init` (the SF_START work the vanilla start pass lacks:
+  CMP from the sample's flag, the pointer conventions, the `SPL` type
+  byte, `sampleStor`), `m4a_hq_channel_volumes` (`>> 13`), the dispatch
+  of `C_mixing_setup` (volume-zero skip, FIX before synth, then the
+  pre-cached test), `fast_loop_lt1` / `fast_loop_1to2` / `fast_loop_ge2`
+  with the unbuffered loop, `fix_path`, `precache_path` (with
+  `hq_decode_block` and the open-bus lanes), `synth_path`
+  (`plugin/m4a_synth.h`), and `m4a_hq_downsample` (saturation, the 7-bit
+  residuals, the reverb seed).
+- **State** (`M4AEngine`): `hqBuffer[M4A_HQ_BUFFER_WORDS]` (`hq_buffer_ptr`:
+  int16 left << 16 | int16 right per output sample, carrying the next
+  frame's reverb seed between frames), `hqMutedBuffer` (the shadow pool's
+  copy), `hqNoiseShapeLeft` / `hqNoiseShapeRight` (SoundInfo 0xE / 0xF),
+  `hqStackSp` (`sp` at SoundMainRAM entry; default the test ROM's
+  0x03007DD0, a 1220-byte budget; `--hq-stack-sp`),
+  `hqUnportedChannelFrames` (a counter kept for the contract, always 0
+  since step 9); per PCM channel `sampleStor` (`CHN_SAMPLE_STOR`).  The
+  compressed pointer is a sample index from init, the representation the
+  vanilla port already stores; `CHN_SPECIAL` is unused in HQ mode.
 - **The envelope step** stays `m4a_pcm_channel_tick` (identical state
-  machine) with the HQ volume formula selected by the flag — or the HQ
-  mixer computes its two volumes itself and stores them into
-  `envelopeVolumeRight/Left` for `--pcm-log` (the log's columns keep their
-  meaning: the per-side volumes the mixer used).
+  machine); the HQ mixer computes its two volumes itself and stores them
+  into `envelopeVolumeRight/Left`, so `--pcm-log`'s columns keep their
+  meaning (the per-side volumes the mixer used); HQ mode adds `ss=`
+  (`sampleStor`), `cnt=`, `fw=` per channel and `ns=` (the noise-shape
+  bytes) per frame.
 - **Synth voices**: the HQ mixer's synth loops are the measured truth
-  (step 9: `synth_path` in `m4a_hq_mixer.c`, −inf on the four rows); the
-  oscillators live in `plugin/m4a_synth.h` and the vanilla-mode extension
-  (`mix_synth`) runs the same ones under vanilla's accumulate (its LFO and
-  saw arithmetic re-derived from the measured code, its own unit tests
-  kept).
+  (step 9: `synth_path`, −inf on the four rows); the oscillators live in
+  `plugin/m4a_synth.h` and the vanilla-mode extension (`mix_synth` in
+  `m4a_mixer.c`) runs the same ones under vanilla's accumulate (its LFO
+  and saw arithmetic re-derived from the measured code, its own unit
+  tests kept).
 - **Shadow pool / polyphony debug**: the HQ pass mixes the shadow channels
-  into a discarded buffer as the vanilla pass does (`mutedFrame` → a muted
-  HQ buffer); the invert mode's downsampler output is the audible one.
-- **Where the flag surfaces**: `poryaaaa_render --hq-mixer`; the plugin's
-  Options menu "HQ Mixer (ipatix)" with a tooltip, `poryaaaa.cfg` key
-  `hq_mixer`, one CLAP state byte appended after the latch byte (absent
-  loads as off), applied in `plugin_activate` / `state_load` / GUI
-  `poll_changes` like `pcmFreqMode`.  The GUI's PCM-rate combo hides or
-  greys 7884 Hz while HQ is on.
+  into `hqMutedBuffer` as the vanilla pass mixes into `mutedFrame`; the
+  invert mode's downsampler output is the audible one.
+- **Where the flag surfaces** (step 10): `poryaaaa_render --hq-mixer`
+  (and `--hq-stack-sp`); the plugin's Options menu "HQ Mixer (ipatix)"
+  with a tooltip, `poryaaaa.cfg` key `hq_mixer`, one CLAP state byte
+  appended after the latch byte (absent loads as off), applied in
+  `plugin_activate` / `state_load` / the GUI's `poll_changes` through
+  `apply_mixer_settings` (the HQ flag first, then the mix rate, so the
+  7884 Hz snap holds; `hq_snap_pcm_mode` snaps the plugin's own setting
+  so what is saved is what plays).  The GUI's PCM Mix Rate combo omits
+  7884 Hz while HQ is on.  A live toggle (after the boot) only switches
+  the mixer, as the mix-rate change does; the boot table is the first
+  process block's.
 - **Interactions**: the opt-in extensions (portamento, PWM, base-key) are
   sequencer / CgbSound-side and orthogonal; XCMD 0x0D's start offset enters
   `count` as today and the HQ init consumes it (section 2); the cry player
-  and SE players are untouched; `--pcm-log` gains `sampleStor` and the
-  noise-shape bytes.
+  and SE players are untouched.
 - **The MIDI path**: nothing changes — the mixer is after everything the
-  MIDI path affects.  The `--input midi` HQ run should reproduce the
-  vanilla picture (grid 43/44 = `--song` sample for sample) once `--song`
-  is right.
+  MIDI path affects.  **Measured (step 10)**: `--input midi --mixer hq`
+  (the runner's default form and `--midi-quantize`) reads 50/54, every row
+  at its HQ song-input number, and all 54 renders are byte-identical to
+  the `--song` renders (the vanilla picture: 43/44 there, the cries being
+  the rows a MIDI run has no input for).
 
 ---
 
-## 6. Coverage: mixer code paths and the tests that reach them
+## 6. Coverage: mixer code paths and the rows that reach them
 
-Map each path to the rows that exercise it; compute a row's step ratio and
-path from `--pcm-log` (frequency × divFreq / 2^23) rather than guessing.
+Each path and the rows that exercise it; a row's step ratio and path come
+from `--pcm-log` (frequency × divFreq / 2^23), not from guessing.  The
+rows in the right column were added for this effort (`gen_micro_midis.py`
++ `accuracy_micro.inc`; they play on the vanilla ROM too except the
+`synth_*` rows); "none" marks a path without a dedicated row.
 
-| path | existing rows (expected) | to add (HQ-only micro-tests, `gen_micro_midis.py` + `accuracy_micro.inc`) |
+| path | vanilla-corpus rows | rows added for the HQ effort |
 |---|---|---|
 | downsampler, noise shaping, seed = 0 | every PCM row | — |
 | interpolating fast path, `< 1.0` | `pcm` (key 55), `pcm_bass`, `pcm_adsr` | — |
@@ -636,32 +738,37 @@ path from `--pcm-log` (frequency × divFreq / 2^23) rather than guessing.
 | direct-from-ROM read (> 0x400 bytes or no stack) | none at 13379 Hz (448 B max at ratio 2) | `pcm_short_loop` key 112: the note's first frame (advance 1128 > 0x400, count 1874) — step 5; output-neutral by construction, the port does not model the copy |
 | unbuffered loop: loop wrap inside a frame | `pcm` (looped flute), `pcm_chord` | `pcm_short_loop`: the flute's 562-sample loop against advances of 564 / 896 / 1128 (one, then two wraps a frame) — step 5 |
 | unbuffered loop: sample end inside a frame | `pcm_adsr`, `pcm_drum`? | — |
-| volume-zero freeze | none | `pcm_vol0` (VOL 0 for a few ticks mid-note, then back), `pcm_slow_attack` (attack 1–2) |
+| volume-zero freeze | none dedicated (songs reach it through VOL 0 and slow attacks; unit-tested) | none — `pcm_vol0` / `pcm_slow_attack` were planned and not needed for a −inf corpus |
 | FIX path (block + remainder, alignment variants) | `pcm_drum` (voice 12, `no_resample`); every vanilla song through its drumset (`voice_keysplit_all voicegroup_*_drumset`: 26 `no_resample` voices in emerald_1 alone, the FRLG drumset's kick and snares in rg_vs_trainer); se_faint's rs_sfx_1 has none | `pcm_fix_loop` (voice 15, the flute looped at its own rate; the remainder's `loopStart` reset) — added in step 6 |
 | reverb seed | `pcm_reverb`, mus_littleroot, mus_vs_wild, mus_credits | `pcm_reverb_max` (`-R127`: the `>> 2` scaling at 31) — added in step 7 |
-| saturation | none deliberate | `pcm_clip` (6+ notes at velocity 127, VOL 127: expect clipping, not wrap) |
-| 16-bit half overflow / borrow | every row with negative samples | `pcm_clip` with a pan test |
+| saturation | none deliberate (unit-tested) | none — `pcm_clip` was planned and not added |
+| 16-bit half overflow / borrow | every row with negative samples | — |
 | compressed forward | `pcm_cmp`, every forward cry | — (step 8: −inf) |
 | compressed end frame (zero fill, immediate stop) | `pcm_cmp`, cries with the sample ending (pidgey) | — |
 | compressed reverse + the negative block | reversed cries, `cry_pidgey_echo_start_chorus` (two channels ending in different frames) | — (step 8: −inf; the whole end frame on open bus) |
 | uncompressed reverse | none in vanilla (reversed cries are DPCM) | `pcm_rev` (voice 16, `voice_directsound_reverse` on the pizzicato) — step 8, −inf with the loader's preceding bytes |
 | stack budget exceeded | none | `pcm_cmp_hi` (the Bulbasaur cry at keys 96 / 72 / 94: the two high notes frozen silent on the HQ ROM) — step 8, −inf |
 | synth pulse / saw / triangle, duty LFO | none | `synth_pulse` (voice 17: 50 %, no LFO), `synth_pulse_lfo` (18: base 0x20, step 0x10, mod 0x80, offset 0x40 — the fold reached every 16 frames), `synth_saw` (19), `synth_tri` (20) — `set_synth_*` descriptors in `accuracy_micro_synth.inc` (assembled into both ROMs, read by the loader as the overlay's `direct_sound_synth_data.inc`); **HQ-only rows**: the vanilla ROM plays a zero-size sample as a click, so `accuracy.py` skips `synth_*` unless `--mixer hq` — added in step 9, −inf |
-| frame lengths ≠ 224 | none | step 11 |
+| frame lengths ≠ 224 (21024 Hz: 0x160, ring 2464, `pcmDmaPeriod` 7; vanilla: ring 1584, period 4) | none at 13379 Hz | the whole corpus on the 21024 Hz builds of both ROMs (`accuracy.py --pcm-rate 21024 [--mixer hq]`) — step 11 |
 
-The micro-test additions change the ROM (both builds, since they share the
-voicegroup): `--update-refs` for the vanilla micro set is then legitimate
-(a ROM change) and the canary check applies.
+A micro-test addition changes the ROM (both builds, since they share the
+voicegroup): `--update-refs` for both micro sets is then legitimate (a ROM
+change) and the canary check applies (`pcm`, `pcm_cmp`, `cry_bulbasaur`
+byte-identical on both ROMs, `sq1` for the boot).
 
 ---
 
-## 7. The plan, step by step
+## 7. How it was done: the steps
 
-Each step: what it needs, what it does, what it measures, what "done" is.
-The gate on **every** step from 3 on: the vanilla configuration unchanged
-(`claim_check.sh` against the latest vanilla baseline: 0 moved writes, no
-row moved; unit / blip / song tests pass; poryaaaa and poryaaaa-standalone
-build).  HQ numbers are reported against the latest `hq-*` baseline.
+The effort ran as twelve planned steps, one mixer path per step, each with
+a row that reaches it and a predicted number written before the run.
+Each step's plan paragraph is kept here above its "done" paragraph (the
+measurements, the corrections to the reading, the baseline names); the
+full numbers are in the commit messages.  The gate on every step from 3
+on: the vanilla configuration unchanged (`claim_check.sh` against the
+latest vanilla baseline: 0 moved writes, no row moved; unit / resampler / song
+tests pass; poryaaaa and poryaaaa-standalone build), HQ numbers against
+the latest `hq-*` baseline with no regression.
 
 **Step 0 — decisions** (the user; no code).  **Done 2026-10-26.**  The HQ
 ROM keeps `MAX_DIRECTSOUND_CHANNELS` 12, `ENABLE_DMA 1`, `ENABLE_REVERB 1`
@@ -764,7 +871,7 @@ logs; the PCM rows' numbers against the HQ ROM move (the timer phase)
 but stay failing until step 4.  Vanilla unchanged.
 
 **Step 3 — done 2026-10-26.**  `engine->hqMixer` (`m4a_engine_set_hq_mixer`,
-`poryaaaa_render --hq-mixer`; nothing in the plugin yet, step 10) selects
+`poryaaaa_render --hq-mixer`; the plugin followed in step 10) selects
 `sBootTableHq` in `m4a_engine.c`: the same twenty steps as the vanilla
 table at the HQ ROM's cycles (SoundInit's block 7800 / 7817 / 7840 /
 17953, SampleFreqSet and MPlayExtender 39786 / 39867–39921 / 41230 /
@@ -781,7 +888,7 @@ on both ROMs: the +4 moves the PCM timer phase only), the PCM rows
 within 0.2 dB (pcm_drum −1.9) of before — the vanilla mixer's output
 against the HQ reference, now on the HQ timer phase — still failing
 until step 4.  Baseline `2026-10-26_hq-boot-table`.  Unit 1907/1907,
-blip 49112/0, songs 561/561.
+resampler 49112/0, songs 561/561.
 
 **Step 4 — the HQ mixer skeleton: downsampler, seed, the `< 1.0` fast
 path.**  `m4a_hq_mixer.c` with the frame structure of section 2, the
@@ -837,7 +944,7 @@ Unit tests `test_hq_mixer` (40 assertions: volumes, init, the fast block,
 the diff-0 quirk across an iteration boundary, volume zero, the unbuffered
 end and wrap, the downsampler's residual carry and both saturations, the
 seed and its borrow, the frame and the unported count); unit 1947/1947,
-blip 49112/0, songs 561/561.
+resampler 49112/0, songs 561/561.
 
 **Step 5 — the `[1.0, 2.0)` and `≥ 2.0` blocks, direct-from-ROM reads.**
 `pcm_hi`, `pcm_chord`, the new `pcm_ratio_1x` / `pcm_short_loop` rows.
@@ -875,7 +982,7 @@ path (count 1874 → 746, advance 1128 > 0x400) before the loop wraps twice
 a frame.  Unit tests: 8 new assertions in `test_hq_mixer` (the `[1, 2)`
 ramp with the odd volume rounded up, the `≥ 2.0` ramp with the packed
 borrow, the diff-0 skip in the `[1, 2)` block, the state after each);
-unit 1955/1955, blip 49112/0, songs 563/563 on both ROMs.  No source
+unit 1955/1955, resampler 49112/0, songs 563/563 on both ROMs.  No source
 correction was needed: the three blocks' flag analysis in section 2 held.
 
 **Step 6 — the FIX path.**  `pcm_drum`, `pcm_fix_loop`; se_faint's snare and
@@ -1013,7 +1120,7 @@ over four mixed frames with the fold and a volume-zero frame that does not
 advance it, the saw's eight states at the halved volume and the `mlane`
 zero skip, the triangle's two slopes and the +128 peak, the frame test
 (nothing is unported now); the Golden Sun tests re-derived (the threshold
-appears at the first mixed frame); unit 2014/2014, blip 49112/0, songs
+appears at the first mixed frame); unit 2014/2014, resampler 49112/0, songs
 571/571 on both ROMs.  Gate, vanilla: claim_check 59 diffed, 1 moved
 (pcm_psg's known 4 cycles), 63/72, 0 regressions and no row moved vs
 `2026-10-27_step8-cmp-rows`; baseline `2026-10-27_step9-synth-rows`.  HQ:
@@ -1028,54 +1135,222 @@ surfaces; `--input midi --mixer hq` run and its baseline family; README and
 `review-against-source` skills learn `--mixer hq`; this document rewritten
 from plan to reference as the facts settle.
 
-**Step 11 — rates other than 13379 Hz** (optional, later).  An HQ ROM variant
+**Step 10 — done 2026-10-27.**  No engine change.  Plugin: `hqMixer` in
+`M4APluginData` and `M4AGuiSettings`, config key `hq_mixer`, the CLAP
+state byte after the latch byte (absent loads as off), the Options item
+"HQ Mixer (ipatix)" with its tooltip, the combo without 7884 Hz while
+on, `apply_mixer_settings` / `hq_snap_pcm_mode` (section 5).  Harness:
+`claim_check.sh`'s default baseline skips midi-input files (a family of
+its own).  Measured: vanilla `claim_check` 59 diffed, 1 moved (pcm_psg's
+known 4 cycles), 63/72, 0 regressions and no row moved vs
+2026-10-27_step9-synth-rows; HQ 62 diffed, 1 moved (the same), 72/76, 0
+regressions vs 2026-10-27_hq-synths.  `--input midi --mixer hq`: 50/54 in
+both forms (plain and `--midi-quantize`), every row at its HQ song number
+and all 54 renders byte-identical to the `--song` ones; baselines
+`2026-10-27_hq-midi-path.json` / `-latch.json`.  Unit 2014/2014, resampler
+49112/0, songs 571/571 on both ROMs.  Docs: README (renderer flags, the
+config key, the Options item, an "HQ mixer mode" section), `ACCURACY.md`
+(the second configuration and the `--mixer` axis of the baseline family),
+both skills, and this document rewritten from plan to reference.
+
+**Step 11 — rates other than 13379 Hz** (optional).  An HQ ROM variant
 per rate needs `hq_buffer_ptr` resized and, with reverb, `PCM_DMA_BUF_SIZE`
 at 7 frames (appendix C) — the ring size then differs from the engine's
 constant 1584, which becomes a per-mode value.  Since the vanilla effort
 did not measure other rates either, this is a shared gap.
 
-**Step 12 — review** (`review-against-source`): two independent reviews of
-`m4a_hq_mixer.c` against the newmix assembly, every claim tested one at a
-time with `claim_check.sh --mixer hq`; then the HQ baseline is final.
+**Step 11 — done 2026-10-27**, at 21024 Hz (the wiki's own example rate:
+"melodic instruments around 16000 Hz, drums at 22050"), on both ROMs.
+ROMs: `make RATE=<hz>` (section 4; CMake `accuracy_rom_21024` /
+`accuracy_rom_hq_21024`), the default builds byte-identical to before
+(sha256 `6d53e9862beb` / `f47dea23ff9f`); the 21024 Hz pair `bbbc9775a172`
+(vanilla) / `e05d95784fd3` (HQ), `poryaaaa_song_tests` 571/571 on both,
+the `.frames` entries identical to the 13379 Hz builds' (only the
+SoundMainRAM entry +4 cycles), the boot timelines in appendix B.  Harness:
+`accuracy.py --pcm-rate <hz>` (the `rom[-hq]-<hz>` build,
+`poryaaaa_render --pcm-mix-rate`, `report[-hq]-<hz>.json`, a `"pcm_rate"`
+family `compare_reports.py` refuses to cross), `claim_check.sh --pcm-rate`,
+probe logs under `build/probe[-hq]-<hz>/`; the probe's ring dump reads the
+B half at `DMA2SAD − DMA1SAD` instead of a hard-coded 0x630 (with 0x630 it
+read the wrong memory on the 2464 ring and reported every B slot
+differing while A matched — a tooling artifact, found and fixed here).
+Engine (section 5): `pcmDmaBufSize` per configuration, `BUF` and the DMA
+reader on it, the buffers at `GBA_PCM_DMA_BUF_MAX`, `pcm_reprogram`
+shared by the two setters, the measured boot tables for mode 7, the
+first `SampleFreqSet` pass at 224 in the boot, `GBA_FIFO_DEBUG`.
+Measured in two rounds.  (1) The first run read every PCM row at
+−20..−35 dB with lag 0.5 ms (vanilla) / −0.3 ms (HQ) and the PSG rows
+−inf: not the mixers (both wrong by different amounts) but the FIFO —
+`GBA_FIFO_DEBUG` showed the engine's refills starting at cycle 798 while
+the ROM's first fill is at 41049: a non-default rate ran `pcm_reprogram`
+before the boot, which enabled the timer and the DMA from cycle 0, so the
+stale FIFO state at the final timer start was not the ROM's (the note's
+slot 704 fetched at 1153002 vs the ROM's 1160982 in vanilla, 10 ticks
+early; 1164970 vs 1159384 in HQ, 7 ticks late).  With the pre-boot
+reprogram only setting the numbers, the refill cycles match the probe's
+exactly (41048, 321486, 331062, … slot 704 at 1160982 / 1159384) and
+`pcm` reads −72.4 / −59.0.  (2) The full runs: vanilla 60/72, HQ 73/76
+(baselines `2026-10-27_21024-step11-rate-variants` /
+`_hq-21024-step11-rate-variants`), the PSG rows −inf as at 13379 Hz,
+20 / 27 rows −inf against 29 / 42 at 13379 Hz, and every row that moved
+off −inf at the floor: the probe's `.events` count 1.5–2.4× the timer-0
+slot crossings (pcm 0 → 2 vanilla, 1 → 14 HQ; cry_jynx 19 → 31;
+mt_chimney 89 → 179; rg_vs_trainer 93 → 212; pcm_short_loop 7 / 10,
+pcm_fix_loop 12, pcm_cmp_hi 16, cry_bulbasaur_reverse 0 → 11), every
+differing frame a single one-slot shift with the resampler's tail
+(`frame_diff`: pcm_short_loop 7 crossings → 37 differing frames), and
+the HQ rings byte-identical in all 177 frames on pcm_short_loop,
+se_rain_stop and cry_pidgey_echo_start (the three HQ failures; the ring
+compare of the 13379 Hz `pcm` still 0 differing with the fixed probe).
+The failures are the floor on loud high-ratio rows (pcm_short_loop
+−38.9 / −39.3, pcm_fix_loop −42.1 / −39.6, pcm_cmp_hi −34.8 vanilla),
+the two noise-heavy songs on vanilla (mt_chimney −46.1 / −37.3,
+rg_vs_trainer −43.5 / −36.8: 179 and 212 crossings) and the cries that
+were at the floor already (cry_pidgey_echo_start −35.7 vanilla, −37.4
+HQ; se_rain_stop −42.7 / −45.0 with a −37.8 / −39.9 worst second).
+Nothing in the engine fixes a crossing (`ACCURACY.md`, section 6).
+The write-cycle gate at 21024 Hz (`probe_corpus.sh` on both ROMs, then
+`claim_check.sh --pcm-rate 21024 [--mixer hq]`): 62 / 60 logs diffed, 0
+moved writes on either ROM — the PSG timing model carries over to the
+rate unchanged — and 0 regressions vs the new baselines.
+Gates at 13379 Hz: vanilla `claim_check` 59 diffed, 1 moved (pcm_psg's
+4 cycles), 63/72, 0 regressions and no row moved vs
+2026-10-27_step9-synth-rows; HQ 62 diffed, 1 moved (pcm_psg), 72/76,
+0 regressions and no row moved vs 2026-10-27_hq-synths (baselines
+`2026-10-27_step11-rate-variants` / `_hq-step11-rate-variants`).  Unit
+2026/2026 (+12: the ring size in both setter orders, the DMA reader,
+the largest ring).  The other table rates are built the same way but
+unmeasured; their boot tables are the mixer's 13379 Hz ones (section 8).
+
+**Step 12 — review** (`review-against-source`; done 2026-10-27): two
+independent read-only reviews, one of `m4a_hq_mixer.c` / `m4a_synth.h`
+against the vendored newmix assembly (lines 88-1210), one of the data and
+plumbing around it (loader bytes against the HQ ROM, ring size, boot
+tables, plugin state, CLI, tests).  The mixer review confirmed every path
+a pokeemerald sample reaches instruction by instruction — the three fast
+blocks' condition codes and whose flags they read, the unbuffered loop,
+the FIX path, both pre-cached paths with the open-bus block addressing
+and the delta table's whole-byte first index, the three synths, the
+downsampler's saturation and the reverb seed, every store — with no
+divergence on a stock path.  The plumbing review verified the loader's
+`romBefore` layout and the next-entry fill against the ROM bytes of
+Cry_Bulbasaur / Cry_Ivysaur / Cry_Venusaur, the ring sizes, the boot
+order (SoundInit's own 13379 Hz pass, then m4aSoundMode's) and the state
+bytes.  Six findings were fixed, each gated by a unit test (none reaches
+the harness's stock path, so all were predicted harness-neutral and
+measured so): (1) `m4a_engine_set_hq_mixer` cleared `hq_buffer` (the
+next frame's reverb seed), the noise-shape residuals and
+`CHN_SAMPLE_STOR` on every call, and the plugin re-applies its settings
+on every GUI change — now a no-op when the mode is unchanged; (2)
+`poryaaaa_render --hq-stack-sp` was ignored on the `--midi` path; (3)
+the host's 0x600 cap on the pre-cached stack image was below the budget
+a `--hq-stack-sp` near the top of IWRAM allows (the ROM's check would
+mix a 1536..1780-byte frame the port skipped) — the cap is 0x700 =
+0x03008000 − 0x03007900, beyond any IWRAM sp; (4) a FIX channel entering
+with count 0 (an XCMD start offset clamped to the sample's size) turned
+the length check's −1 >> 2 into a 2^31-iteration write past `hq_buffer`
+(the ROM reads 0x3FFFFFFF blocks through memory) — a host guard stops
+the channel; (5) the portamento legato inherit (opt-in, not in the
+source) copied the position but not the type bits the channel init added
+(CMP from the WaveData: the inherited channel took the uncompressed path
+with an index-form pointer) nor `CHN_SAMPLE_STOR` — both copied now; (6)
+unit coverage for the re-apply rule and the 7884 Hz snap in both setter
+orders.  Not acted on, recorded in `ACCURACY.md` section 6: channels
+above a lowered `maxPcmChannels` (SoundMainRAM freezes exactly
+`maxChans` channels, both ports process every ON channel) and a loop
+with `loopStart > size` (negative loop length).  Cosmetic, left as is:
+the decay→IEC transition keeps `ENV_DECAY` in the status byte in the
+source and clears it in the port (the mixer tests IEC first, no output
+change); the `ID_NUMBER` store and `previous_fast_code` are not
+modelled; the loader's prev/next walk stops at the synth descriptor
+file (only the last `direct_sound_data.inc` entry, if compressed and
+truncated, would lack its fill); the direct-from-ROM read of a > 0x400
+byte uncompressed frame reads the same bytes; `hq_report`'s
+unported-frame count is always 0 now; right shifts of negative values
+are arithmetic on every supported compiler.  Gate, vanilla:
+`claim_check` 59 diffed, 1 moved (pcm_psg's known 4 cycles), 63/72, 0
+regressions and no row moved vs 2026-10-27_step11-rate-variants.  HQ:
+62 diffed, 1 moved (pcm_psg), 72/76, 0 regressions and no row moved vs
+2026-10-27_hq-step11-rate-variants.  Unit 2043/2043 (+17), resampler 49112/0,
+songs 571/571 on both ROMs; the 21024 Hz runs unchanged (60/72 and
+73/76, 0 regressions, no row moved vs their step 11 baselines).
+Baselines `2026-10-27_step12-review` / `_hq-step12-review`: **the HQ
+baseline is final.**
 
 ---
 
-## 8. Risks and expected residuals
+## 8. Known residuals and limitations
 
-- **The PCM floor** stays (mgba scheduler lateness), possibly at other
-  levels and on other rows than vanilla; confirm with `.events`.  Step 1
-  showed the DMA3 copies alone move `mus_vs_wild` by −48 dB null / −40 dB
-  worst second between the `ENABLE_DMA` variants (section 3), so the HQ
-  floor on DirectSound-heavy rows may touch the gate.  Step 2(f) found the
-  same mechanism at the same scale on both ROMs: no DMA3 term.
-- **Reversed DPCM end frame**: two open-bus blocks and the real tail
-  cleared (section 2), reproduced from the mixer's own code bytes; a
-  residual only if step 8 chooses not to port it.
+Residuals (rows under −40 dB that are not −inf, and the four failing rows)
+as of the 2026-10-27_hq-step12-review baseline (72/76):
+
+- **The PCM floor** (mgba scheduler lateness, section 3): rows whose ring
+  slots are byte-identical to the ROM's and whose residual is one DAC step
+  in the frame of a timer-0 slot crossing — pcm, pcm_reverb,
+  pcm_reverb_max, pan, bend, lfo_delay, pcm_chord, pcm_bass, pcm_psg,
+  pcm_drum, se_contest_place, cry_wailord_doubles, cry_over_se,
+  cry_over_bgm, and the six songs (−44 … −54).  Four rows fail the gate on
+  their worst second at the floor: mus_mt_chimney (−44.0 / −28.9, 48
+  crossings on a noise-heavy passage, ring identical over 1193 frames),
+  mus_credits (−47.7 / −39.1), se_contest_place (−69.2 / −39.6) and
+  se_faint (−49.2 / −38.5).
+- **se_faint −49.2 is unattributed**: its voicegroup has no FIX, CMP, REV
+  or synth voice, and the row did not move through steps 6–9; not yet
+  probed with the ring compare.  Open.
+- **pcm_psg's CgbSound entry 4 cycles early in frame 123** on both ROMs: a
+  vanilla sequencer-cost residual (`ACCURACY.md` section 6), shown by both
+  gates as the one moved write.
+- **The open-bus end frame** of a reversed DPCM sample is reproduced as
+  mgba reads it (`GBALoadBad`: the prefetch word two ahead, byte-selected
+  by the address; section 2), an emulator model recorded in `ACCURACY.md`;
+  hardware reads something else there.
+
+Limitations of the mode (stock HQ behaviour, reproduced on purpose):
+
 - **The stack budget** is ROM-dependent (the game's `sp` at the interrupt
-  varies); the engine's default is the test ROM's.  Document as a
-  limitation; no vanilla corpus row should reach it.
-- **Compressed loops are not looped** in HQ — a behaviour difference hackers
-  may hit with looped compressed samples; stock HQ behaviour, reproduce it.
-- **The eventide synth extension** did differ from the measured HQ synth
-  (the pulse LFO one step ahead and advancing on unmixed frames, the saw's
-  `state >> 1` at full volume instead of the state at `floor(v / 2)`);
-  step 9 re-derived it from the shared oscillator code (section 2).
-- **IWRAM layout / probe labels** all move; every probe recipe in the
-  skills needs the HQ addresses alongside the vanilla ones.
+  varies with the main loop's call depth); the engine's default is the
+  test ROM's 0x03007DD0 (1220 bytes: 19 blocks of a compressed frame
+  pass, 20 skip).  `--hq-stack-sp` sets another; the plugin has no
+  surface for it.  No vanilla corpus row reaches the budget.
+- **Compressed loops are not looped** in HQ (the source's TODO): a looping
+  compressed sample ends.
+- **7884 Hz** is not an HQ mix rate (its frame is not a multiple of 8);
+  the engine and the plugin snap it to 13379 Hz.
+- **Rates other than 13379 and 21024 Hz are unmeasured** (step 11): the
+  engine mixes any table rate but 7884 through the same code with the
+  wiki's 7-frame ring, but only the 21024 Hz builds of the two ROMs have
+  been probed and nulled (vanilla 60/72, HQ 73/76, every miss the floor:
+  the 798-cycle timer crosses a DAC slot boundary 1.5–2.4× as often as the
+  1254-cycle one, so rows that were −inf sit at −45..−80 and the loud
+  high-ratio rows, the noise songs and the near-floor cries miss the gate
+  — `2026-10-27_21024-step11-rate-variants` / `_hq-21024-…`).  Another
+  rate replays the mixer's 13379 Hz boot table (its SampleFreqSet pass
+  differs by a few cycles: the divisions' operands and the VCOUNT poll's
+  exit phase, 2 / 6 / 6 cycles at 21024 Hz in vanilla), so its first
+  frames may carry a one-slot offset until measured.  Vanilla has the
+  same gap.
 - **Other HQ variants in the wild**: ipatix's master branch (`ENABLE_REVERB
   0` default, `POKE_CHN_INIT`), older revisions, pokeemerald-expansion's
-  copy, eventide's.  This effort targets the wiki's file; differences in
+  copy, eventide's.  The mode reproduces the wiki's file; differences in
   other copies are out of scope until measured.
+- **Paths without a dedicated row**: the volume-zero freeze and the
+  saturation are unit-tested and reached by songs, not by a micro row
+  (section 6).
+- **Reviewed** (step 12, 2026-10-27): both source-comparison reviews have
+  run; the HQ baseline `2026-10-27_hq-step12-review` is final.  Two
+  limitations they recorded are in `ACCURACY.md` section 6 (channels
+  above a lowered `maxPcmChannels`, `loopStart > size`).
 
 ---
 
-## 9. Working rules for this effort
+## 9. Working rules for HQ mode
 
 All of `ACCURACY.md` section 7, plus:
 
-- **The vanilla configuration is frozen.**  No step may move a vanilla
-  write or row; HQ code lives behind the flag and in its own file.
-- **One mixer path per step**, each with a row that reaches it and a
+- **The vanilla configuration is frozen.**  No HQ change may move a vanilla
+  write or row; HQ code lives behind the flag and in its own file, and
+  every HQ change runs both gates.
+- **One mixer path per change**, each with a row that reaches it and a
   predicted number written before the run.
 - **Port the instruction, not the intent**: condition codes, packed-word
   borrows, truncation order, the skipped-channel cases.  Where a quirk is
@@ -1132,7 +1407,7 @@ Register conventions in the ARM mixing code: r2 count, r3 pointer, r4 step,
 r5 mix buffer, r6 base sample, r7 fine position, r8 samples left, r11 packed
 volume, r12 diff.
 
-## Appendix B: arithmetic reference (as read; confirm per step)
+## Appendix B: arithmetic reference (measured)
 
 - Volume: `v = env × (mv + 1)`; `L = (leftVolume × v) >> 13`, `R =
   (rightVolume × v) >> 13`; packed `P = L << 16 | R`.  Halved: `P' =
@@ -1192,6 +1467,24 @@ volume, r12 diff.
   SoundMainRAM entry 0x03007DD0 (0x03007DB8 with a second cry / a cry over
   a song).  Mixer cost: 7683 cycles with no channel (7 skipped channels
   and the downsampler), up to 39874 (littleroot).
+- Boot timelines of the 21024 Hz builds (step 11, `mgba_probe` on the
+  `pcm` row, 2026-10-27).  Vanilla 21024 (vs vanilla): SoundInit's block
+  and its SampleFreqSet pass identical (5720 / 5737 / 5760, DMA on 15873,
+  timer on 39794, MPlayExtender 39875–39935, DMA off 41238); m4aSoundMode's
+  pass: timer off 47452 → 47450, DMA on 47893 → 47887 (the divisions'
+  operands), timer on 320682 → **320688** (the VCOUNT 159 poll's exit
+  phase), DISPSTAT / IE / IME 323284 / 323299 / 323305; the timer reload
+  is −798 (0xFCE2).  HQ 21024 (vs HQ): SoundInit's block identical (7800 /
+  7817 / 7840), DMA on 17953 → **20589** (+2636: CpuFill32 of the
+  1760-byte-larger SoundInfo), the pass still ending on frame 0's line 159
+  at vanilla's 39794 (so MPlayExtender 39875–39935 and DMA off 41238 are
+  vanilla's, not the HQ ROM's 39867 / 41230), timer off 47444 → **50088**
+  and DMA on 47885 → **50525** (m4aSoundVSyncOff's CpuFill32 of the
+  larger ring), timer on 320686 (the HQ ROM's), DISPSTAT / IE / IME
+  323282 / 323297 / 323303.  The FIFO refill cadence after the final
+  start is the model's on both: the first fill one tick (798 cycles)
+  later, the second 12 ticks after it, then every 16 ticks.  ROM sha256
+  prefixes: vanilla 21024 `bbbc9775a172`, HQ 21024 `e05d95784fd3`.
 
 ## Appendix C: the wiki's tables
 
@@ -1204,7 +1497,11 @@ equal `gPcmSamplesPerVBlankTable`.
 `PCM_DMA_BUF_SIZE` for 7 frames at a raised rate with reverb: 5734 Hz 672,
 7884 Hz 924 (unsupported), 10512 Hz 1232, 13379 Hz 1568 (the vanilla define
 is 1584 and stays), 15768 Hz 1848, 18157 Hz 2128, 21024 Hz 2464, 26758 Hz
-3136, 31536 Hz 3696, 36314 Hz 4256, 40137 Hz 4704, 42048 Hz 4928.
+3136, 31536 Hz 3696, 36314 Hz 4256, 40137 Hz 4704, 42048 Hz 4928.  The
+wiki applies this only with the rate raised and reverb kept ("the reverb
+sounds shorter" without it, the game does not crash); the test ROM's
+`RATE=` build and the engine's `pcmDmaBufSize` follow the table at every
+rate but 13379 (section 4, section 5).
 
 The wiki's `DmaSetUnchecked`: `register` r0/r1/r2 bindings and one
 `asm volatile("stmia %0!, {%1, %2, %3}")` with a `"memory"` clobber in place

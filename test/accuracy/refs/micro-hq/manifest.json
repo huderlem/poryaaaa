@@ -1,6 +1,6 @@
 {
  "rom_sha256": "f47dea23ff9f949de4c795aa122be9ed7e3e73908992152c45af3daef74954b0",
- "mgba": "mGBA 0.10.5+m4a_blip",
+ "mgba": "mGBA 0.10.5+m4a_resampler",
  "rate": 48000,
  "seconds": 3.0
 }

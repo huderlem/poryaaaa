@@ -60,6 +60,14 @@ default follows --mixer); "engine_mixer" in the report records it.
 The synth_* micro rows (the HQ mixer's synth paths, zero-size samples the
 vanilla ROM plays as a click) run only with --mixer hq.
 
+--pcm-rate <hz> (default 13379) selects a ROM built at another DirectSound
+mix rate (make RATE=<hz>; build/accuracy/rom[-hq]-<hz>, CMake
+accuracy_rom[_hq]_<hz>), passes --pcm-mix-rate <hz> to poryaaaa_render and
+writes "pcm_rate" into the report: another baseline family
+(baselines/<date>_[hq-]<hz>-*.json; the report is report[-hq]-<hz>.json).
+Its micro references are not committed (refs/micro[-hq]-<hz> would be the
+place); the run needs mgba_render.
+
 Typical use (after `make` in test/accuracy/rom and building mgba_render and
 poryaaaa_render):
   tools/accuracy.py --pokeemerald ~/pokeemerald
@@ -370,6 +378,8 @@ def render_poryaaaa(args, t, overlay, out_dir):
         cmd += ["--cry2", str(t["cry2"]), "--cry2-start-frame", str(t["cry2_start_frame"])]
     if args.engine_mixer == "hq":
         cmd.append("--hq-mixer")             # the engine's HQ-mixer mode (docs/HQ-MIXER-ACCURACY.md, section 5)
+    if args.pcm_rate != 13379:
+        cmd += ["--pcm-mix-rate", str(args.pcm_rate)]   # the ROM's rate (step 11)
     cmd += args.poryaaaa_args
     if run(cmd, wav + ".log") != 0:
         raise SystemExit(f"poryaaaa_render failed for {t['name']}, see {wav}.log")
@@ -392,6 +402,9 @@ def main():
                     help="which test ROM: vanilla pokeemerald or the ipatix HQ-mixer build (MIXER=hq); its own reference cache, committed set and baseline family")
     ap.add_argument("--engine-mixer", choices=("vanilla", "hq"), default=None,
                     help="what poryaaaa_render is asked for (hq adds --hq-mixer); default: the same as --mixer")
+    ap.add_argument("--pcm-rate", type=int, default=13379,
+                    help="the ROM's DirectSound mix rate in Hz (make RATE=<hz>: build/accuracy/rom[-hq]-<hz>); "
+                         "poryaaaa_render gets --pcm-mix-rate <hz>; its own baseline family (default 13379)")
     ap.add_argument("--mgba-render", default=None, help="mgba_render binary (default: build/mgba_render; omit to use committed refs)")
     ap.add_argument("--poryaaaa-render", default=os.path.join(REPO, "build", "poryaaaa_render"))
     ap.add_argument("--build-dir", default=os.path.join(REPO, "build", "accuracy"))
@@ -421,12 +434,13 @@ def main():
     global COMMITTED_REFS
     if args.engine_mixer is None:
         args.engine_mixer = args.mixer
-    rom_sub = "rom" if args.mixer == "vanilla" else "rom-hq"
-    if args.mixer == "hq":
-        COMMITTED_REFS = os.path.join(ACC_DIR, "refs", "micro-hq")
+    rate_suffix = "" if args.pcm_rate == 13379 else f"-{args.pcm_rate}"
+    rom_sub = ("rom" if args.mixer == "vanilla" else "rom-hq") + rate_suffix
+    if args.mixer == "hq" or rate_suffix:
+        COMMITTED_REFS = os.path.join(ACC_DIR, "refs", ("micro-hq" if args.mixer == "hq" else "micro") + rate_suffix)
     if args.rom is None:
         for cand in (os.path.join(REPO, "build", "accuracy", rom_sub, "accuracy_test.gba"),
-                     os.path.join(ROM_DIR, "build" if args.mixer == "vanilla" else "build-hq", "accuracy_test.gba")):
+                     os.path.join(ROM_DIR, ("build" if args.mixer == "vanilla" else "build-hq") + rate_suffix, "accuracy_test.gba")):
             if os.path.exists(cand):
                 args.rom = cand
                 break
@@ -459,7 +473,7 @@ def main():
 
     tests = build_tests(args)
     results = []
-    print(f"ROM: {args.rom} (mixer {args.mixer}; engine asked for {args.engine_mixer})\nmgba: {ver}\nreferences: {ref_dir}\n")
+    print(f"ROM: {args.rom} (mixer {args.mixer}; engine asked for {args.engine_mixer}; PCM rate {args.pcm_rate} Hz)\nmgba: {ver}\nreferences: {ref_dir}\n")
     hdr = f"{'test':18s} {'lag ms':>7s} {'gain dB':>8s} | {'null':>7s} {'worst1s':>7s} | {'gm null':>7s} {'gm wrst':>7s} | {'ref':>6s} {'test':>6s} | {'drift':>7s} | gate {args.gate:.0f}"
     print(hdr)
     print("-" * len(hdr))
@@ -491,12 +505,12 @@ def main():
     print(f"{n_pass}/{len(results)} pass at {args.gate:.0f} dB (raw null depth, full file and worst 1 s window)")
     report = {"rom": args.rom, "mgba": ver, "rate": args.rate, "gate_db": args.gate,
               "label": args.label, "input": args.input, "mixer": args.mixer, "engine_mixer": args.engine_mixer,
-              "results": results}
+              "pcm_rate": args.pcm_rate, "results": results}
     if args.input == "midi":
         report["midi_quantize"] = bool(args.midi_quantize)   # the midi baseline families
         report["gba_start_delay"] = bool(args.gba_start_delay)
         report["gba_tempo_grid"] = bool(args.gba_tempo_grid)
-    path = args.json or os.path.join(args.build_dir, "report.json" if args.mixer == "vanilla" else "report-hq.json")
+    path = args.json or os.path.join(args.build_dir, ("report" if args.mixer == "vanilla" else "report-hq") + rate_suffix + ".json")
     with open(path, "w") as f:
         json.dump(report, f, indent=1)
     print(f"report: {path}")

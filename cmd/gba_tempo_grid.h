@@ -69,7 +69,7 @@ void gba_tempo_grid_set_tempo(GbaTempoGrid *g, uint32_t usPerBeat);
 uint32_t gba_tempo_grid_tempo_i(uint32_t usPerBeat, uint32_t clocksPerBeat);
 
 /* The output sample an event of grid frame `frame` is dispatched at: the
- * last sample a blip frame before that frame's SoundMain (frame 0 is the
+ * last sample a resampler frame before that frame's SoundMain (frame 0 is the
  * --gba-start-delay origin, 2522 at 48 kHz). */
 uint64_t gba_tempo_grid_sample(int64_t frame, double sampleRate);
 

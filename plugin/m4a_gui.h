@@ -30,6 +30,10 @@ typedef struct {
     bool respectBaseMidiKey;
     bool portamentoEnabled;
     bool pwmEnabled;
+    /* HQ-mixer mode (Options menu): ipatix's HQ mixer in place of the
+     * vanilla SoundMainRAM.  While on, the PCM Mix Rate combo omits 7884 Hz
+     * (not an HQ mix rate) and a 7884 setting shows as the default. */
+    bool hqMixer;
     /* MIDI event latch override (M4ALatchMode; Options menu) */
     uint8_t eventLatchMode;
     /* Polyphony debug: mute normal audio, play only overflow-lost sounds.

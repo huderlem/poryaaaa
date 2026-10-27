@@ -32,8 +32,23 @@ test/accuracy/tools/accuracy.py --input midi --midi-quantize   # ... with poryaa
 test/accuracy/tools/accuracy.py --input midi --no-gba-start-delay  # ... with the first MIDI note at output time 0
 test/accuracy/tools/accuracy.py --input midi --no-gba-tempo-grid  # ... with the MIDI's exact tempo map instead of the ROM's tick frames
 test/accuracy/tools/accuracy.py --committed-refs   # no mgba build needed, micro-tests only
+test/accuracy/tools/accuracy.py --mixer hq         # the HQ-mixer ROM (build/accuracy/rom-hq) and poryaaaa_render --hq-mixer
+test/accuracy/tools/accuracy.py --mixer hq --input midi [--midi-quantize]   # the MIDI path in HQ mode
+test/accuracy/tools/accuracy.py [--mixer hq] --pcm-rate 21024   # the 21024 Hz build of the ROM (build/accuracy/rom[-hq]-21024, cmake target accuracy_rom[_hq]_21024) and poryaaaa_render --pcm-mix-rate 21024
 build/poryaaaa_song_tests build/accuracy/rom       # .s parser vs ROM, byte for byte
+build/poryaaaa_song_tests build/accuracy/rom-hq    # ... and on the HQ ROM (moved addresses)
 ```
+
+`--mixer hq` is the second engine configuration (`docs/HQ-MIXER-ACCURACY.md`):
+the HQ test ROM (`cmake --build build --target accuracy_rom_hq`, or
+`accuracy_hq` for the whole run), its own reference cache and committed
+micro refs (`refs/micro-hq`), `--hq-mixer` on every render, the report at
+`build/accuracy/report-hq.json`, and **its own baseline family**
+(`baselines/<date>_hq-*.json`; `_hq-midi-path-*` for `--input midi`).
+`--engine-mixer vanilla` asks the HQ ROM against the vanilla engine (an
+informational "how far apart are the mixers" number, never a baseline).
+Every rule below holds in both modes; where a command takes a ROM or a
+baseline, use the HQ one.
 
 `--input song` (the default) plays
 `build/accuracy/rom/{micro,songs}/<name>.s` through `poryaaaa_render --song`,
@@ -59,7 +74,9 @@ Never compare a midi report against a song-input baseline with
 `compare_reports.py`, and never save a midi run as the song-input
 baseline.  In the default form every grid WAV is its row's `--song`
 render sample for sample; the aligned pair (no grid) is the stand-in for
-the plugin and differs from the ROM by design.
+the plugin and differs from the ROM by design.  The HQ mode's midi family
+is `2026-10-27_hq-midi-path.json` / `-latch.json` (50/54, every row at its
+HQ song number: the mixer is after everything the MIDI path affects).
 
 Debugging a MIDI-path row: render it both ways with `--pcm-log` (every
 DirectSound channel after each SoundMain) and `--psg-log` (both work on
@@ -107,7 +124,10 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
    `report.json` is whatever the **last** run wrote, so run the default
    harness immediately before copying (a `--tests` or `--input midi` run
    in between produces a two-test or a midi-input baseline; this happened
-   once):
+   once).  An HQ run writes `report-hq.json` and its baseline is named
+   `<date>_hq-<name>` (`_hq-midi-path-<name>` for a midi run); both
+   families are saved after an HQ change, and the vanilla one must show no
+   row moved:
    ```sh
    test/accuracy/tools/accuracy.py > /tmp/full.txt
    cp build/accuracy/report.json test/accuracy/baselines/<date>_<name>.json
@@ -121,10 +141,15 @@ logs are in `build/accuracy/out/`, references in `build/accuracy/refs/<romhash-m
 
 One change at a time, never a batch: in this project three "verified"
 constant changes applied together once hid that one of them broke four
-bit-exact tests. `test/accuracy/tools/claim_check.sh [<baseline.json>]
+bit-exact tests. `test/accuracy/tools/claim_check.sh [--mixer vanilla|hq] [--pcm-rate <hz>] [<baseline.json>]
 [<out dir>]` does steps 1-3 below in one run (build, the three test
-binaries, the write-cycle diff of every probed test in `build/probe/`,
-the harness and `compare_reports.py`; about five minutes). For each
+binaries, the write-cycle diff of every probed test in `build/probe/`
+(`build/probe-hq/` with `--mixer hq`, `build/probe[-hq]-<hz>/` with
+`--pcm-rate`), the harness and
+`compare_reports.py`; about five minutes).  Its default baseline is the
+newest of the mixer's (and rate's) family, never a midi one.  An HQ-mode change runs
+both: `--mixer vanilla` must show 0 moved writes and no row moved (the
+vanilla configuration is frozen), `--mixer hq` no regression.  For each
 candidate:
 
 1. Apply it alone; rebuild `poryaaaa_render` and `poryaaaa_unit_tests`.
@@ -241,7 +266,22 @@ HQ-mixer ROM: `build/probe-hq/syms.nm` from its ELF plus the same
 CgbSound_ lines (CgbSound did not move); the probe breaks on the HQ
 mixer's `C_*` / `F_*` labels at the IWRAM copy and logs every register,
 `sp` at SoundMainRAM entry, the decoded DPCM buffer and the ring slot it
-wrote (`docs/HQ-MIXER-ACCURACY.md`, step 2).
+wrote (`docs/HQ-MIXER-ACCURACY.md`, step 2).  A rate variant
+(`build/accuracy/rom[-hq]-<hz>`): its own `nm` into `build/probe[-hq]-<hz>/syms.nm`
+(the IWRAM map moves with `SoundInfo`'s size; the ROM symbols and the
+CgbSound_ lines do not).
+
+**A new ROM variant's boot table** (`sBootTable*` in `plugin/m4a_engine.c`):
+probe any row and list the boot writes,
+`awk '$1+0 > 300 && $1+0 < 330000 && $4 == "W" && $5 !~ /040000(A0|A4|BC|C0|C4|C8|CC|D0|D4|D8|DC)/ {print $1, $5, $7}' <log>`
+(SOUNDCNT_X / H / BIAS, the two DMA on / off pairs at 0C6 / 0D2, the timer
+at 102, MPlayExtender's PSG bytes), and the FIFO refill cadence,
+`awk '$4=="W" && $5=="040000A0" {print $1, $7}'`, against
+`GBA_FIFO_DEBUG=1 build/poryaaaa_render ...` (one `FIFODMA <cycle> <A|B>
+<ring offset> <4 words>` line per refill on stderr): the first fill one
+timer period after the final start, then every 16 ticks, and the slot of
+the first nonzero word at the same cycle.  A rate change before the boot
+must not enable the timer or the DMA (the boot table does; step 11).
 
 **Debugging an HQ-mixer row** (`accuracy.py --mixer hq`): first
 `tools/frame_diff.py <ref.wav> <out.wav>` for the differing frames; then
@@ -344,8 +384,8 @@ inactive channel before it). Record every new number in `docs/ACCURACY.md`
 Never run `--update-refs` to make numbers better. References change only
 when the ROM changes (micro MIDIs, `accuracy_micro.inc`, ROM sources) or
 the reference definition does (the refs path is keyed on the ROM hash and
-`mgba_render --version`, which names the resampler: `mGBA 0.10.5+m4a_blip`
-is mgba's DAC stream through the engine's own m4a_blip, the reference since
+`mgba_render --version`, which names the resampler: `mGBA 0.10.5+m4a_resampler`
+is mgba's DAC stream through the engine's own m4a_resampler, the reference since
 2026-10-24; `--native-resampler` gives mgba's sinc output for listening).
 
 ## Add a test

@@ -27,8 +27,10 @@ def main():
     ap.add_argument("--threshold", type=float, default=1.0, help="dB of worsening that counts as a regression")
     a = ap.parse_args()
     rb, ra = json.load(open(a.before)), json.load(open(a.after))
-    for key in ("input", "mixer"):       # the baseline families: song / midi input, vanilla / hq test ROM
-        vb, va = rb.get(key, "song" if key == "input" else "vanilla"), ra.get(key, "song" if key == "input" else "vanilla")
+    # the baseline families: song / midi input, vanilla / hq test ROM, the ROM's PCM rate
+    defaults = {"input": "song", "mixer": "vanilla", "pcm_rate": 13379}
+    for key, dflt in defaults.items():
+        vb, va = rb.get(key, dflt), ra.get(key, dflt)
         if vb != va:
             raise SystemExit(f"refusing to compare reports of different {key} ({vb} vs {va}): separate baseline families")
     before = {r["name"]: r for r in rb["results"]}

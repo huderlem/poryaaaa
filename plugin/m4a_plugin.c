@@ -125,6 +125,8 @@ static void load_config_file(M4APluginData *data)
             data->portamentoEnabled = (atoi(value) != 0);
         } else if (strcmp(key, "pwm") == 0) {
             data->pwmEnabled = (atoi(value) != 0);
+        } else if (strcmp(key, "hq_mixer") == 0) {
+            data->hqMixer = (atoi(value) != 0);
         } else if (strcmp(key, "quantize_events") == 0) {
             data->eventLatchMode = (uint8_t)m4a_latch_mode_from_name(value);
         } else if (strcmp(key, "pcm_mix_rate") == 0) {
@@ -181,6 +183,24 @@ static void load_config_file(M4APluginData *data)
 
 /* ---- Plugin lifecycle ---- */
 
+/* The HQ mixer has no 7884 Hz mode (its frame, 0x84 samples, is not a
+ * multiple of 8; m4a_engine_set_hq_mixer snaps the engine the same way).
+ * Snap the plugin's own setting too, so what is saved is what plays. */
+static void hq_snap_pcm_mode(M4APluginData *data)
+{
+    if (data->hqMixer && data->pcmFreqMode == 2)
+        data->pcmFreqMode = M4A_PCM_FREQ_MODE_DEFAULT;
+}
+
+/* The engine-side application of the mixer choice and the PCM rate, in the
+ * order the engine needs (the HQ flag first: it decides whether 7884 Hz is
+ * allowed, and before the first process block it selects the boot table). */
+static void apply_mixer_settings(M4APluginData *data)
+{
+    m4a_engine_set_hq_mixer(&data->engine, data->hqMixer);
+    m4a_engine_set_pcm_freq_mode(&data->engine, data->pcmFreqMode);
+}
+
 static bool plugin_init(const clap_plugin_t *plugin)
 {
     M4APluginData *data = (M4APluginData *)plugin->plugin_data;
@@ -191,6 +211,7 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->respectBaseMidiKey = false;
     data->portamentoEnabled = false;
     data->pwmEnabled = false;
+    data->hqMixer = false;
     data->eventLatchMode = M4A_LATCH_TRANSPORT;
     data->polyDebugInvert = false;
     data->pcmFreqMode = M4A_PCM_FREQ_MODE_DEFAULT; /* SOUND_MODE_FREQ_13379 */
@@ -203,6 +224,7 @@ static bool plugin_init(const clap_plugin_t *plugin)
     data->guiTimerId = CLAP_INVALID_ID;
     /* Load defaults from config file placed next to the .clap */
     load_config_file(data);
+    hq_snap_pcm_mode(data);
     /* Forward the log path into the voicegroup loader so it can emit diagnostics */
     voicegroup_loader_set_log_path(s_pluginLogPath);
     return true;
@@ -233,7 +255,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
     m4a_engine_set_portamento_enabled(&data->engine, data->portamentoEnabled);
     m4a_engine_set_pwm_enabled(&data->engine, data->pwmEnabled);
     m4a_engine_set_poly_debug_invert(&data->engine, data->polyDebugInvert);
-    m4a_engine_set_pcm_freq_mode(&data->engine, data->pcmFreqMode);
+    apply_mixer_settings(data);
     m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
     /* The fresh engine's event latch is off: the transport is "not playing"
      * until a block says otherwise. */
@@ -278,6 +300,7 @@ static bool plugin_activate(const clap_plugin_t *plugin, double sample_rate,
         gs.respectBaseMidiKey = data->respectBaseMidiKey;
         gs.portamentoEnabled = data->portamentoEnabled;
         gs.pwmEnabled        = data->pwmEnabled;
+        gs.hqMixer           = data->hqMixer;
         gs.eventLatchMode    = data->eventLatchMode;
         gs.polyDebugInvert   = data->polyDebugInvert;
         gs.voicegroupLoaded  = (data->loadedVg != NULL);
@@ -551,6 +574,9 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     if (stream->write(stream, &pcmMixRate, sizeof(pcmMixRate)) != sizeof(pcmMixRate)) return false;
     /* MIDI event latch override (M4ALatchMode), appended after the mix rate */
     if (stream->write(stream, &data->eventLatchMode, 1) != 1) return false;
+    /* HQ-mixer mode, appended after the latch byte (absent loads as off) */
+    uint8_t hqMixerByte = data->hqMixer ? 1 : 0;
+    if (stream->write(stream, &hqMixerByte, 1) != 1) return false;
 
     return true;
 }
@@ -612,6 +638,12 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (stream->read(stream, &latchByte, 1) != 1)
         latchByte = M4A_LATCH_TRANSPORT;
     data->eventLatchMode = (uint8_t)m4a_latch_mode_from_byte(latchByte);
+    /* HQ-mixer mode is optional (absent in older saves): off. */
+    uint8_t hqMixerByte = 0;
+    if (stream->read(stream, &hqMixerByte, 1) != 1)
+        hqMixerByte = 0;
+    data->hqMixer = (hqMixerByte != 0);
+    hq_snap_pcm_mode(data);
 
     if (data->activated) {
         /* Only reload voicegroup if the project root or name actually changed */
@@ -636,7 +668,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         data->engine.respectBaseMidiKey = data->respectBaseMidiKey;
         m4a_engine_set_portamento_enabled(&data->engine, data->portamentoEnabled);
         m4a_engine_set_pwm_enabled(&data->engine, data->pwmEnabled);
-        m4a_engine_set_pcm_freq_mode(&data->engine, data->pcmFreqMode);
+        apply_mixer_settings(data);
         m4a_reverb_set_amount(&data->engine.reverb, data->reverbAmount);
     }
 
@@ -649,6 +681,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         gs.respectBaseMidiKey = data->respectBaseMidiKey;
         gs.portamentoEnabled  = data->portamentoEnabled;
         gs.pwmEnabled         = data->pwmEnabled;
+        gs.hqMixer            = data->hqMixer;
         gs.eventLatchMode     = data->eventLatchMode;
         gs.polyDebugInvert    = data->polyDebugInvert;
         gs.reverbAmount     = data->reverbAmount;
@@ -740,11 +773,13 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
     data->respectBaseMidiKey = gs.respectBaseMidiKey;
     data->portamentoEnabled  = gs.portamentoEnabled;
     data->pwmEnabled         = gs.pwmEnabled;
+    data->hqMixer            = gs.hqMixer;
     /* Applied by plugin_process at its next block (it may flush the queue,
      * which must not race the audio thread). */
     data->eventLatchMode     = gs.eventLatchMode;
     data->polyDebugInvert    = gs.polyDebugInvert;
     data->pcmFreqMode        = gs.pcmFreqMode;
+    hq_snap_pcm_mode(data);
 
     if (data->activated) {
         data->engine.masterVolume = gs.masterVolume;
@@ -754,7 +789,9 @@ static void timer_on_timer(const clap_plugin_t *plugin, clap_id timer_id)
         m4a_engine_set_portamento_enabled(&data->engine, gs.portamentoEnabled);
         m4a_engine_set_pwm_enabled(&data->engine, gs.pwmEnabled);
         m4a_engine_set_poly_debug_invert(&data->engine, gs.polyDebugInvert);
-        m4a_engine_set_pcm_freq_mode(&data->engine, gs.pcmFreqMode);
+        /* Like the mix rate: the mixer switch clears the HQ mix buffer, so
+         * a block in flight may carry one disturbed frame. */
+        apply_mixer_settings(data);
         m4a_reverb_set_amount(&data->engine.reverb, gs.reverbAmount);
     }
 
@@ -860,6 +897,7 @@ static bool gui_create(const clap_plugin_t *plugin, const char *api, bool is_flo
     gs.respectBaseMidiKey = data->respectBaseMidiKey;
     gs.portamentoEnabled  = data->portamentoEnabled;
     gs.pwmEnabled         = data->pwmEnabled;
+    gs.hqMixer            = data->hqMixer;
     gs.eventLatchMode     = data->eventLatchMode;
     gs.polyDebugInvert    = data->polyDebugInvert;
     gs.voicegroupLoaded = (data->loadedVg != NULL);

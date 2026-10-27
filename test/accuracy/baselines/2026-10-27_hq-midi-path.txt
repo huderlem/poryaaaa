@@ -1,0 +1,88 @@
+ROM: /home/huderlem/m4a_plugin/build/accuracy/rom-hq/accuracy_test.gba (mixer hq; engine asked for hq)
+mgba: mGBA 0.10.5+m4a_blip
+references: /home/huderlem/m4a_plugin/build/accuracy/refs/f47dea23ff9f-mGBA_0.10.5+m4a_blip
+
+test                lag ms  gain dB |    null worst1s | gm null gm wrst |    ref   test |   drift | gate -40
+------------------------------------------------------------------------------------------------------------
+sq1                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -16.8  -16.8 |       - | PASS
+sq1_env                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.3  -18.3 |       - | PASS
+sq1_sweep              0.0      0.0 |    -inf    -inf |    -inf    -inf |  -17.0  -17.0 |       - | PASS
+sq1_alt                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -16.8  -16.8 |       - | PASS
+sq2                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.1  -18.1 |       - | PASS
+sq2_alt                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.1  -18.1 |       - | PASS
+wave                   0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.8  -19.8 |       - | PASS
+wave_alt               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.8  -19.8 |       - | PASS
+noise                  0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.0  -20.0 |       - | PASS
+noise7                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.5  -18.5 |       - | PASS
+pcm                    0.0     -0.0 |   -71.4   -65.5 |   -71.4   -65.5 |  -21.4  -21.4 |       - | PASS
+pcm_hi                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.9  -20.9 |       - | PASS
+pcm_adsr               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -29.9  -29.9 |       - | PASS
+pcm_drum               0.0      0.0 |   -50.6   -47.8 |   -50.6   -47.8 |  -22.0  -22.0 |       - | PASS
+pcm_cmp                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -27.2  -27.2 |       - | PASS
+pcm_reverb             0.0     -0.0 |   -72.3   -66.1 |   -72.3   -66.1 |  -20.6  -20.6 |       - | PASS
+pcm_chord              0.0     -0.0 |   -88.1   -81.6 |   -88.1   -81.6 |  -14.6  -14.6 |       - | PASS
+pcm_bass               0.0      0.0 |   -61.4   -51.1 |   -61.4   -51.1 |  -25.1  -25.1 |       - | PASS
+pan                    0.0     -0.0 |   -74.7   -69.2 |   -74.7   -69.2 |  -19.5  -19.5 |       - | PASS
+vol                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -25.2  -25.2 |       - | PASS
+vel                    0.0      0.0 |    -inf    -inf |    -inf    -inf |  -26.5  -26.5 |       - | PASS
+bend                   0.0     -0.0 |   -76.1   -71.6 |   -76.1   -71.6 |  -20.2  -20.2 |       - | PASS
+lfo_vib                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.1  -20.1 |       - | PASS
+lfo_trem               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.1  -20.1 |       - | PASS
+lfo_pan                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.1  -20.1 |       - | PASS
+lfo_delay              0.0     -0.0 |   -66.1   -52.8 |   -66.1   -52.8 |  -21.1  -21.1 |       - | PASS
+lfo_psg                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -17.1  -17.1 |       - | PASS
+tune                   0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.6  -21.6 |       - | PASS
+tune_psg               0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.0  -18.0 |       - | PASS
+psg_mix                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -15.2  -15.2 |       - | PASS
+pcm_psg                0.0     -0.0 |   -59.4   -56.8 |   -59.4   -56.8 |  -13.2  -13.2 |       - | PASS
+pcm_ratio_1x           0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.1  -21.1 |       - | PASS
+pcm_short_loop         0.0      0.0 |    -inf    -inf |    -inf    -inf |  -21.4  -21.4 |       - | PASS
+pcm_fix_loop           0.0      0.0 |    -inf    -inf |    -inf    -inf |  -20.8  -20.8 |       - | PASS
+pcm_reverb_max         0.0     -0.0 |   -68.5   -62.3 |   -68.5   -62.3 |  -18.4  -18.4 |       - | PASS
+pcm_rev                0.0      0.0 |    -inf    -inf |    -inf    -inf |  -23.9  -23.9 |       - | PASS
+pcm_cmp_hi             0.0      0.0 |    -inf    -inf |    -inf    -inf |  -32.5  -32.5 |       - | PASS
+synth_pulse            0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.4  -18.4 |       - | PASS
+synth_pulse_lfo        0.0      0.0 |    -inf    -inf |    -inf    -inf |  -19.7  -19.7 |       - | PASS
+synth_saw              0.0      0.0 |    -inf    -inf |    -inf    -inf |  -18.2  -18.2 |       - | PASS
+synth_tri              0.0      0.0 |    -inf    -inf |    -inf    -inf |  -17.1  -17.1 |       - | PASS
+mus_littleroot         0.0      0.0 |   -54.4   -46.4 |   -54.4   -46.4 |  -23.4  -23.4 |     0.0 | PASS
+mus_weather_groudon     0.0      0.0 |    -inf    -inf |    -inf    -inf |  -31.1  -31.1 |     0.0 | PASS
+mus_vs_wild            0.0     -0.0 |   -53.7   -44.0 |   -53.7   -44.0 |  -20.8  -20.8 |     0.0 | PASS
+mus_mt_chimney         0.0     -0.0 |   -44.0   -28.9 |   -44.0   -28.9 |  -23.4  -23.4 |     0.0 | FAIL
+mus_rg_vs_trainer      0.0      0.0 |   -51.1   -41.6 |   -51.1   -41.6 |  -19.5  -19.5 |     0.0 | PASS
+mus_vs_trainer         0.0     -0.0 |   -53.1   -45.9 |   -53.1   -45.9 |  -20.1  -20.1 |     0.0 | PASS
+mus_credits            0.0     -0.0 |   -47.7   -39.1 |   -47.7   -39.1 |  -22.6  -22.6 |     0.0 | FAIL
+se_exp                 0.0      0.0 |    -inf    -inf |    -inf    -inf |  -24.8  -24.8 |       - | PASS
+se_faint               0.0     -0.0 |   -49.2   -38.5 |   -49.2   -38.5 |  -29.8  -29.8 |       - | FAIL
+se_contest_place       0.0      0.0 |   -69.2   -39.6 |   -69.2   -39.6 |  -26.8  -26.8 |       - | FAIL
+se_truck_unload        0.0      0.0 |    -inf    -inf |    -inf    -inf |  -39.2  -39.2 |       - | PASS
+se_low_health          0.0      0.0 |    -inf    -inf |    -inf    -inf |  -24.0  -24.0 |       - | PASS
+se_rain_stop           0.0      0.0 |    -inf    -inf |    -inf    -inf |  -41.1  -41.1 |       - | PASS
+cry_pidgey: a cry has no MIDI; skipped with --input midi
+cry_bulbasaur: a cry has no MIDI; skipped with --input midi
+cry_wailord: a cry has no MIDI; skipped with --input midi
+cry_jynx: a cry has no MIDI; skipped with --input midi
+cry_jynx_faint: a cry has no MIDI; skipped with --input midi
+cry_bulbasaur_howl: a cry has no MIDI; skipped with --input midi
+cry_pidgey_quiet: a cry has no MIDI; skipped with --input midi
+cry_jynx_faint_full: a cry has no MIDI; skipped with --input midi
+cry_wailord_doubles: a cry has no MIDI; skipped with --input midi
+cry_pidgey_roar2: a cry has no MIDI; skipped with --input midi
+cry_bulbasaur_reverse: a cry has no MIDI; skipped with --input midi
+cry_jynx_growl1: a cry has no MIDI; skipped with --input midi
+cry_pidgey_echo_start: a cry has no MIDI; skipped with --input midi
+cry_bulbasaur_encounter: a cry has no MIDI; skipped with --input midi
+cry_jynx_echo_end: a cry has no MIDI; skipped with --input midi
+cry_pidgey_echo_start_chorus: a cry has no MIDI; skipped with --input midi
+cry_jynx_high_pitch: a cry has no MIDI; skipped with --input midi
+cry_wailord_high_pitch: a cry has no MIDI; skipped with --input midi
+cry_second_bulbasaur_pidgey: a cry has no MIDI; skipped with --input midi
+cry_second_jynx_wailord: a cry has no MIDI; skipped with --input midi
+cry_over_se: a cry over the song has no MIDI; skipped with --input midi
+cry_over_bgm: a cry over the song has no MIDI; skipped with --input midi
+
+columns: lag = alignment applied to the test render; gain = least-squares gain match (dB);
+  null / worst1s = RMS(ref - test) / RMS(ref) in dB over the file and the worst 1 s window (gate uses these);
+  gm = the same after gain matching; ref / test = RMS level dBFS; drift = lag slope, ms per second (tempo mismatch)
+50/54 pass at -40 dB (raw null depth, full file and worst 1 s window)
+report: build/scratch/step10/hq-midi.json

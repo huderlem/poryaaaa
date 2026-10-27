@@ -409,11 +409,74 @@ static const BootStep sBootTableHq[] = {
     { 47885,  BOOT_DMA_ON_2, 0, 0 },
     { 320686, BOOT_TIMER_ON_2, 0, 0 },
 };
+/* The same two ROMs built at 21024 Hz (make RATE=21024; docs/HQ-MIXER-ACCURACY.md,
+ * step 11; measured with mgba_probe 2026-10-27).  m4aSoundInit's mode word
+ * is the only code change in the vanilla build, so SoundInit and its
+ * SampleFreqSet pass are the vanilla cycles; m4aSoundMode's pass differs by
+ * its divisions' operands (timer off 47452 -> 47450, DMA on 47893 -> 47887)
+ * and the final VCOUNT 159 poll exits 6 cycles later (320682 -> 320688).
+ * In the HQ build PCM_DMA_BUF_SIZE is 2464 (7 frames), so SoundInit's
+ * CpuFill32 of the 1760-byte-larger SoundInfo moves its SampleFreqSet pass
+ * +2636 cycles (DMA on 17953 -> 20589), the pass still ends on frame 0's
+ * line 159 at vanilla's 39794 (so MPlayExtender's writes are vanilla's
+ * 39875..39935 and the DMA off 41238), m4aSoundVSyncOff's CpuFill32 of
+ * the larger ring moves the second pass (timer off 47444 -> 50088, DMA on
+ * 47885 -> 50525), and the final timer start is the HQ ROM's 320686.
+ * Every other table rate is unmeasured and replays the mixer's 13379 Hz
+ * table (the rate's own SampleFreqSet numbers come from pcm_rate_setup). */
+static const BootStep sBootTableVanilla21024[] = {
+    { 5720,   BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F },
+    { 5737,   BOOT_FIFO_RESET, 0, 0 },
+    { 5760,   BOOT_SOUNDBIAS, 0, 0 },
+    { 15873,  BOOT_DMA_ON, 0, 0 },
+    { 39794,  BOOT_TIMER_ON, 0, 0 },
+    { 39875,  BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F },
+    { 39881,  BOOT_PSG_WRITE, PSG_REG_NR50, 0x00 },
+    { 39881,  BOOT_PSG_WRITE, PSG_REG_NR51, 0x00 },
+    { 39887,  BOOT_PSG_WRITE, PSG_REG_NR12, 0x08 },
+    { 39893,  BOOT_PSG_WRITE, PSG_REG_NR22, 0x08 },
+    { 39899,  BOOT_PSG_WRITE, PSG_REG_NR42, 0x08 },
+    { 39905,  BOOT_PSG_WRITE, PSG_REG_NR14, 0x80 },
+    { 39911,  BOOT_PSG_WRITE, PSG_REG_NR24, 0x80 },
+    { 39917,  BOOT_PSG_WRITE, PSG_REG_NR44, 0x80 },
+    { 39923,  BOOT_PSG_WRITE, PSG_REG_NR30, 0x00 },
+    { 39929,  BOOT_PSG_WRITE, PSG_REG_NR50, 0x77 },
+    { 41238,  BOOT_DMA_OFF, 0, 0 },
+    { 47450,  BOOT_TIMER_OFF, 0, 0 },
+    { 47887,  BOOT_DMA_ON_2, 0, 0 },
+    { 320688, BOOT_TIMER_ON_2, 0, 0 },
+};
+static const BootStep sBootTableHq21024[] = {
+    { 7800,   BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F },
+    { 7817,   BOOT_FIFO_RESET, 0, 0 },
+    { 7840,   BOOT_SOUNDBIAS, 0, 0 },
+    { 20589,  BOOT_DMA_ON, 0, 0 },
+    { 39794,  BOOT_TIMER_ON, 0, 0 },
+    { 39875,  BOOT_PSG_WRITE, PSG_REG_NR52, 0x8F },
+    { 39881,  BOOT_PSG_WRITE, PSG_REG_NR50, 0x00 },
+    { 39881,  BOOT_PSG_WRITE, PSG_REG_NR51, 0x00 },
+    { 39887,  BOOT_PSG_WRITE, PSG_REG_NR12, 0x08 },
+    { 39893,  BOOT_PSG_WRITE, PSG_REG_NR22, 0x08 },
+    { 39899,  BOOT_PSG_WRITE, PSG_REG_NR42, 0x08 },
+    { 39905,  BOOT_PSG_WRITE, PSG_REG_NR14, 0x80 },
+    { 39911,  BOOT_PSG_WRITE, PSG_REG_NR24, 0x80 },
+    { 39917,  BOOT_PSG_WRITE, PSG_REG_NR44, 0x80 },
+    { 39923,  BOOT_PSG_WRITE, PSG_REG_NR30, 0x00 },
+    { 39929,  BOOT_PSG_WRITE, PSG_REG_NR50, 0x77 },
+    { 41238,  BOOT_DMA_OFF, 0, 0 },
+    { 50088,  BOOT_TIMER_OFF, 0, 0 },
+    { 50525,  BOOT_DMA_ON_2, 0, 0 },
+    { 320686, BOOT_TIMER_ON_2, 0, 0 },
+};
 #define BOOT_TABLE_LEN ((int)(sizeof(sBootTableVanilla) / sizeof(sBootTableVanilla[0])))
-_Static_assert(sizeof(sBootTableHq) == sizeof(sBootTableVanilla), "the two boot tables hold the same steps");
+_Static_assert(sizeof(sBootTableHq) == sizeof(sBootTableVanilla), "the boot tables hold the same steps");
+_Static_assert(sizeof(sBootTableVanilla21024) == sizeof(sBootTableVanilla), "the boot tables hold the same steps");
+_Static_assert(sizeof(sBootTableHq21024) == sizeof(sBootTableVanilla), "the boot tables hold the same steps");
 
 static const BootStep *boot_table(const M4AEngine *engine)
 {
+    if (engine->pcmFreqMode == 7)   /* SOUND_MODE_FREQ_21024: the measured raised rate */
+        return engine->hqMixer ? sBootTableHq21024 : sBootTableVanilla21024;
     return engine->hqMixer ? sBootTableHq : sBootTableVanilla;
 }
 
@@ -446,6 +509,15 @@ int m4a_pcm_freq_mode_from_hz(double hz)
     return best;
 }
 
+/* PCM_DMA_BUF_SIZE of a configuration: the game's 1584 everywhere except
+ * the HQ mixer at a rate other than 13379 Hz, where the wiki resizes the
+ * define to 7 frames (docs/HQ-MIXER-ACCURACY.md, appendix C: 21024 Hz ->
+ * 2464; the vanilla ROM keeps 1584 and pcmDmaPeriod = 1584 / frame). */
+static int pcm_dma_buf_size(bool hqMixer, int spv)
+{
+    return (hqMixer && spv != 224) ? 7 * spv : GBA_PCM_DMA_BUF_SIZE;
+}
+
 /* SampleFreqSet (m4a.c): the per-rate numbers for the sound-mode frequency
  * (13379 Hz -> 224 samples per VBlank, timer period 1254 cycles, 7 VBlanks
  * per DMA buffer). */
@@ -457,7 +529,8 @@ static void pcm_rate_setup(M4AEngine *engine)
     engine->pcmFreqMode = (uint8_t)mode;
     int spv = gPcmSamplesPerVBlankTable[mode - 1];
     engine->pcmSamplesPerVBlank = spv;
-    engine->pcmDmaPeriod = (uint8_t)(GBA_PCM_DMA_BUF_SIZE / spv);
+    engine->pcmDmaBufSize = pcm_dma_buf_size(engine->hqMixer, spv);
+    engine->pcmDmaPeriod = (uint8_t)(engine->pcmDmaBufSize / spv);
     engine->pcmFreq = (597275 * spv + 5000) / 10000;
     engine->pcmDivFreq = (16777216 / engine->pcmFreq + 1) >> 1;
     engine->pcmDmaCounter = 0;
@@ -495,8 +568,17 @@ static void boot_action(M4AEngine *engine, int step)
     case BOOT_DMA_ON_2:   m4a_gba_dma_enable(g); break;
     case BOOT_DMA_OFF:    m4a_gba_dma_disable(g); break;
     case BOOT_TIMER_ON:
+        /* SoundInit's own SampleFreqSet(SOUND_MODE_FREQ_13379): the first
+         * pass runs the timer at the 224-sample period whatever the game's
+         * rate; m4aSoundMode's pass (TIMER_OFF .. TIMER_ON_2) programs it. */
+        g->timerPeriodDen = 224;
+        m4a_gba_timer_enable(g);
+        break;
     case BOOT_TIMER_ON_2: m4a_gba_timer_enable(g); break;
-    case BOOT_TIMER_OFF:  m4a_gba_timer_disable(g); break;
+    case BOOT_TIMER_OFF:
+        m4a_gba_timer_disable(g);
+        g->timerPeriodDen = engine->pcmSamplesPerVBlank;
+        break;
     default: break;
     }
 }
@@ -695,7 +777,7 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     /* Output stage: the GBA hardware model at the host rate reading the
      * PCM ring (SoundInit's CpuFill32 zeroes it). */
     pcm_rate_setup(engine);
-    m4a_gba_init(&engine->gba, sampleRate, engine->pcmBuffer, GBA_PCM_DMA_BUF_SIZE,
+    m4a_gba_init(&engine->gba, sampleRate, engine->pcmBuffer, engine->pcmDmaBufSize,
                  engine->pcmSamplesPerVBlank);
     m4a_psg_reset(&engine->psg[0]);
     m4a_psg_reset(&engine->psg[1]);
@@ -708,6 +790,34 @@ void m4a_engine_destroy(M4AEngine *engine)
     m4a_gba_destroy(&engine->gba);
 }
 
+/* m4aSoundMode -> m4aSoundVSyncOff (DMA off, ring cleared) ->
+ * SampleFreqSet (timer off, reload, DMA on, timer on one period later;
+ * its wait for VCOUNT 159 is not modeled: call while stopped). */
+static void pcm_reprogram(M4AEngine *engine)
+{
+    M4AGbaAudio *g = &engine->gba;
+    /* Before the boot replay has started, the rate is m4aSoundInit's own
+     * (the mode word of its m4aSoundMode call): only the numbers change,
+     * and the boot table turns the DMA and the timer on at the ROM's
+     * cycles.  Enabling them here would run the FIFO from cycle 0 and
+     * leave a different stale state at the final timer start (measured
+     * 2026-10-27 at 21024 Hz: the note's ring slot fetched 10 timer ticks
+     * early in vanilla, 7 late in HQ). */
+    bool live = engine->booted || engine->bootStep > 0;
+    if (live)
+        m4a_gba_dma_disable(g);
+    memset(engine->pcmBuffer, 0, sizeof(engine->pcmBuffer));
+    pcm_rate_setup(engine);
+    if (live)
+        m4a_gba_timer_disable(g);
+    m4a_gba_set_pcm_rate(g, engine->pcmSamplesPerVBlank, engine->pcmBuffer,
+                         engine->pcmDmaBufSize);
+    if (live) {
+        m4a_gba_dma_enable(g);
+        m4a_gba_timer_enable(g);
+    }
+}
+
 void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode)
 {
     if (mode < M4A_PCM_FREQ_MODE_MIN || mode > M4A_PCM_FREQ_MODE_MAX)
@@ -717,24 +827,20 @@ void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode)
     if (mode == engine->pcmFreqMode)
         return;
     engine->pcmFreqMode = (uint8_t)mode;
-    /* m4aSoundMode -> m4aSoundVSyncOff (DMA off, ring cleared) ->
-     * SampleFreqSet (timer off, reload, DMA on, timer on one period later;
-     * its wait for VCOUNT 159 is not modeled: call while stopped). */
-    M4AGbaAudio *g = &engine->gba;
-    m4a_gba_dma_disable(g);
-    memset(engine->pcmBuffer, 0, sizeof(engine->pcmBuffer));
-    pcm_rate_setup(engine);
-    m4a_gba_timer_disable(g);
-    m4a_gba_set_pcm_rate(g, engine->pcmSamplesPerVBlank, engine->pcmBuffer,
-                         GBA_PCM_DMA_BUF_SIZE);
-    m4a_gba_dma_enable(g);
-    m4a_gba_timer_enable(g);
+    pcm_reprogram(engine);
 }
 
 void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on)
 {
     /* The boot table is replayed by m4a_engine_boot; sound_main reads the
-     * flag each frame.  The HQ-only state starts as the ROM's BSS. */
+     * flag each frame.  The HQ-only state starts as the ROM's BSS -- and
+     * stays as it is while the mode is unchanged: hq_buffer (the next
+     * frame's reverb seed), the noise-shape residuals and CHN_SAMPLE_STOR
+     * persist across frames in the ROM, so a re-application of the same
+     * setting (the plugin applies its settings on every GUI change) must
+     * not clear them mid-note. */
+    if (on == engine->hqMixer)
+        return;
     engine->hqMixer = on;
     memset(engine->hqBuffer, 0, sizeof(engine->hqBuffer));
     memset(engine->hqMutedBuffer, 0, sizeof(engine->hqMutedBuffer));
@@ -744,6 +850,10 @@ void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on)
         engine->pcmChannels[i].sampleStor = 0;
     if (on && engine->pcmFreqMode == 2)
         m4a_engine_set_pcm_freq_mode(engine, M4A_PCM_FREQ_MODE_DEFAULT);
+    /* The ring size follows the mixer at a non-default rate (7 frames in
+     * HQ, 1584 in vanilla): reprogram as a rate change does. */
+    else if (pcm_dma_buf_size(on, engine->pcmSamplesPerVBlank) != engine->pcmDmaBufSize)
+        pcm_reprogram(engine);
 }
 
 void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm)
@@ -1462,6 +1572,14 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
                 ch->count = prev->count;
                 ch->fw = prev->fw;
                 ch->synthPulseDuty = prev->synthPulseDuty;
+                /* The mixer's per-channel state goes with the position: the
+                 * type bits the channel init added (CMP from the WaveData,
+                 * SPL for a synth -- the new channel never runs its START
+                 * init, so it would take the uncompressed path with an
+                 * index-form pointer) and CHN_SAMPLE_STOR, the HQ mixer's
+                 * interpolation base. */
+                ch->type = prev->type;
+                ch->sampleStor = prev->sampleStor;
                 uint8_t prevVolume = prev->envelopeVolume;
                 ch->envelopeVolume = (prevVolume > ch->sustain) ? prevVolume : ch->sustain;
                 ch->status = CHN_ENV_SUSTAIN | (prev->status & (CHN_LOOP | CHN_SPECIAL));

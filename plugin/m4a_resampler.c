@@ -1,4 +1,4 @@
-#include "m4a_blip.h"
+#include "m4a_resampler.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,11 +16,11 @@
 #define END_FRAME_EXTRA 2   /* deltas slightly after the frame end */
 #define BUF_EXTRA   (HALF_WIDTH * 2 + END_FRAME_EXTRA)
 
-M4ABlip *m4a_blip_new(int size)
+M4AResampler *m4a_resampler_new(int size)
 {
     if (size < 0)
         return NULL;
-    M4ABlip *b = (M4ABlip *)malloc(sizeof(*b));
+    M4AResampler *b = (M4AResampler *)malloc(sizeof(*b));
     if (!b)
         return NULL;
     b->buf = (int32_t *)malloc(((size_t)size + BUF_EXTRA) * sizeof(int32_t));
@@ -28,13 +28,13 @@ M4ABlip *m4a_blip_new(int size)
         free(b);
         return NULL;
     }
-    b->factor = TIME_UNIT / M4A_BLIP_MAX_RATIO;
+    b->factor = TIME_UNIT / M4A_RESAMPLER_MAX_RATIO;
     b->size = size;
-    m4a_blip_clear(b);
+    m4a_resampler_clear(b);
     return b;
 }
 
-void m4a_blip_delete(M4ABlip *b)
+void m4a_resampler_delete(M4AResampler *b)
 {
     if (!b)
         return;
@@ -43,7 +43,7 @@ void m4a_blip_delete(M4ABlip *b)
     free(b);
 }
 
-void m4a_blip_set_rates(M4ABlip *b, double clock_rate, double sample_rate)
+void m4a_resampler_set_rates(M4AResampler *b, double clock_rate, double sample_rate)
 {
     double factor = (double)TIME_UNIT * sample_rate / clock_rate;
     b->factor = (uint64_t)factor;
@@ -52,7 +52,7 @@ void m4a_blip_set_rates(M4ABlip *b, double clock_rate, double sample_rate)
         b->factor++;
 }
 
-void m4a_blip_clear(M4ABlip *b)
+void m4a_resampler_clear(M4AResampler *b)
 {
     b->offset = b->factor / 2;
     b->avail = 0;
@@ -60,7 +60,7 @@ void m4a_blip_clear(M4ABlip *b)
     memset(b->buf, 0, ((size_t)b->size + BUF_EXTRA) * sizeof(int32_t));
 }
 
-void m4a_blip_add_delta(M4ABlip *b, unsigned time, int delta)
+void m4a_resampler_add_delta(M4AResampler *b, unsigned time, int delta)
 {
     uint32_t fixed = (uint32_t)(((uint64_t)time * b->factor + b->offset) >> PRE_SHIFT);
     int32_t *out = b->buf + b->avail + (fixed >> FRAC_BITS);
@@ -72,7 +72,7 @@ void m4a_blip_add_delta(M4ABlip *b, unsigned time, int delta)
     out[HALF_WIDTH] += delta2;
 }
 
-int m4a_blip_clocks_needed(const M4ABlip *b, int samples)
+int m4a_resampler_clocks_needed(const M4AResampler *b, int samples)
 {
     uint64_t needed = (uint64_t)samples * TIME_UNIT;
     if (needed < b->offset)
@@ -80,19 +80,19 @@ int m4a_blip_clocks_needed(const M4ABlip *b, int samples)
     return (int)((needed - b->offset + b->factor - 1) / b->factor);
 }
 
-void m4a_blip_end_frame(M4ABlip *b, unsigned clocks)
+void m4a_resampler_end_frame(M4AResampler *b, unsigned clocks)
 {
     uint64_t off = (uint64_t)clocks * b->factor + b->offset;
     b->avail += (int)(off >> TIME_BITS);
     b->offset = off & (TIME_UNIT - 1);
 }
 
-int m4a_blip_samples_avail(const M4ABlip *b)
+int m4a_resampler_samples_avail(const M4AResampler *b)
 {
     return b->avail;
 }
 
-static void remove_samples(M4ABlip *b, int count)
+static void remove_samples(M4AResampler *b, int count)
 {
     int remain = b->avail + BUF_EXTRA - count;
     b->avail -= count;
@@ -100,7 +100,7 @@ static void remove_samples(M4ABlip *b, int count)
     memset(&b->buf[remain], 0, (size_t)count * sizeof(int32_t));
 }
 
-int m4a_blip_read_samples(M4ABlip *b, short *out, int count, int stereo)
+int m4a_resampler_read_samples(M4AResampler *b, short *out, int count, int stereo)
 {
     if (count < 0)
         count = 0;
