@@ -142,14 +142,16 @@ static int32_t unk2(M4AEngine *engine, M4APCMChannel *r4, int32_t r3)
  * unhalved.  Vanilla's ror-8 packing runs on every sample, so a zero saw
  * state is accumulated (as 0) rather than skipped. */
 static void mix_synth(const M4AEngine *engine, M4APCMChannel *ch, int8_t *r5, int8_t *bufB,
-                      int spv, uint32_t r10, uint32_t r11)
+                      int spv, uint32_t r10, uint32_t r11, bool frameStart)
 {
     uint32_t step8 = ((uint32_t)engine->pcmDivFreq * ch->frequency) << 3;
     uint32_t r7 = ch->fw;
     int32_t r2 = ch->count;
     uint32_t duty = 0;
     if (ch->synthType == M4A_SYNTH_PULSE) {
-        duty = m4a_synth_pulse_setup(ch);
+        /* The duty LFO steps once per frame: on a later piece of the
+         * frame (live mode) the threshold stands. */
+        duty = frameStart ? m4a_synth_pulse_setup(ch) : ch->synthPulseDuty;
         r2 = ch->count;
     } else if (ch->synthType == M4A_SYNTH_SAW) {
         r10 = ((r10 >> 16) >> 1) << 16;
@@ -379,10 +381,11 @@ done_special:                                            /* _081DD4F0 */
 
 void m4a_mixer_mix_channel(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame)
 {
-    m4a_mixer_mix_channel_n(engine, r4, frame, engine->pcmSamplesPerVBlank);
+    m4a_mixer_mix_channel_n(engine, r4, frame, engine->pcmSamplesPerVBlank, true);
 }
 
-void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame, int count)
+void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame, int count,
+                             bool frameStart)
 {
     int8_t *r5 = frame;
     if (count <= 0)
@@ -408,7 +411,7 @@ void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame
     r11 <<= 16;
 
     if (r4->synthType != M4A_SYNTH_NONE) {
-        mix_synth(engine, r4, r5, r5 + BUF, r8, r10, r11);
+        mix_synth(engine, r4, r5, r5 + BUF, r8, r10, r11, frameStart);
         return;
     }
 
@@ -605,11 +608,11 @@ void m4a_sound_main_ram_range(M4AEngine *engine, int frameOffset, int pcmDmaCoun
         bool audible = ((i >= MAX_PCM_CHANNELS) == invert)
                     || (i < MAX_PCM_CHANNELS && r4->audition);
         if (audible) {
-            m4a_mixer_mix_channel_n(engine, r4, r5, count);
+            m4a_mixer_mix_channel_n(engine, r4, r5, count, start == 0);
         } else {
             memset(muted + start, 0, (size_t)spv);
             memset(muted + start + BUF, 0, (size_t)spv);
-            m4a_mixer_mix_channel_n(engine, r4, muted + start, count);
+            m4a_mixer_mix_channel_n(engine, r4, muted + start, count, start == 0);
         }
     }
 }

@@ -2447,7 +2447,11 @@ static void live_mix_ahead(M4AEngine *engine)
     int src = g->fifo[0].srcPos % ring;
     src -= src & 3;
     int ahead = (engine->liveMixPos - src + ring) % ring;
-    if (ahead > 2 * M4A_LIVE_AHEAD) {
+    /* Far ahead only when the cursor is stale (the mode just turned on, a
+     * rate change): a re-sync re-mixes what the DMA has fetched already.
+     * Normal operation stays within AHEAD plus the 16-sample fetch the
+     * scheduler step in between may have made, plus a late VSync's. */
+    if (ahead > 3 * M4A_LIVE_AHEAD) {
         engine->liveMixPos = src;
         ahead = 0;
     }

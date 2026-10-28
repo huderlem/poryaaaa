@@ -8909,6 +8909,13 @@ static WaveData *live_test_wave(int looped)
     return wd;
 }
 
+/* A Golden Sun pulse synth with a moving duty (data[3] = the LFO step). */
+static WaveData *live_test_pulse(void)
+{
+    static const uint8_t descPulse[] = { 0x80, 0x00, 0x40, 0x20, 0x80, 0x10 };
+    return make_synth_wave(descPulse, sizeof(descPulse));
+}
+
 static void live_test_voices(ToneData *voices, WaveData *looped, WaveData *oneShot)
 {
     memset(voices, 0, sizeof(ToneData) * 128);
@@ -8932,6 +8939,12 @@ static void live_test_voices(ToneData *voices, WaveData *looped, WaveData *oneSh
     voices[2].sustain = 15;
     voices[2].release = 0;
     voices[2].wavePointer = (uint32_t *)(uintptr_t)2;  /* duty 50% */
+    voices[3].type = VOICE_DIRECTSOUND;                /* pulse synth: its duty LFO steps per frame */
+    voices[3].key = 60;
+    voices[3].wav = live_test_pulse();
+    voices[3].attack = 0xFF;
+    voices[3].sustain = 0xFF;
+    voices[3].release = 200;
 }
 
 /* The piecewise mix is the whole-frame mix: the same channel state and
@@ -8951,11 +8964,13 @@ static void test_live_piecewise_exact(void)
     m4a_reverb_set_amount(&engine.reverb, 40);
     m4a_engine_program_change(&engine, 0, 0);
     m4a_engine_program_change(&engine, 1, 1);
+    m4a_engine_program_change(&engine, 3, 3);
     m4a_engine_cc(&engine, 0, 7, 127);
     m4a_engine_cc(&engine, 1, 7, 100);
     m4a_engine_cc(&engine, 1, 10, 100);                /* panned */
     m4a_engine_note_on(&engine, 0, 60, 120);
     m4a_engine_note_on(&engine, 1, 67, 90);
+    m4a_engine_note_on(&engine, 3, 62, 100);           /* the pulse synth */
     /* Two frames so both are past START (the FIX voice mid-attack), with
      * ring content behind for the reverb taps. */
     m4a_sound_main_ram(&engine, 0, 1);
@@ -9001,8 +9016,15 @@ static void test_live_piecewise_exact(void)
     for (int i = 0; i < spv; i++)
         nonzero += ringA[2 * spv + i] != 0;
     ASSERT(nonzero > spv / 2, "live exact: the frame has audio in it");
+    /* The synth sounded: its channel is on and past START. */
+    int synthOn = 0;
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
+        if ((chA[i].status & CHN_ON) && chA[i].synthType == M4A_SYNTH_PULSE)
+            synthOn++;
+    ASSERT_EQ(synthOn, 1, "live exact: the pulse synth channel is sounding");
 
     m4a_engine_destroy(&engine);
+    free(voices[3].wav);
     free(looped);
     free(oneShot);
 }
@@ -9090,6 +9112,7 @@ static void test_live_mode_latency(void)
     m4a_engine_destroy(&normal);
     m4a_engine_destroy(&live);
 
+    free(voices[3].wav);
     free(looped);
     free(oneShot);
 }
@@ -9166,6 +9189,7 @@ static void test_live_mode_sustain_matches(void)
         m4a_engine_destroy(&normal);
         m4a_engine_destroy(&live);
     }
+    free(voices[3].wav);
     free(looped);
     free(oneShot);
 }

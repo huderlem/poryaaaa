@@ -40,8 +40,11 @@ void m4a_mixer_mix_channel(M4AEngine *engine, M4APCMChannel *ch, int8_t *frame);
 void m4a_sound_main_ram_range(M4AEngine *engine, int frameOffset, int pcmDmaCounter, int start,
                               int count, int envelopeStep);
 /* m4a_mixer_mix_channel over `count` samples (a multiple of 4) in place of
- * pcmSamplesPerVBlank; the channel's state carries into the next call. */
-void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *ch, int8_t *frame, int count);
+ * pcmSamplesPerVBlank; the channel's state carries into the next call.
+ * `frameStart`: this call begins the frame (the once-per-frame work, the
+ * pulse synth's duty LFO step, runs); false for a later piece of it. */
+void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *ch, int8_t *frame, int count,
+                             bool frameStart);
 
 /* The packed-word accumulate of one sample at one lane volume, exactly the
  * `mul r1, r10, r0 / bic r1, r1, 0xFF0000 / add r6, r1, r6, ror 8`
