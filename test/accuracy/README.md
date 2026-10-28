@@ -55,20 +55,21 @@ MIDI path measurable; `--midi-quantize`
 adds `poryaaaa_render --quantize`, the MIDI event latch (every event
 applied in the next VBlank tick after the gate walk, in arrival order,
 where MPlayMain runs a track's commands).  Every midi run passes
-`poryaaaa_render --gba-start-delay`, which starts the MIDI where the game
-starts a song: MIDI time 0 at frame 3's SoundMain (883882 cycles; the
-renderer dispatches every event 2522 samples later at 48 kHz, the last
-sample a resampler frame before that SoundMain), so tick n plays on the frame
-the compiled song's would at the exact MIDI tempo.  The renderer's own
-default is off (the first note at output time 0, which is what a user
-rendering a MIDI wants); `--no-gba-start-delay` runs the harness that way.
-Every midi run also passes `poryaaaa_render --gba-tempo-grid` (the renderer's own default is off, `--no-gba-tempo-grid` runs the harness
-without it): each MIDI tick moves from its exact-tempo time to the frame MPlayMain plays it on --
+`poryaaaa_render --gba-tempo-grid` (the renderer's own default is off,
+`--no-gba-tempo-grid` runs the harness without it): each MIDI tick moves
+from its exact-tempo time to the frame MPlayMain plays it on --
 tempoC += tempoI once per frame (MPlayStart's 150 before the first TEMPO,
 mid2agb's tempoI = 2 x floor(BPM x tbs / 2) from the first MTrk's tempo
 events), a tick each time tempoC reaches 150 -- dispatched at the last
-sample a resampler frame before that frame's SoundMain; with the start delay
-every tick lands on the ROM's frame and the songs' 0.46 % drift is gone.
+sample a resampler frame before that frame's SoundMain, with MIDI time 0 on
+the frame the game plays a song's first tick (frame 3's SoundMain, 883882
+cycles; every event 2522 samples later at 48 kHz; the output's first 63 ms
+are the boot either way), so every tick lands on the ROM's frame and the
+songs' 0.46 % drift is gone.  The grid places that origin by default; the
+runner states it explicitly either way (`--gba-start-delay`, or
+`--no-gba-start-delay` with the runner's `--no-gba-start-delay`: MIDI
+time 0 at output sample 0, so the first frames' ticks collapse onto frame 3
+and the LFO runs 3 frames behind -- an experiment, not a listening render).
 A midi-input report (`"input": "midi"`; `"midi_quantize"` true / false;
 `"gba_start_delay"` and `"gba_tempo_grid"` likewise; each is absent in
 reports older than the option) is a separate

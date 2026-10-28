@@ -16,10 +16,11 @@ Steps (all idempotent, cached under --build-dir):
      port; with --input midi it plays the MIDI with the mid2agb options from
      the .cfg mapped to flags (-V -> --song-volume, -R -> --reverb,
      -G -> voicegroup); --midi-quantize adds --quantize (the MIDI event
-     latch), and poryaaaa_render always gets --gba-start-delay (MIDI time 0
-     where the ROM starts the song, frame 3's SoundMain; --no-gba-start-delay
-     leaves it out) and --gba-tempo-grid (each MIDI tick on the ROM's
-     tempoC / 150 frame; --no-gba-tempo-grid leaves it out).  A midi-input report (its "input" field says midi) is a
+     latch), and poryaaaa_render always gets --gba-tempo-grid (each MIDI tick
+     on the ROM's tempoC / 150 frame, MIDI time 0 where the ROM starts the
+     song, frame 3's SoundMain; --no-gba-tempo-grid leaves it out) and the
+     start origin stated explicitly (--gba-start-delay, or --no-gba-start-delay
+     with the runner's --no-gba-start-delay: MIDI time 0 at output sample 0).  A midi-input report (its "input" field says midi) is a
      separate baseline family, never compared against a song-input one.  A sound effect (songs.json "type": "se") is an
      m4aSongNumStart of its song id in the ROM and plays on the music player
      the song table names (sound/song_table.inc, the `ms` field: SE1 / SE2 /
@@ -367,8 +368,9 @@ def render_poryaaaa(args, t, overlay, out_dir):
             cmd.append("--extended-clocks")
         if args.midi_quantize:
             cmd.append("--quantize")         # the MIDI event latch (docs/ACCURACY.md, "Entry points and the frame latch")
-        if args.gba_start_delay:
-            cmd.append("--gba-start-delay")  # MIDI time 0 where the ROM starts the song (slice 2a)
+        # The start origin, stated either way (the renderer's default follows --gba-tempo-grid):
+        # MIDI time 0 where the ROM starts the song (slice 2a), or at output sample 0.
+        cmd.append("--gba-start-delay" if args.gba_start_delay else "--no-gba-start-delay")
         if args.gba_tempo_grid:
             cmd.append("--gba-tempo-grid")   # each tick on the ROM's tempoC / 150 frame (slice 3a)
     if t.get("player"):
@@ -418,8 +420,9 @@ def main():
     ap.add_argument("--midi-quantize", action="store_true",
                     help="with --input midi: pass --quantize to poryaaaa_render (events latched to the VBlank tick)")
     ap.add_argument("--no-gba-start-delay", dest="gba_start_delay", action="store_false",
-                    help="with --input midi: do not pass --gba-start-delay to poryaaaa_render "
-                         "(the first MIDI note at output time 0 instead of where the ROM starts the song)")
+                    help="with --input midi: pass --no-gba-start-delay to poryaaaa_render "
+                         "(MIDI time 0 at output sample 0 instead of where the ROM starts the song; "
+                         "the first frames' ticks then collapse onto frame 3)")
     ap.add_argument("--no-gba-tempo-grid", dest="gba_tempo_grid", action="store_false",
                     help="with --input midi: do not pass --gba-tempo-grid to poryaaaa_render "
                          "(the MIDI's exact tempo map instead of the frame MPlayMain's tempo accumulator plays each tick on)")

@@ -29,7 +29,7 @@ test/accuracy/tools/accuracy.py                    # all tests, compiled-song in
 test/accuracy/tools/accuracy.py --tests micro      # or song, se, or name,name
 test/accuracy/tools/accuracy.py --input midi       # the plugin's MIDI path instead of the .s
 test/accuracy/tools/accuracy.py --input midi --midi-quantize   # ... with poryaaaa_render --quantize (the frame latch)
-test/accuracy/tools/accuracy.py --input midi --no-gba-start-delay  # ... with the first MIDI note at output time 0
+test/accuracy/tools/accuracy.py --input midi --no-gba-start-delay  # ... with MIDI time 0 at output sample 0 instead of the ROM's first-tick frame
 test/accuracy/tools/accuracy.py --input midi --no-gba-tempo-grid  # ... with the MIDI's exact tempo map instead of the ROM's tick frames
 test/accuracy/tools/accuracy.py --committed-refs   # no mgba build needed, micro-tests only
 test/accuracy/tools/accuracy.py --mixer hq         # the HQ-mixer ROM (build/accuracy/rom-hq) and poryaaaa_render --hq-mixer
@@ -54,13 +54,15 @@ baseline, use the HQ one.
 `build/accuracy/rom/{micro,songs}/<name>.s` through `poryaaaa_render --song`,
 so poryaaaa and mgba consume byte-identical song data; `--input midi` plays
 the MIDI with the mid2agb options as flags (cries and the cry-over rows are
-skipped: no MIDI).  Every midi run passes `--gba-start-delay` and
-`--gba-tempo-grid` (the renderer's "as the game" mode: MIDI time 0 on
-frame 3's SoundMain, each tick on the ROM's tempoC / 150 frame, plus what
-that mode brings -- the LFO clock on the grid, the timing-only sequencer's
-CgbSound entry, track ends, tick boundaries); `--no-gba-start-delay` /
-`--no-gba-tempo-grid` leave them out, and `--midi-quantize` adds
-`--quantize`, the frame latch.  How each of these works:
+skipped: no MIDI).  Every midi run passes `--gba-tempo-grid` (the
+renderer's "as the game" mode: MIDI time 0 on frame 3's SoundMain, each
+tick on the ROM's tempoC / 150 frame, plus what that mode brings -- the LFO
+clock on the grid, the timing-only sequencer's CgbSound entry, track ends,
+tick boundaries) and states the start origin either way (`--gba-start-delay`,
+the grid's default, or `--no-gba-start-delay` with the runner's
+`--no-gba-start-delay`: MIDI time 0 at output sample 0); `--no-gba-tempo-grid`
+leaves the grid out, and `--midi-quantize` adds `--quantize`, the frame
+latch.  How each of these works:
 `docs/ACCURACY.md`, "The MIDI path".
 
 **The midi-input reports are their own baseline family**

@@ -107,9 +107,11 @@ shorter file.
 - **`--input midi`**: poryaaaa plays the MIDI (`--midi`) with the mid2agb
   options from `midi.cfg` mapped to flags (`-V` → `--song-volume`, `-R` →
   `--reverb`, `-G` → the voicegroup, `-X` → `--extended-clocks`).  The
-  runner always adds `--gba-start-delay` and `--gba-tempo-grid` (section 5;
-  `--no-gba-start-delay` / `--no-gba-tempo-grid` leave them out) and, with
-  `--midi-quantize`, `--quantize` (the frame latch).  Cries and cry-over
+  runner always adds `--gba-tempo-grid` (section 5; `--no-gba-tempo-grid`
+  leaves it out) and states the start origin either way (`--gba-start-delay`,
+  the grid's default, or `--no-gba-start-delay` with the runner's
+  `--no-gba-start-delay`) and, with `--midi-quantize`, `--quantize` (the
+  frame latch).  Cries and cry-over
   rows have no MIDI and are skipped.  **Midi-input reports are their own
   baseline family** (`baselines/<date>_midi-path-*`; the report's
   `"input"`, `"midi_quantize"`, `"gba_start_delay"`, `"gba_tempo_grid"`
@@ -661,12 +663,19 @@ frame edge.
 
 ### The renderer's "as the game" mode
 
-`poryaaaa_render --midi` with **`--gba-start-delay`** and
-**`--gba-tempo-grid`** (both off by default in the renderer, on in the
-harness) plays a MIDI the way the game plays mid2agb's conversion of it.
-On the corpus this form is the `--song` render sample for sample.
+`poryaaaa_render --midi` with **`--gba-tempo-grid`** (off by default in
+the renderer, on in the harness) plays a MIDI the way the game plays
+mid2agb's conversion of it.  On the corpus this form is the `--song` render
+sample for sample.  Checked 2026-10-27 on mus_littleroot: bit-identical
+over 10 s; with the origin left out (`--no-gba-start-delay`) the render is
+about 50 ms early and matches at no shift, because the first frames' ticks
+collapse onto frame 3 and the LFO runs 3 frames ahead of the ticks.  The
+output's first 63 ms are the sound hardware's boot in every render, so the
+origin adds no leading silence.
 
-- **Start origin** (`--gba-start-delay`): MIDI time 0 is placed where the
+- **Start origin** (on with the grid; `--no-gba-start-delay` leaves it out,
+  `--gba-start-delay` adds it to an exact-tempo render for comparing with an
+  emulator recording): MIDI time 0 is placed where the
   ROM starts the song, frame 3's SoundMain at `ROM_FIRST_TICK_CYCLE` =
   124773 + 2 · 280896 + 160 · 1232 + 197 = 883882 cycles.  Every event is
   dispatched `midiOrigin` = floor((883882 − 2048) · rate / 2²⁴) samples
@@ -698,7 +707,7 @@ On the corpus this form is the `--song` render sample for sample.
   (a TEMPO played in the coming tick, stored after the next frame's add,
   as ply_tempo's store lands after `_081DD86C`).  The renderer passes the
   grid's tempoI for first-MTrk tempos and nothing for the others.  Needs
-  the start delay too.
+  the start origin too (the grid's default).
 - **The CgbSound entry**: the renderer converts the MIDI with mid2agb
   itself (`third_party/mid2agb`, vendored from pokeemerald, MIT; built as a
   library with `RaiseError` throwing and state reset between conversions;

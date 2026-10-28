@@ -857,25 +857,31 @@ static void print_usage(const char *prog)
         "                              runs a track's commands, in arrival order; a note shorter\n"
         "                              than a frame plays one tick).  Default: events apply at\n"
         "                              their sample position.  (--song / --cry already run on the tick.)\n"
-        "  --gba-start-delay           --midi only: start the MIDI where the game would, after the\n"
-        "                              engine's start-up frames (frame 3's SoundMain, about 52.5 ms\n"
-        "                              of leading silence), as --song renders already do.  For\n"
-        "                              comparing with an emulator recording; default: the first\n"
-        "                              note plays at the start of the output\n"
-        "  --gba-tempo-grid            --midi only: play each MIDI tick on the frame the game\n"
-        "                              would (the song tempo as mid2agb writes it, a tick each\n"
+        "  --gba-tempo-grid            --midi only: play the MIDI as the game plays mid2agb's\n"
+        "                              conversion of it.  Each MIDI tick plays on the frame the\n"
+        "                              game would (the song tempo as mid2agb writes it, a tick each\n"
         "                              time the tempo accumulator reaches 150, MPlayStart's 150\n"
         "                              before the first TEMPO) instead of at the MIDI's exact\n"
         "                              tempo (at an even BPM about 0.46 %% faster; mid2agb drops\n"
         "                              an odd BPM by one), the LFO stepping on the same ticks\n"
-        "                              (MPlayStart's tempo at the song start).  With\n"
-        "                              --gba-start-delay each tick and LFO step lands on the\n"
-        "                              ROM's frame (without it the ticks of the first frames\n"
-        "                              collapse onto frame 3 and the LFO runs 3 frames behind).\n"
-        "                              The CgbSound entry follows the work MPlayMain would do\n"
-        "                              for the song mid2agb (-E) makes of the MIDI, as on the\n"
+        "                              (MPlayStart's tempo at the song start), and MIDI time 0\n"
+        "                              sits on the frame the game plays a song's first tick\n"
+        "                              (frame 3's SoundMain, where --song renders start too; the\n"
+        "                              output's first 63 ms are the sound hardware's boot either\n"
+        "                              way).  The CgbSound entry follows the work MPlayMain would\n"
+        "                              do for the song mid2agb (-E) makes of the MIDI, as on the\n"
         "                              --song path; --player and --seq-log then apply too.\n"
-        "                              Default: the exact tempo map\n"
+        "                              On the corpus this render is the --song render sample for\n"
+        "                              sample.  Default: the exact tempo map\n"
+        "  --no-gba-start-delay        --gba-tempo-grid only: put MIDI time 0 at output sample 0\n"
+        "                              instead of on the game's first-tick frame.  For the\n"
+        "                              accuracy harness's experiments: the ticks of the first\n"
+        "                              frames then collapse onto frame 3 and the LFO runs 3\n"
+        "                              frames behind, so the render no longer matches the game\n"
+        "  --gba-start-delay           --midi without --gba-tempo-grid: place MIDI time 0 on the\n"
+        "                              game's first-tick frame anyway (the grid does this by\n"
+        "                              default).  For comparing an exact-tempo render with an\n"
+        "                              emulator recording\n"
         "  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)\n"
         "  --sample-rate <hz>          Sample rate in Hz (default: 44100)\n"
         "  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates\n"
@@ -1633,7 +1639,8 @@ int main(int argc, char *argv[])
     bool        portamento    = false;
     bool        pwm           = false;
     bool        quantize      = false;  /* --quantize: the MIDI event latch */
-    bool        gbaStartDelay = false;  /* --gba-start-delay: MIDI time 0 at the first song tick */
+    int         gbaStartDelayOpt = -1;  /* --gba-start-delay 1 / --no-gba-start-delay 0 / -1: follow the grid */
+    bool        gbaStartDelay = false;  /* MIDI time 0 at the first song tick (default under --gba-tempo-grid) */
     bool        gbaTempoGrid  = false;  /* --gba-tempo-grid: events on MPlayMain's tempoC / 150 ticks */
     int         maxChannels   = 5;
     int         sampleRateHz  = 44100;
@@ -1729,7 +1736,9 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--quantize") == 0) {
             quantize = true;
         } else if (strcmp(argv[i], "--gba-start-delay") == 0) {
-            gbaStartDelay = true;
+            gbaStartDelayOpt = 1;
+        } else if (strcmp(argv[i], "--no-gba-start-delay") == 0) {
+            gbaStartDelayOpt = 0;
         } else if (strcmp(argv[i], "--gba-tempo-grid") == 0) {
             gbaTempoGrid = true;
         } else if (strcmp(argv[i], "--portamento") == 0) {
@@ -1822,6 +1831,16 @@ int main(int argc, char *argv[])
 
     double sampleRate = (double)sampleRateHz;
 
+    /* The start origin: on under --gba-tempo-grid (the grid's frame 0 is the
+     * game's first-tick frame, so without it the first frames' ticks collapse
+     * onto frame 3), off for the exact tempo map; either flag overrides. */
+    gbaStartDelay = gbaStartDelayOpt >= 0 ? gbaStartDelayOpt == 1 : gbaTempoGrid;
+    if (midiPath && gbaTempoGrid && gbaStartDelayOpt == 0)
+        fprintf(stderr, "Note: --no-gba-start-delay: the first frames' ticks collapse onto frame 3 and the LFO runs "
+                        "3 frames behind; the render no longer matches the game\n");
+    if (midiPath && !gbaTempoGrid && gbaStartDelayOpt == 0)
+        fprintf(stderr, "Note: --no-gba-start-delay is the default without --gba-tempo-grid\n");
+
     if (midiPath && !gbaTempoGrid && player != M4A_PLAYER_BGM)
         fprintf(stderr, "Note: --player only applies to --song, and to --midi with --gba-tempo-grid "
                         "(the CgbSound entry's music player)\n");
@@ -1831,8 +1850,8 @@ int main(int argc, char *argv[])
     if (songPath || cryId >= 0) {
         if (quantize)
             fprintf(stderr, "Note: --quantize only applies to --midi (the sequencer already runs on the tick)\n");
-        if (gbaStartDelay)
-            fprintf(stderr, "Note: --gba-start-delay only applies to --midi (--song / --cry already start on the game's frame)\n");
+        if (gbaStartDelayOpt >= 0)
+            fprintf(stderr, "Note: --gba-start-delay / --no-gba-start-delay only apply to --midi (--song / --cry already start on the game's frame)\n");
         if (gbaTempoGrid)
             fprintf(stderr, "Note: --gba-tempo-grid only applies to --midi (--song / --cry already run on the game's ticks)\n");
         if (songVolumeSet || reverbSet)
@@ -2261,7 +2280,7 @@ int main(int argc, char *argv[])
                        (double)fadeStartSample / sampleRate);
             }
         }
-        printf("  MIDI time 0 at output sample %llu (--gba-start-delay)\n",
+        printf("  MIDI time 0 at output sample %llu (the game's first-tick frame)\n",
                (unsigned long long)midiOrigin);
     }
 
