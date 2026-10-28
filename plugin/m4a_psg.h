@@ -1,3 +1,14 @@
+/* Copyright (c) 2013-2016 Jeffrey Pfau (mGBA, https://mgba.io)
+ * Copyright (c) 2026 Marcus Huderle
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * This file is derived from mGBA 0.10.5 (src/gb/audio.c, src/gba/audio.c,
+ * src/gba/io.c) and is therefore licensed under the MPL 2.0, not under the
+ * MIT license that covers the rest of this project.  See
+ * THIRD_PARTY_LICENSES.md and licenses/MPL-2.0.txt. */
 #ifndef M4A_PSG_H
 #define M4A_PSG_H
 

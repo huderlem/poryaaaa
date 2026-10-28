@@ -1,3 +1,16 @@
+/* Copyright (C) 2003-2009 Shay Green (blip_buf 1.1.0, http://www.slack.net/~ant/)
+ * Copyright (c) 2026 Marcus Huderle
+ *
+ * This file is derived from blip_buf's fast linear delta path (the copy
+ * vendored in mGBA 0.10.5 as src/third-party/blip_buf) and is free software;
+ * you can redistribute it and/or modify it under the terms of the GNU Lesser
+ * General Public License as published by the Free Software Foundation;
+ * either version 2.1 of the License, or (at your option) any later version.
+ * It is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public License for
+ * more details.  It is NOT under the MIT license that covers the rest of
+ * this project.  See THIRD_PARTY_LICENSES.md and licenses/LGPL-2.1.txt. */
 #include "m4a_resampler.h"
 #include <stdlib.h>
 #include <string.h>

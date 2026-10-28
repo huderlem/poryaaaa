@@ -325,6 +325,13 @@ The engine reimplements algorithms from these pokeemerald source files:
 | `src/m4a_tables.c` | `gScaleTable`, `gFreqTable`, CGB frequency tables |
 | `include/gba/m4a_internal.h` | Struct definitions |
 
+# License
+
+MIT, except `plugin/m4a_psg.*` (MPL 2.0, derived from mGBA) and
+`plugin/m4a_resampler.*` (LGPL 2.1, derived from blip_buf).  See
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the full list,
+including the vendored dependencies.
+
 # AI Disclaimer
 
 Much of this codebase was written with the aide of Claude Code, which allowed extremely rapid exploration, implementation, and iteration of the m4a engine code, along with consulting [mgba's audio emulation](https://github.com/mgba-emu/mgba/blob/master/src/gba/audio.c).
