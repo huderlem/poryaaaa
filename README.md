@@ -4,74 +4,65 @@ Poryaaaa is an audio synthesizer that emulates the GBA's m4a sound engine.  It's
 
 ## Overview
 
-Composing custom music for Pokémon GBA games normally requires a slow iteration loop: write notes in a DAW, export midi file, build the ROM, and test in an emulator.  Without a synth like poryaaaa, the DAW's audio will sound very different from how it sounds in-game on the GBA. This project eliminates that painful gap by emulating the m4a mixer and loading audio data (e.g. voicegroups, samples) directly from the decomp project's files.
+Composing custom music for Pokémon GBA games used to require a slow creative loop: write notes in a DAW, export midi file, build the ROM, and test in an emulator.  Without a synth like poryaaaa, the DAW's audio will sound very different from how it sounds in-game on the GBA. This project eliminates that painful gap by emulating the m4a engine and loading audio data (e.g. voicegroups, samples) directly from the decomp project's files.
+
+Poryaaaa accurately emulates both the m4a engine and the GBA hardware it runs on (verified against [mgba](https://mgba.io)), so what you hear in poryaaaa is virtually identical to what you hear in-game.
 
 These are the available poryaaaa tools:
 
 - **`poryaaaa.clap`**: a CLAP instrument plugin. Insert it on a MIDI track in your DAW and hear the GBA-accurate audio in real time as you compose.
 - **`poryaaaa_standalone(.exe)`**: a standalone GUI that wraps the CLAP plugin. It receives MIDI from any connected device or virtual cable and plays audio through your speakers.
-- **`poryaaaa_render(.exe)`**: a standalone command-line renderer. Feed it a MIDI file and a voicegroup name; it outputs a WAV file and/or plays audio through your speakers. Supports looping with configurable repeat count and fadeout.
+- **`poryaaaa_render(.exe)`**: a standalone command-line renderer. Feed it a MIDI file, a compiled song (`mid2agb` output, or any song `.s` from the project) or a Pokémon cry; it outputs a WAV file and/or plays audio through your speakers. Supports looping with configurable repeat count and fadeout.
 
 All tools auto-discover the project structure and work with [pokeemerald](https://github.com/pret/pokeemerald), [pokefirered](https://github.com/pret/pokefirered), and forked projects (including those with custom sound data directories).
 
 ## Usage
 
-### `poryaaaa_render` -- Standalone command-line MIDI renderer
+### `poryaaaa_render` -- Standalone command-line renderer
 
 ```
-Usage: poryaaaa_render <project_root> <voicegroup> --midi <file.mid> [options]
-
-Required:
-  <project_root>              Path to pokeemerald/pokefirered project root
-  <voicegroup>                Voicegroup name (e.g. petalburg)
-  --midi <file.mid>           MIDI input file
-
-Output (at least one required):
-  --output <file.wav>         Write rendered audio to WAV file
-  --play                      Play audio through computer speakers
-
-Audio options:
-  --song-volume <0-127>       Song master volume (default: 127)
-  --reverb <0-127>            Reverb amount (default: 0)
-  --polyphony <1-15>          Max simultaneous PCM channels (default: 5)
-  --sample-rate <hz>          Sample rate in Hz (default: 44100)
-  --pcm-mix-rate <hz>         DirectSound (PCM) mix rate: one of the m4a sound-mode rates
-                              5734 7884 10512 13379 15768 18157 21024 26758 31536 36314
-                              40137 42048 (nearest is used; default: 13379)
-  --hq-mixer                  ipatix HQ-mixer mode (the pret wiki's HQ mixer; default: the
-                              vanilla pokeemerald mixer)
-  --hq-stack-sp <addr>        HQ mode: sp at SoundMainRAM entry, the pre-cached paths' stack
-                              budget (default 0x03007DD0, the test ROM's; see docs/HQ-MIXER-ACCURACY.md)
-  --tail <seconds>            Silence after last event, no loop markers (default: 3.0)
-
-Opt-in effect features (off by default; extend the stock m4a engine):
-  --respect-base-midi-key     Treat a PCM voice's key as the sample's base MIDI note
-  --portamento                Enable the portamento glide effect (CC 5)
-  --pwm                       Enable pulse-width modulation on CGB square channels (CC 0x17/0x19)
-
-Loop options (when MIDI contains '[' / ']' text events):
-  --loop-count <n>            Number of loop body repetitions (default: 2)
-  --fadeout <seconds>         Fadeout duration after final loop (default: 5.0)
-  --total-duration-seconds <s>  Override loop-count; set exact total duration
-                                (fadeout occupies the final --fadeout seconds)
+poryaaaa_render <project_root> <voicegroup> --midi <file.mid> [options]
+poryaaaa_render <project_root> [<voicegroup>] --song <file.s> [options]
+poryaaaa_render <project_root> --cry <id> [options]
 ```
 
-The opt-in effect features require the matching m4a engine extensions in your project. See [huderlem/pokeemerald @ m4a_extensions](https://github.com/huderlem/pokeemerald/tree/m4a_extensions).
+Three kinds of input:
+
+- **`--midi <file.mid>`**: a MIDI file, with the voicegroup named on the command line. This is what the DAW plugin plays.
+- **`--song <file.s>`**: a compiled song (`mid2agb` output, or any song under the project's `sound/songs/`), played exactly as the game plays it. The voicegroup, volume and reverb come from the song file itself; a voicegroup on the command line overrides it.
+- **`--cry <id>`**: a Pokémon cry by its index in the project's cry table, played as the game plays it. The `--cry-*` options set the pitch, pan, volume, length, release and chorus of the game's other cry modes.
+
+Output goes to `--output <file.wav>`, `--play` (the speakers), or both. The options you will usually want:
+
+| Option | Meaning |
+|--------|---------|
+| `--song-volume <0-127>`, `--reverb <0-127>` | Song master volume and reverb (`--midi` only; a `.s` song carries its own) |
+| `--polyphony <1-15>` | Max simultaneous PCM channels (default 5, the games' setting) |
+| `--pcm-mix-rate <hz>` | DirectSound mix rate, one of the m4a sound-mode rates (default 13379, the games' setting) |
+| `--hq-mixer` | Mix with ipatix's HQ mixer instead of the stock one ([HQ mixer mode](#hq-mixer-mode-ipatix)) |
+| `--sample-rate <hz>` | Output sample rate (default 44100) |
+| `--loop-count <n>`, `--fadeout <s>`, `--total-duration-seconds <s>`, `--tail <s>` | Looping and length ([Loop markers](#loop-markers)) |
+| `--respect-base-midi-key`, `--portamento`, `--pwm` | The [opt-in effect features](#plugin-config-reference), off by default |
+
+`poryaaaa_render --help` lists the remaining options (cry parameters, sound-effect players, and debugging aids).
 
 Examples:
 
 ```bash
-# Render to WAV with reverb
+# Render a MIDI to WAV with reverb
 ./build/poryaaaa_render /path/to/pokeemerald petalburg \
     --midi song.mid --output out.wav --reverb 40
 
-# Play through speakers
+# Play a MIDI through the speakers
 ./build/poryaaaa_render /path/to/pokeemerald petalburg \
     --midi song.mid --play --song-volume 100
 
-# Render and play simultaneously
-./build/poryaaaa_render /path/to/pokeemerald petalburg \
-    --midi song.mid --output out.wav --play
+# Render a song from the project exactly as the game plays it
+./build/poryaaaa_render /path/to/pokeemerald \
+    --song /path/to/pokeemerald/sound/songs/midi/mus_littleroot.s --output littleroot.wav
+
+# Render Bulbasaur's cry
+./build/poryaaaa_render /path/to/pokeemerald --cry 0 --output bulbasaur.wav
 
 # Loop twice with 5-second fadeout (default when '['/']' markers found)
 ./build/poryaaaa_render /path/to/pokeemerald petalburg \
@@ -91,6 +82,8 @@ When the MIDI file contains text events (Meta type 0x01) or marker events (Meta 
 - After the final repetition, audio continues playing from `[` while fading to silence over `--fadeout` seconds.
 
 `--total-duration-seconds` overrides `--loop-count` and sets the exact total render length. The fadeout still occupies the last `--fadeout` seconds of that duration.
+
+With `--song`, the loop count is the number of passes through the song's loop, and a song that ends with `FINE` ends the render after `--tail` seconds.
 
 ### Standalone executable
 
@@ -152,6 +145,8 @@ Caveat: I haven't actually tested this on Linux.  It theoretically works...
 
 While the DAW's transport is playing, note, CC, program change and pitch bend events are held to the next GBA frame (one VBlank, about 16.7 ms), where the game's sound engine would start them; while the transport is stopped, and in the standalone (which has no transport), they apply at once so live playing stays responsive. This is the default, "Follow Transport"; **Options → Quantize to GBA Frames** (or `quantize_events` in the config) can set it to "Always" or "Never" instead. A host's note choke always cuts the note at once.
 
+The plugin plays at the host's tempo; the game rounds a song's tempo to its own frame grid (about 0.5 % faster), so a `poryaaaa_render --song` render of the compiled song is the exact in-game timing.
+
 The plugin reads `poryaaaa.cfg` on startup for initial defaults. All settings can be changed live through the GUI and are saved in the DAW's project state.
 
 #### Plugin config reference
@@ -208,7 +203,7 @@ This produces the following targets:
 |--------|--------|-------------|
 | `poryaaaa` | `poryaaaa.clap` | CLAP instrument plugin |
 | `poryaaaa-standalone` | `poryaaaa_standalone(.exe)` | Standalone GUI |
-| `poryaaaa_render` | `poryaaaa_render(.exe)` | Standalone MIDI renderer |
+| `poryaaaa_render` | `poryaaaa_render(.exe)` | Standalone renderer |
 | `poryaaaa_test` | `poryaaaa` | Quick WAV export test (hardcoded sequence) |
 | `poryaaaa_unit_tests` | `poryaaaa_unit_tests` | Engine unit test suite |
 
@@ -235,69 +230,11 @@ Copy `build-windows/poryaaaa.clap` to your DAW's CLAP plugin directory (e.g. `%A
 ./build/poryaaaa_unit_tests
 ```
 
-## Architecture
+## Accuracy
 
-```
-cmd/
-  poryaaaa_render.c           Standalone MIDI renderer (CLI tool)
+Poryaaaa's engine is a port of pokeemerald's m4a sound driver (the sequencer, the PCM mixer and the PSG driver), running on a model of the GBA's audio hardware taken from mgba. Its output is null-tested against mgba playing the same songs, sound effects and cries on a test ROM: most of the test set is bit-identical, and the rest differs only at the level of mgba's own scheduling jitter (around −50 dB, inaudible). Details, measurements and known limitations are in [docs/ACCURACY.md](docs/ACCURACY.md) and [docs/HQ-MIXER-ACCURACY.md](docs/HQ-MIXER-ACCURACY.md); [test/accuracy/README.md](test/accuracy/README.md) explains how to run the harness.
 
-plugin/
-  m4a_plugin.c/.h             CLAP entry point, MIDI event handling, extension dispatch
-  m4a_gui.cpp/.h              Dear ImGui + Pugl settings GUI (C++ with C interface)
-  imgui_impl_pugl.cpp/.h      Custom ImGui Pugl windowing backend
-  m4a_engine.c/.h             Core engine: tick processing, channel allocation, MIDI routing
-  m4a_channel.c/.h            PCM and CGB channel rendering, ADSR envelopes
-  m4a_tables.c/.h             Frequency/scale tables (from m4a_tables.c)
-  m4a_reverb.c/.h             Delay-based reverb effect
-  voicegroup_loader.c/.h      Project discovery, .inc/.s parser, sample loader
-  standalone_main_win32.cpp   Custom Win32 entry point for the standalone executable
-
-test/
-  test_engine.c          Unit tests for engine algorithms
-  test_wav_export.c      Hardcoded-sequence WAV export test (poryaaaa_test)
-
-third_party/
-  miniaudio.h            Single-header audio I/O library (used by poryaaaa_render)
-  pugl/                  Vendored Pugl windowing library (GUI backend)
-
-clap-sdk/                CLAP plugin SDK (submodule)
-clap-wrapper/            Wraps the CLAP plugin as a standalone app (submodule)
-imgui/                   Dear ImGui (submodule)
-```
-
-### CLAP extensions
-
-| Extension | Purpose |
-|-----------|---------|
-| `CLAP_EXT_AUDIO_PORTS` | Declares one stereo output port |
-| `CLAP_EXT_NOTE_PORTS` | Declares one MIDI input port |
-| `CLAP_EXT_STATE` | Saves/restores voicegroup path and audio settings in the DAW project |
-| `CLAP_EXT_GUI` | Settings GUI (Win32 embedded on Windows, floating on Linux/macOS) |
-| `CLAP_EXT_TIMER_SUPPORT` | 16 ms timer that drives GUI rendering and applies live parameter changes |
-
-### How the engine works
-
-The engine runs a **tick** at the GBA's VBlank rate (~59.7 Hz) to advance envelopes and LFO, while rendering audio sample-by-sample at the configured sample rate (typically 44100 or 48000 Hz).
-
-**PCM channels** use the same 23-bit fractional sample position and linear interpolation as the GBA's `SoundMainRAM` mixer. Frequency is computed using `MidiKeyToFreq` with the exact scale/frequency table lookups. The channels (and the DirectSound reverb) are mixed at the configurable **PCM mix rate** — 13379 Hz by default, matching the GBA's hardware DirectSound rate — then linearly upsampled to the output sample rate. Because the hardware mixes at that low rate, pitched-up high notes alias below its ~6.7 kHz Nyquist exactly as they do in-game; raising the mix rate (up to "host rate") progressively removes that aliasing at the cost of accuracy. **CGB channels** are synthesized directly at the output rate and mixed in after the upsample.
-
-**CGB channels** are synthesized in software: square waves use an 8-step duty cycle pattern with a phase accumulator, programmable wave reads 4-bit nibbles from 16-byte waveforms, and noise uses a 15-bit LFSR.
-
-**`poryaaaa_render`** pre-renders the entire song to float stereo buffers before writing or playing back. For looping songs it builds an extended event timeline by repeating the loop body events with increasing sample offsets, then applies a linear fadeout envelope in place over the final window.
-
-### Voicegroup loading
-
-The loader auto-discovers and parses project assembly source files at runtime:
-
-1. **Project discovery**: scans the `sound/` directory tree to locate symbol definition files, voicegroup directories, monolithic voicegroup files, and `.wav` sample directories. Works with pokeemerald's individual-file layout (`sound/voicegroups/<name>.inc`) and pokefirered's monolithic layout (`sound/voice_groups.inc` with labeled sections).
-2. **Symbol maps**: parses `direct_sound_data.inc` and `programmable_wave_data.inc` to build symbol-to-file mappings for PCM and programmable wave samples.
-3. **Keysplit tables**: parses `keysplit_tables.inc`, supporting both pokeemerald's macro format (`keysplit name, startNote`) and pokefirered's raw format (`.set`/`.byte` directives).
-4. **Voice definitions**: parses voice macros (`directsound`, `square`, `noise`, `keysplit`, etc.) from the discovered voicegroup file.
-5. **Sample loading**: loads `.wav` samples with a deduplication cache. When a sample symbol isn't found in the symbol map, the loader falls back to searching discovered `.wav` directories.
-
-Keysplit and drumset sub-voicegroups are resolved recursively across all discovered voicegroup directories. Additional search paths can be configured for projects with non-standard layouts.
-
-### Golden Sun synth instruments
+## Golden Sun synth instruments
 
 Poryaaaa supports the synthesized instruments from Golden Sun's custom mixer, as featured in [ipatix's improved ("HQ") mixer](https://github.com/ipatix/gba-hq-mixer): pulse wave (with duty-cycle modulation), pseudo-sawtooth, and triangle. A DirectSound voice whose sample has a length of zero is played as one of these synth tones instead of PCM data. Support is always enabled — projects without synth samples are unaffected.
 
@@ -306,24 +243,13 @@ Both ways of defining synth voices are recognized:
 - **Binary samples**: a `.bin` sample with size 0 whose data bytes select the waveform and pulse parameters, referenced from `direct_sound_data.inc` like any other sample.
 - **Assembly macros**: inline `set_synth_pulse p1, p2, p3, p4`, `set_synth_saw`, and `set_synth_triangle` definitions, auto-discovered from `sound/direct_sound_synth_data.inc`. The alias names `set_synth_custom`, `set_synth_25`, and `set_synth_50` are also accepted.
 
-In the stock mixer the synth tones are an extension (the stock engine would play a zero-size sample as a click); in HQ mixer mode they are the HQ mixer's own synth paths, measured against the ROM.
+In the stock mixer the synth tones are an extension (the stock engine would play a zero-size sample as a click); in HQ mixer mode they are the HQ mixer's own synths.
 
-### HQ mixer mode (ipatix)
+## HQ mixer mode (ipatix)
 
 Many hacks install [ipatix's High-Quality Audio Mixer](https://github.com/ipatix/gba-hq-mixer) following the [pret wiki](https://github.com/pret/pokeemerald/wiki/Implementing-ipatix's-High-Quality-Audio-Mixer): a replacement for the game's `SoundMainRAM` that mixes the DirectSound (PCM) channels into a 16-bit buffer and quantizes once, with noise shaping and saturation, so chords no longer wrap or pick up 8-bit rounding noise per channel. Poryaaaa reproduces that mixer (HQ-Mixer rev 4.0 as the wiki installs it, with reverb and the DMA copy enabled) as an opt-in mode, off by default: **Options → HQ Mixer (ipatix)** in the plugin, `hq_mixer=1` in `poryaaaa.cfg`, or `--hq-mixer` with `poryaaaa_render`. The choice is saved in the DAW project state.
 
-What changes with the mode: only the PCM mix (the sequencer, the PSG channels, the reverb taps and the timing are the same). The HQ mixer has no 7884 Hz mix rate (its frame is not a multiple of 8 samples), so that rate is not offered while the mode is on; a looped compressed sample does not loop (the mixer has no support for it); and samples that need more than the mixer's stack budget in a frame are skipped for that frame, as on the GBA (the budget is the test ROM's; `--hq-stack-sp` sets the `sp` value for another ROM). Both modes null against mgba on the project's test ROMs, at the games' 13379 Hz mix rate and at 21024 Hz (the wiki's example of a raised engine rate, where the HQ mixer's DMA ring grows to 7 frames as the wiki prescribes; the other table rates are mixed through the same code but are unmeasured); the details, the measurements and the known residuals are in [docs/HQ-MIXER-ACCURACY.md](docs/HQ-MIXER-ACCURACY.md).
-
-## GBA source reference
-
-The engine reimplements algorithms from these pokeemerald source files:
-
-| File | Content |
-|------|---------|
-| `src/m4a.c` | `MidiKeyToFreq`, `TrkVolPitSet`, `CgbSound`, `CgbModVol` |
-| `src/m4a_1.s` | `SoundMainRAM` (PCM mixer, reverb, envelope processing) |
-| `src/m4a_tables.c` | `gScaleTable`, `gFreqTable`, CGB frequency tables |
-| `include/gba/m4a_internal.h` | Struct definitions |
+Only the PCM mix changes with the mode; the sequencer, PSG channels and timing are the same. As on the GBA, the HQ mixer has no 7884 Hz mix rate, a looped compressed sample does not loop, and samples that need more than the mixer's stack budget in a frame are skipped (`--hq-stack-sp` sets the budget for a ROM other than the test ROM). Both modes are verified against mgba; see [docs/HQ-MIXER-ACCURACY.md](docs/HQ-MIXER-ACCURACY.md).
 
 # License
 

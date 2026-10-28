@@ -33,12 +33,12 @@ song_master_volume=127
 # Default: 5 (matches Pokemon Emerald's engine configuration).
 #max_channels=5
 
-# DirectSound (PCM) mixing rate in Hz. The m4a engine mixes PCM channels at a
-# fixed low sample rate (13379 Hz) by default, so higher frequencies will have
-# aliasing. Higher pcm_mix_rate will progressively reduce that aliasing; 0 means
-# "follow the host sample rate" (sounds better, but less accurate to what it sounds
-# like in-game).
-# Default: 13379 (m4a's default sample rate).
+# DirectSound (PCM) mixing rate in Hz: one of the m4a sound-mode rates
+# (5734, 7884, 10512, 13379, 15768, 18157, 21024, 26758, 31536, 36314, 40137,
+# 42048; the nearest is used). The games mix at 13379 Hz, so higher notes alias
+# as they do in-game; a higher rate reduces that aliasing, as it does on a ROM
+# built with that sound mode.
+# Default: 13379.
 #pcm_mix_rate=13379
 
 # ---- Opt-in effect features ----
@@ -67,6 +67,13 @@ song_master_volume=127
 # on (or 1): always hold them. off (or 0): never. Also in the GUI's "Options"
 # menu; saved per project.
 #quantize_events=transport
+
+# ---- HQ mixer mode ----
+# Mix DirectSound (PCM) channels with ipatix's High-Quality Audio Mixer as the
+# pret wiki installs it, instead of the stock pokeemerald mixer. For projects
+# that have the HQ mixer installed. pcm_mix_rate 7884 is not available in
+# this mode. Also in the GUI's "Options" menu; saved per project.
+#hq_mixer=0
 
 # Additional .inc files for sample symbol definitions (semicolon-separated, relative to project_root).
 # Normally auto-discovered from sound/direct_sound_data.inc.
