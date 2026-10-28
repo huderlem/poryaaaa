@@ -25,6 +25,24 @@ void m4a_sound_main_ram(M4AEngine *engine, int frameOffset, int pcmDmaCounter);
  * the left (B) bytes.  The envelope step is not run here. */
 void m4a_mixer_mix_channel(M4AEngine *engine, M4APCMChannel *ch, int8_t *frame);
 
+/* A range of the slot, [start, start + count), for live mode
+ * (m4a_engine_set_live_mode): the reverb pass over that range, then every
+ * channel's mix of `count` samples (a multiple of 4, the mixer's word).
+ * `envelopeStep` says which channels get the envelope step first:
+ * M4A_ENVELOPE_STEP_ALL is SoundMainRAM's (once per frame, count may be 0
+ * to step without mixing); M4A_ENVELOPE_STEP_STARTING steps only a channel
+ * still CHN_START (keyed since the frame's step), so it joins this piece;
+ * M4A_ENVELOPE_STEP_NONE steps nobody.  A channel left CHN_START (a
+ * STARTING step never ran for it) is not mixed. */
+#define M4A_ENVELOPE_STEP_NONE     0
+#define M4A_ENVELOPE_STEP_ALL      1
+#define M4A_ENVELOPE_STEP_STARTING 2
+void m4a_sound_main_ram_range(M4AEngine *engine, int frameOffset, int pcmDmaCounter, int start,
+                              int count, int envelopeStep);
+/* m4a_mixer_mix_channel over `count` samples (a multiple of 4) in place of
+ * pcmSamplesPerVBlank; the channel's state carries into the next call. */
+void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *ch, int8_t *frame, int count);
+
 /* The packed-word accumulate of one sample at one lane volume, exactly the
  * `mul r1, r10, r0 / bic r1, r1, 0xFF0000 / add r6, r1, r6, ror 8`
  * sequence: `acc` is the word so far, `vol16` the envelope volume << 16,

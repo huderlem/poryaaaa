@@ -68,10 +68,16 @@ static inline void finish_word(const M4AEngine *engine, int8_t *r5, uint32_t r6,
 
 /* SoundMainRAM_Reverb: the previous contents of this frame's slot and of
  * the next one (both sides) feed back, scaled, into both sides. */
-static void reverb_pass(M4AEngine *engine, int8_t *r5, int r4_counter, int r3_reverb)
+static void reverb_pass(M4AEngine *engine, int8_t *r5, int r4_counter, int r3_reverb,
+                        int start, int count)
 {
     int8_t *r7 = (r4_counter == 2) ? engine->pcmBuffer : r5 + engine->pcmSamplesPerVBlank;
-    int r4 = engine->pcmSamplesPerVBlank;
+    /* A range of the slot (live mode mixes it in pieces): both taps move. */
+    r5 += start;
+    r7 += start;
+    int r4 = count;
+    if (r4 <= 0)
+        return;
     do {
         int32_t r0 = r5[BUF];
         r0 += r5[0];
@@ -174,7 +180,7 @@ static void mix_synth(const M4AEngine *engine, M4APCMChannel *ch, int8_t *r5, in
 /* SoundMainRAM_Unk1: TONEDATA_TYPE_CMP / TONEDATA_TYPE_REV channels. */
 static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
                  int8_t **pr3, uint32_t *pr9, uint32_t r10, uint32_t r11,
-                 int32_t loopLen /* [sp, 0x1C] */)
+                 int32_t loopLen /* [sp, 0x1C] */, int32_t spv)
 {
     WaveData *r6w = r4->wav;
     int8_t *data = r6w->data;
@@ -204,7 +210,7 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
     else
         r8 = (uint32_t)engine->pcmDivFreq * r4->frequency;
 
-    int32_t frameLeft = engine->pcmSamplesPerVBlank; /* [sp] */
+    int32_t frameLeft = spv; /* [sp] */
     uint32_t r6 = 0, r7 = 0;
     int32_t r0, r1;
     uint32_t lr;
@@ -373,7 +379,14 @@ done_special:                                            /* _081DD4F0 */
 
 void m4a_mixer_mix_channel(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame)
 {
+    m4a_mixer_mix_channel_n(engine, r4, frame, engine->pcmSamplesPerVBlank);
+}
+
+void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame, int count)
+{
     int8_t *r5 = frame;
+    if (count <= 0)
+        return;
     uint32_t r10 = (uint32_t)r4->envelopeVolumeRight;
     uint32_t r11 = (uint32_t)r4->envelopeVolumeLeft;
     /* [sp, 0x10] / [sp, 0xC]: loop length and loop start, or 0. */
@@ -386,7 +399,10 @@ void m4a_mixer_mix_channel(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame)
     int32_t r2 = r4->count;
     int8_t *r3 = r4->currentPointer;
     uint32_t r9 = r4->fw;
-    int32_t r8 = engine->pcmSamplesPerVBlank;
+    /* SoundInfo.pcmSamplesPerVBlank, or a piece of the frame in live
+     * mode: the asm only ever reads it as the sample count, and the state
+     * it stores back (count, pointer, fw) carries a piece into the next. */
+    int32_t r8 = count;
 
     r10 <<= 16;
     r11 <<= 16;
@@ -397,7 +413,7 @@ void m4a_mixer_mix_channel(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame)
     }
 
     if (r4->type & (VOICE_TYPE_CMP | VOICE_TYPE_REV)) {
-        unk1(engine, r4, r5, &r2, &r3, &r9, r10, r11, loopLen);
+        unk1(engine, r4, r5, &r2, &r3, &r9, r10, r11, loopLen, r8);
         r4->fw = r9;                                     /* _081DD228 */
         r4->count = r2;                                  /* _081DD22C */
         r4->currentPointer = r3;
@@ -547,14 +563,24 @@ store_count_ptr:                                         /* _081DD22C */
 
 void m4a_sound_main_ram(M4AEngine *engine, int frameOffset, int pcmDmaCounter)
 {
-    int8_t *r5 = engine->pcmBuffer + frameOffset;
-    int spv = engine->pcmSamplesPerVBlank;
+    m4a_sound_main_ram_range(engine, frameOffset, pcmDmaCounter, 0, engine->pcmSamplesPerVBlank,
+                             M4A_ENVELOPE_STEP_ALL);
+}
 
-    if (engine->reverb.amount != 0) {
-        reverb_pass(engine, r5, pcmDmaCounter, engine->reverb.amount);
-    } else {
-        memset(r5, 0, (size_t)spv);                      /* SoundMainRAM_NoReverb */
-        memset(r5 + BUF, 0, (size_t)spv);
+void m4a_sound_main_ram_range(M4AEngine *engine, int frameOffset, int pcmDmaCounter, int start,
+                              int count, int envelopeStep)
+{
+    int8_t *slot = engine->pcmBuffer + frameOffset;
+    int8_t *r5 = slot + start;
+    int spv = count;
+
+    if (count > 0) {
+        if (engine->reverb.amount != 0) {
+            reverb_pass(engine, slot, pcmDmaCounter, engine->reverb.amount, start, count);
+        } else {
+            memset(r5, 0, (size_t)spv);                  /* SoundMainRAM_NoReverb */
+            memset(r5 + BUF, 0, (size_t)spv);
+        }
     }
 
     /* SoundMainRAM_ChanLoop over the real pool, then the shadow pool
@@ -568,18 +594,22 @@ void m4a_sound_main_ram(M4AEngine *engine, int frameOffset, int pcmDmaCounter)
             continue;
         /* The envelope step (the SF_START / IEC / STOP / DECAY / ATTACK
          * block of SoundMainRAM, _081DCF6A.._081DD006 and the volume
-         * products that follow). */
-        m4a_pcm_channel_tick(r4, engine->masterVolume);
-        if (!(r4->status & CHN_ON))
+         * products that follow).  Live mode's pieces step only a channel
+         * keyed since the frame's own step (CHN_START), so it joins the
+         * mix now instead of at the next frame. */
+        if (envelopeStep == M4A_ENVELOPE_STEP_ALL ||
+            (envelopeStep == M4A_ENVELOPE_STEP_STARTING && (r4->status & CHN_START)))
+            m4a_pcm_channel_tick(r4, engine->masterVolume);
+        if (!(r4->status & CHN_ON) || (r4->status & CHN_START) || count <= 0)
             continue;
         bool audible = ((i >= MAX_PCM_CHANNELS) == invert)
                     || (i < MAX_PCM_CHANNELS && r4->audition);
         if (audible) {
-            m4a_mixer_mix_channel(engine, r4, r5);
+            m4a_mixer_mix_channel_n(engine, r4, r5, count);
         } else {
-            memset(muted, 0, (size_t)spv);
-            memset(muted + BUF, 0, (size_t)spv);
-            m4a_mixer_mix_channel(engine, r4, muted);
+            memset(muted + start, 0, (size_t)spv);
+            memset(muted + start + BUF, 0, (size_t)spv);
+            m4a_mixer_mix_channel_n(engine, r4, muted + start, count);
         }
     }
 }

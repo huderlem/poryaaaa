@@ -8890,6 +8890,228 @@ static void test_latch_mode(void)
     free(wd);
 }
 
+
+/* ---- Live mode (m4a_engine_set_live_mode) ---- */
+
+static WaveData *live_test_wave(int looped)
+{
+    int dataSize = 64;
+    WaveData *wd = calloc(1, sizeof(WaveData) + dataSize + 1);
+    wd->type = 0;
+    wd->status = looped ? 0xC000 : 0;
+    wd->freq = 0x01000000;
+    wd->loopStart = 0;
+    wd->size = (uint32_t)dataSize;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    for (int i = 0; i < dataSize; i++)
+        wd->data[i] = (int8_t)(100.0 * sin(2.0 * 3.14159265 * i / dataSize));
+    wd->data[dataSize] = looped ? wd->data[0] : 0;
+    return wd;
+}
+
+static void live_test_voices(ToneData *voices, WaveData *looped, WaveData *oneShot)
+{
+    memset(voices, 0, sizeof(ToneData) * 128);
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = looped;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+    voices[0].release = 200;
+    voices[1].type = VOICE_DIRECTSOUND_NO_RESAMPLE;   /* the FIX path */
+    voices[1].key = 60;
+    voices[1].wav = oneShot;
+    voices[1].attack = 40;                            /* a rising attack */
+    voices[1].decay = 200;
+    voices[1].sustain = 100;
+    voices[1].release = 200;
+    voices[2].type = VOICE_SQUARE_1;
+    voices[2].key = 60;
+    voices[2].attack = 0;
+    voices[2].decay = 0;
+    voices[2].sustain = 15;
+    voices[2].release = 0;
+    voices[2].wavePointer = (uint32_t *)(uintptr_t)2;  /* duty 50% */
+}
+
+/* The piecewise mix is the whole-frame mix: the same channel state and
+ * ring bytes whether SoundMainRAM runs once over the frame or the range
+ * entry runs it in pieces (reverb on, a looped interpolated voice, a FIX
+ * voice in its attack). */
+static void test_live_piecewise_exact(void)
+{
+    printf("Testing live mode: piecewise mix equals the frame mix...\n");
+
+    M4AEngine engine;
+    engine_init_booted(&engine, 44100.0f);
+    WaveData *looped = live_test_wave(1), *oneShot = live_test_wave(0);
+    ToneData voices[128];
+    live_test_voices(voices, looped, oneShot);
+    m4a_engine_set_voicegroup(&engine, voices);
+    m4a_reverb_set_amount(&engine.reverb, 40);
+    m4a_engine_program_change(&engine, 0, 0);
+    m4a_engine_program_change(&engine, 1, 1);
+    m4a_engine_cc(&engine, 0, 7, 127);
+    m4a_engine_cc(&engine, 1, 7, 100);
+    m4a_engine_cc(&engine, 1, 10, 100);                /* panned */
+    m4a_engine_note_on(&engine, 0, 60, 120);
+    m4a_engine_note_on(&engine, 1, 67, 90);
+    /* Two frames so both are past START (the FIX voice mid-attack), with
+     * ring content behind for the reverb taps. */
+    m4a_sound_main_ram(&engine, 0, 1);
+    m4a_sound_main_ram(&engine, 224, 7);
+
+    const int spv = engine.pcmSamplesPerVBlank;
+    ASSERT_EQ(spv, 224, "live exact: the game's rate");
+    M4APCMChannel chSnap[TOTAL_PCM_CHANNELS];
+    int8_t ringSnap[sizeof(engine.pcmBuffer)];
+    memcpy(chSnap, engine.pcmChannels, sizeof(chSnap));
+    memcpy(ringSnap, engine.pcmBuffer, sizeof(ringSnap));
+
+    /* A: the frame at once, into slot 2 (counter 6). */
+    m4a_sound_main_ram(&engine, 2 * spv, 6);
+    M4APCMChannel chA[TOTAL_PCM_CHANNELS];
+    int8_t ringA[sizeof(engine.pcmBuffer)];
+    memcpy(chA, engine.pcmChannels, sizeof(chA));
+    memcpy(ringA, engine.pcmBuffer, sizeof(ringA));
+
+    /* B: the envelope step alone, then pieces of uneven sizes. */
+    static const int pieces[] = {16, 4, 20, 16, 16, 8, 16, 16, 16, 12, 16, 16, 16, 16, 16, 4};
+    for (int pass = 0; pass < 2; pass++) {
+        memcpy(engine.pcmChannels, chSnap, sizeof(chSnap));
+        memcpy(engine.pcmBuffer, ringSnap, sizeof(ringSnap));
+        m4a_sound_main_ram_range(&engine, 2 * spv, 6, 0, 0, M4A_ENVELOPE_STEP_ALL);
+        int start = 0;
+        for (size_t i = 0; i < sizeof(pieces) / sizeof(pieces[0]) && start < spv; i++) {
+            int n = pass == 0 ? pieces[i] : M4A_LIVE_PIECE;
+            if (start + n > spv)
+                n = spv - start;
+            m4a_sound_main_ram_range(&engine, 2 * spv, 6, start, n,
+                                     pass == 0 ? M4A_ENVELOPE_STEP_NONE : M4A_ENVELOPE_STEP_STARTING);
+            start += n;
+        }
+        ASSERT_EQ(start, spv, "live exact: the pieces cover the frame");
+        ASSERT(memcmp(engine.pcmChannels, chA, sizeof(chA)) == 0,
+               "live exact: channel state after the pieces equals the frame's");
+        ASSERT(memcmp(engine.pcmBuffer, ringA, sizeof(ringA)) == 0,
+               "live exact: ring bytes after the pieces equal the frame's");
+    }
+    /* The pieces wrote something (not a vacuous comparison). */
+    int nonzero = 0;
+    for (int i = 0; i < spv; i++)
+        nonzero += ringA[2 * spv + i] != 0;
+    ASSERT(nonzero > spv / 2, "live exact: the frame has audio in it");
+
+    m4a_engine_destroy(&engine);
+    free(looped);
+    free(oneShot);
+}
+
+/* Samples from a note-on until the output is first non-zero. */
+static int live_samples_to_sound(M4AEngine *e, int track, int key, int limit)
+{
+    float outL[64], outR[64];
+    m4a_engine_note_on(e, track, (uint8_t)key, 100);
+    for (int done = 0; done < limit; done += 64) {
+        m4a_engine_process(e, outL, outR, 64);
+        for (int i = 0; i < 64; i++)
+            if (fabs(outL[i]) > 1e-6 || fabs(outR[i]) > 1e-6)
+                return done + i;
+    }
+    return limit;
+}
+
+static void live_test_setup(M4AEngine *e, bool live, ToneData *voices)
+{
+    m4a_engine_init(e, 44100.0f);
+    m4a_engine_set_live_mode(e, live);
+    m4a_engine_boot(e, false);
+    m4a_engine_set_voicegroup(e, voices);
+    m4a_engine_program_change(e, 0, 0);
+    m4a_engine_program_change(e, 2, 2);
+    m4a_engine_cc(e, 0, 7, 127);
+    m4a_engine_cc(e, 2, 7, 127);
+    /* The same phase in every engine: a frame and a bit past the boot, so
+     * the key lands just after a tick. */
+    float outL[256], outR[256];
+    for (int i = 0; i < 4; i++)
+        m4a_engine_process(e, outL, outR, 256);
+}
+
+/* A keyed note sounds within a few milliseconds in live mode, a frame or
+ * two later in the hardware's timing; the live engine's output is not
+ * silent or stuck afterwards either. */
+static void test_live_mode_latency(void)
+{
+    printf("Testing live mode: keyboard latency...\n");
+
+    WaveData *looped = live_test_wave(1), *oneShot = live_test_wave(0);
+    ToneData voices[128];
+    live_test_voices(voices, looped, oneShot);
+    const int limit = 44100 / 10;                      /* 100 ms */
+    const int ms = 44100 / 1000;
+
+    M4AEngine normal, live;
+    live_test_setup(&normal, false, voices);
+    live_test_setup(&live, true, voices);
+    int pcmNormal = live_samples_to_sound(&normal, 0, 60, limit);
+    int pcmLive = live_samples_to_sound(&live, 0, 60, limit);
+    printf("  PCM: normal %d samples (%.1f ms), live %d samples (%.1f ms)\n", pcmNormal,
+           pcmNormal / (double)ms, pcmLive, pcmLive / (double)ms);
+    ASSERT(pcmNormal > 15 * ms, "live latency: a PCM note waits over a frame normally");
+    ASSERT(pcmLive < 6 * ms, "live latency: a PCM note sounds within 6 ms in live mode");
+
+    /* The note keeps sounding across the next frames (the lazy mix keeps
+     * up with the DMA, through the ring's restart). */
+    float outL[256], outR[256];
+    int silentRuns = 0;
+    for (int k = 0; k < 40; k++) {                     /* ~230 ms, past a ring restart */
+        m4a_engine_process(&live, outL, outR, 256);
+        float peak = 0;
+        for (int i = 0; i < 256; i++)
+            if (fabs(outL[i]) > peak) peak = (float)fabs(outL[i]);
+        if (peak < 1e-4f)
+            silentRuns++;
+    }
+    ASSERT_EQ(silentRuns, 0, "live latency: the live note never drops out");
+    m4a_engine_note_off(&live, 0, 60);
+    m4a_engine_destroy(&normal);
+    m4a_engine_destroy(&live);
+
+    /* PSG: the start pass runs at the next scheduler step. */
+    live_test_setup(&normal, false, voices);
+    live_test_setup(&live, true, voices);
+    int psgNormal = live_samples_to_sound(&normal, 2, 60, limit);
+    int psgLive = live_samples_to_sound(&live, 2, 60, limit);
+    printf("  PSG: normal %d samples (%.1f ms), live %d samples (%.1f ms)\n", psgNormal,
+           psgNormal / (double)ms, psgLive, psgLive / (double)ms);
+    ASSERT(psgNormal > 10 * ms, "live latency: a PSG note waits for the next tick normally");
+    ASSERT(psgLive < 1 * ms, "live latency: a PSG note sounds within 1 ms in live mode");
+    m4a_engine_destroy(&normal);
+    m4a_engine_destroy(&live);
+
+    free(looped);
+    free(oneShot);
+}
+
+/* Live mode mixes with the vanilla mixer only. */
+static void test_live_mode_vanilla_only(void)
+{
+    printf("Testing live mode: vanilla mixer only...\n");
+    M4AEngine engine;
+    m4a_engine_init(&engine, 44100.0f);
+    m4a_engine_set_hq_mixer(&engine, true);
+    ASSERT(engine.hqMixer, "live vanilla: HQ on before live mode");
+    m4a_engine_set_live_mode(&engine, true);
+    ASSERT(!engine.hqMixer, "live vanilla: live mode turns HQ off");
+    m4a_engine_set_hq_mixer(&engine, true);
+    ASSERT(!engine.hqMixer, "live vanilla: HQ cannot be turned on while live");
+    m4a_engine_set_live_mode(&engine, false);
+    m4a_engine_set_hq_mixer(&engine, true);
+    ASSERT(engine.hqMixer, "live vanilla: HQ again once live mode is off");
+    m4a_engine_destroy(&engine);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -8970,6 +9192,9 @@ int main(void)
     test_cgb_entry_midi_path();
     test_tick_batching_midi_path();
     test_two_tick_interleave_midi_path();
+    test_live_piecewise_exact();
+    test_live_mode_latency();
+    test_live_mode_vanilla_only();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

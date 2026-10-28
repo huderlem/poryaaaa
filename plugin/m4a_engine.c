@@ -609,7 +609,10 @@ static void sound_main(M4AEngine *engine)
     int offset = 0;
     if (counter - 1 > 0)
         offset = (engine->pcmDmaPeriod - (counter - 1)) * engine->pcmSamplesPerVBlank;
-    if (engine->hqMixer)
+    if (engine->liveMode)
+        /* The frame's envelope step only; live_mix_ahead mixes the ring. */
+        m4a_sound_main_ram_range(engine, offset, counter, 0, 0, M4A_ENVELOPE_STEP_ALL);
+    else if (engine->hqMixer)
         m4a_hq_sound_main_ram(engine, offset, counter);
     else
         m4a_sound_main_ram(engine, offset, counter);
@@ -807,6 +810,7 @@ static void pcm_reprogram(M4AEngine *engine)
     if (live)
         m4a_gba_dma_disable(g);
     memset(engine->pcmBuffer, 0, sizeof(engine->pcmBuffer));
+    engine->liveMixPos = 0;
     pcm_rate_setup(engine);
     if (live)
         m4a_gba_timer_disable(g);
@@ -816,6 +820,16 @@ static void pcm_reprogram(M4AEngine *engine)
         m4a_gba_dma_enable(g);
         m4a_gba_timer_enable(g);
     }
+}
+
+void m4a_engine_set_live_mode(M4AEngine *engine, bool on)
+{
+    if (on == engine->liveMode)
+        return;
+    engine->liveMode = on;
+    engine->liveMixPos = 0;
+    if (on && engine->hqMixer)
+        m4a_engine_set_hq_mixer(engine, false);
 }
 
 void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode)
@@ -832,6 +846,8 @@ void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode)
 
 void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on)
 {
+    if (on && engine->liveMode)
+        on = false;                /* live mode mixes with the vanilla mixer only */
     /* The boot table is replayed by m4a_engine_boot; sound_main reads the
      * flag each frame.  The HQ-only state starts as the ROM's BSS -- and
      * stays as it is while the mode is unchanged: hq_buffer (the next
@@ -2407,6 +2423,63 @@ void m4a_engine_tick(M4AEngine *engine)
  * Generates numSamples of stereo float output at the host rate by running the
  * cycle scheduler until the resampler holds that many samples.
  */
+/* Live mode (m4a_engine_set_live_mode): mix the ring up to M4A_LIVE_AHEAD
+ * samples past the DMA's fetch position, in pieces, each through the
+ * mixer's range entry with the slot's own reverb tap (the slot after it,
+ * SoundMainRAM's; the ring's first slot for its last, as pcmDmaCounter 2
+ * selects).  The DMA restarts at the ring's start every pcmDmaPeriod
+ * frames, exactly ring-size samples apart (the timer period is
+ * 280896 / pcmSamplesPerVBlank), so the cursor is circular and the first
+ * samples of the ring are mixed just before the restart.  A cursor far from
+ * the fetch position (the mode just turned on, a rate change) re-syncs to
+ * it. */
+static void live_mix_ahead(M4AEngine *engine)
+{
+    M4AGbaAudio *g = &engine->gba;
+    if (!g->dmaEnabled)
+        return;
+    const int ring = engine->pcmDmaBufSize;
+    const int spv = engine->pcmSamplesPerVBlank;
+    const int period = engine->pcmDmaPeriod;
+    int src = g->fifo[0].srcPos % ring;
+    src -= src & 3;
+    int ahead = (engine->liveMixPos - src + ring) % ring;
+    if (ahead > 2 * M4A_LIVE_AHEAD) {
+        engine->liveMixPos = src;
+        ahead = 0;
+    }
+    while (ahead < M4A_LIVE_AHEAD) {
+        int pos = engine->liveMixPos;
+        int slot = pos / spv;
+        int start = pos - slot * spv;
+        int n = M4A_LIVE_PIECE;
+        if (start + n > spv)
+            n = spv - start;
+        m4a_sound_main_ram_range(engine, slot * spv, slot == period - 1 ? 2 : 1, start, n,
+                                 M4A_ENVELOPE_STEP_STARTING);
+        pos += n;
+        if (pos >= ring)
+            pos -= ring;
+        engine->liveMixPos = pos;
+        ahead += n;
+    }
+}
+
+/* Live mode: a PSG channel keyed since the last tick gets CgbSound's start
+ * pass now (its registers written at the current cycle), not at the next
+ * tick.  The tick then steps it as any sounding channel. */
+static void live_start_cgb(M4AEngine *engine)
+{
+    for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
+        M4ACGBChannel *ch = &engine->cgbChannels[i];
+        if (!(ch->status & CHN_ON) || !(ch->status & CHN_START) || (ch->status & CHN_STOP))
+            continue;
+        int64_t cursor = engine->gba.now;
+        m4a_cgb_channel_tick(ch, engine->c15, &engine->psg[i / MAX_CGB_CHANNELS], &engine->gba,
+                             &cursor);
+    }
+}
+
 void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamples)
 {
     if (!engine->booted)
@@ -2417,8 +2490,13 @@ void m4a_engine_process(M4AEngine *engine, float *outL, float *outR, int numSamp
     while (done < numSamples) {
         int want = numSamples - done;
         if (want > 4096) want = 4096;
-        while (m4a_gba_samples_avail(g) < want)
+        while (m4a_gba_samples_avail(g) < want) {
+            if (engine->liveMode) {
+                live_start_cgb(engine);
+                live_mix_ahead(engine);
+            }
             run_until(engine, g->now + GBA_SAMPLE_EVENT);
+        }
         int got = m4a_gba_read(g, outL + done, outR + done, want);
         if (got <= 0)
             break;

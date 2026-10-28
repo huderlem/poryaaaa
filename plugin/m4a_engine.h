@@ -598,6 +598,12 @@ struct M4AEngine {
      * "SoundMain timing model". */
     int32_t cgbEntryCycles;
     int64_t soundMainStamp;      /* cycle of the current SoundMain (-1 outside one) */
+    /* Live mode (m4a_engine_set_live_mode): the ring is mixed lazily just
+     * ahead of the DMA's fetch position instead of a frame at a time at
+     * SoundMain.  liveMixPos is the ring sample the lazy mix has reached
+     * (the same index on both sides; circular). */
+    bool liveMode;
+    int liveMixPos;
     };
 
 /*
@@ -846,6 +852,26 @@ int m4a_pcm_freq_mode_from_hz(double hz);
  * the 7884 Hz PCM rate (mode 2) is not supported by the HQ mixer (its
  * frame is not a multiple of 8) and snaps to the default.  Off by default. */
 void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on);
+
+/* Live mode, for a host monitoring a keyboard: a note keyed now sounds
+ * within a few milliseconds instead of one to two VBlank frames later.
+ * The frame tick (MPlayMain, CgbSound, the LFO, the PCM envelope step) still
+ * runs once per VBlank; what moves is the PCM mix.  SoundMainRAM mixes a
+ * whole frame into the ring slot the DMA reads one frame later; in live
+ * mode m4a_engine_process mixes the ring lazily, in M4A_LIVE_PIECE-sample
+ * pieces, only M4A_LIVE_AHEAD samples ahead of the DMA's fetch position
+ * (the FIFO's prefetch is 16..32 samples), and a PCM channel keyed between
+ * ticks gets its start envelope step at the next piece.  A PSG channel
+ * keyed between ticks gets its CgbSound start pass at the next scheduler
+ * step (1024 cycles) instead of the next tick.  PCM latency is about
+ * M4A_LIVE_AHEAD + 32 samples of the PCM rate (~4 ms at 13379 Hz); PSG
+ * ~0.1 ms.  Vanilla mixer only: the HQ mixer is turned off while live and
+ * cannot be turned on.  Not the hardware's timing: a frame's envelope and
+ * LFO step applies from the tick on, not one frame later.  Call while
+ * stopped, as the mixer setters. */
+#define M4A_LIVE_PIECE 16
+#define M4A_LIVE_AHEAD 32
+void m4a_engine_set_live_mode(M4AEngine *engine, bool on);
 
 /* Set voicegroup (must be loaded by voicegroup_loader) */
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup);
