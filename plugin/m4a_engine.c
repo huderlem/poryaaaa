@@ -2438,9 +2438,12 @@ static void live_mix_ahead(M4AEngine *engine)
     M4AGbaAudio *g = &engine->gba;
     if (!g->dmaEnabled)
         return;
-    const int ring = engine->pcmDmaBufSize;
     const int spv = engine->pcmSamplesPerVBlank;
     const int period = engine->pcmDmaPeriod;
+    /* The span the DMA walks before m4aSoundVSync restarts it: whole
+     * slots only.  The vanilla ring (1584) is longer than its 7 slots of
+     * 224 (1568); the tail is never read. */
+    const int ring = period * spv;
     int src = g->fifo[0].srcPos % ring;
     src -= src & 3;
     int ahead = (engine->liveMixPos - src + ring) % ring;

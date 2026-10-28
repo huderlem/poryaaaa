@@ -9094,6 +9094,82 @@ static void test_live_mode_latency(void)
     free(oneShot);
 }
 
+
+/* A sustained live-mode note is the normal engine's note: the same steady
+ * tone, shifted in time only.  Across several DMA ring restarts (7 frames
+ * each) nothing stale reaches the output. */
+static void test_live_mode_sustain_matches(void)
+{
+    printf("Testing live mode: a sustained note matches the normal engine...\n");
+    WaveData *looped = live_test_wave(1), *oneShot = live_test_wave(0);
+    ToneData voices[128];
+    live_test_voices(voices, looped, oneShot);
+    /* Dry, then with reverb (whose ring taps the lazy mix fills in a
+     * different order: a looser bound). */
+    static const int reverbs[2] = {0, 30};
+    /* The two engines' DMA phases differ by a fraction of a PCM sample,
+     * which the resampler turns into a sub-sample shift (~-30 dB on a
+     * tone); a stale ring slot or a dropped piece is far louder (the first
+     * live mode wrapped its cursor at the ring's size instead of the DMA's
+     * restart span and read -2.6 dB) and periodic. */
+    static const double floors[2] = {20.0, 20.0};
+    for (int pass = 0; pass < 2; pass++) {
+        M4AEngine normal, live;
+        live_test_setup(&normal, false, voices);
+        live_test_setup(&live, true, voices);
+        m4a_reverb_set_amount(&normal.reverb, (uint8_t)reverbs[pass]);
+        m4a_reverb_set_amount(&live.reverb, (uint8_t)reverbs[pass]);
+        m4a_engine_note_on(&normal, 0, 64, 110);
+        m4a_engine_note_on(&live, 0, 64, 110);
+        /* Settle 300 ms (attack done, reverb steady, past two ring
+         * restarts), then capture 400 ms of each. */
+        enum { SETTLE = 44100 * 3 / 10, N = 44100 * 4 / 10 };
+        float *a = malloc(sizeof(float) * (SETTLE + N)), *b = malloc(sizeof(float) * (SETTLE + N));
+        float *ar = malloc(sizeof(float) * (SETTLE + N)), *br = malloc(sizeof(float) * (SETTLE + N));
+        m4a_engine_process(&normal, a, ar, SETTLE + N);
+        m4a_engine_process(&live, b, br, SETTLE + N);
+        /* The best alignment within +-2 frames, by residual energy. */
+        double bestRes = 1e30, sig = 0;
+        int bestLag = 0;
+        for (int lag = -1500; lag <= 1500; lag += 1) {
+            double res = 0;
+            for (int i = 0; i < N - 1500; i++) {
+                double d = a[SETTLE + i] - b[SETTLE + i + lag];
+                res += d * d;
+            }
+            if (res < bestRes) { bestRes = res; bestLag = lag; }
+        }
+        for (int i = 0; i < N - 1500; i++)
+            sig += (double)a[SETTLE + i] * a[SETTLE + i];
+        double below = 10.0 * log10(sig / (bestRes + 1e-20));
+        /* Per-frame residual: a restart glitch every 7 frames would stand
+         * out against the uniform sub-sample residual. */
+        double maxBlock = 0, sumBlock = 0;
+        int blocks = 0;
+        for (int blk = 0; (blk + 1) * 224 <= N - 1500; blk++) {
+            double res = 0;
+            for (int i = blk * 224; i < (blk + 1) * 224; i++) {
+                double d = a[SETTLE + i] - b[SETTLE + i + bestLag];
+                res += d * d;
+            }
+            if (res > maxBlock) maxBlock = res;
+            sumBlock += res;
+            blocks++;
+        }
+        double meanBlock = sumBlock / blocks;
+        printf("  reverb %d: lag %d samples, residual %.1f dB below the signal, worst frame %.1fx the mean\n",
+               reverbs[pass], bestLag, below, maxBlock / (meanBlock + 1e-20));
+        ASSERT(sig > 1e-3, "live sustain: the normal engine sounds");
+        ASSERT(below >= floors[pass], "live sustain: live output matches the normal engine's");
+        ASSERT(maxBlock <= 3.0 * meanBlock, "live sustain: no frame stands out (no restart glitch)");
+        free(a); free(b); free(ar); free(br);
+        m4a_engine_destroy(&normal);
+        m4a_engine_destroy(&live);
+    }
+    free(looped);
+    free(oneShot);
+}
+
 /* Live mode mixes with the vanilla mixer only. */
 static void test_live_mode_vanilla_only(void)
 {
@@ -9194,6 +9270,7 @@ int main(void)
     test_two_tick_interleave_midi_path();
     test_live_piecewise_exact();
     test_live_mode_latency();
+    test_live_mode_sustain_matches();
     test_live_mode_vanilla_only();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
