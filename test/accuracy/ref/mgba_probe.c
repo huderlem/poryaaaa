@@ -44,6 +44,22 @@
  *   CgbSound; the m4aSoundVSync entry relative to line 150; and every PSG
  *   register write (address low byte = value @ cycle), in order.
  *
+ *   The exits (docs/ACCURACY.md, "SoundMain cost model"): RET, SoundMain's
+ *   return into m4aSoundMain (the instruction after its `bl SoundMain`;
+ *   SoundMain tail-jumps into SoundMainRAM_Buffer, whose last instruction
+ *   returns there through the lr SoundMain pushed -- the vanilla and the HQ
+ *   mixer alike); EXIT, m4aSoundMain's return into the VBlank handler (after
+ *   its `bl m4aSoundMain`, VBlankIntr in test/accuracy/rom/main.c); CR,
+ *   CgbSound's return into SoundMain (after the `bl` that follows
+ *   SoundMain_4).  Then mix = EXIT - RAM (the mixer, with m4aSoundMain's
+ *   epilogue EXIT - RET), tot = EXIT - sm (the whole m4aSoundMain), tail =
+ *   CR - the last CgbSound_next breakpoint of the frame (channel 4's; -1
+ *   without the CgbSound_ lines) and s2r = RAM - CR (SoundMain_4 .. `bx r3`).
+ *   The three return addresses are decoded from the ROM's Thumb `bl`s (the
+ *   functions' entries from the symbol file), so no symbol has to name them;
+ *   they are logged as the breakpoints SoundMain_return,
+ *   m4aSoundMain_return and SoundMain_cgbret.  -999999 = not reached.
+ *
  * With an `nm` listing of the ROM's ELF as the symbol file (seventh
  * argument; `arm-none-eabi-nm build/accuracy_test.elf`, which also holds the
  * local labels the map lacks), breakpoints are set inside MPlayMain's track
@@ -123,6 +139,7 @@ static uint32_t gDma1Sad, gDma2Sad;   /* REG_DMA1SAD / REG_DMA2SAD as SoundInit 
 struct FrameRec {
 	int used;
 	int32_t m4aSoundMain, soundMain, mplayMain, cgbSound, soundMainRAM, vsync;
+	int32_t smReturn, smExit, cgbReturn, cgbLastNext;   /* SoundMain_return, m4aSoundMain_return, SoundMain_cgbret, the last CgbSound_next */
 	int mplayMainCalls, plyNote, plyAll, tracksExist, tracksStart, trackCount, tempoC;
 	int c15Before, c15After, cgbSoundCalls;
 	int numWrites;
@@ -267,6 +284,7 @@ static struct FrameRec* frameFor(int32_t t, int32_t* rel) {
 	if (!fr->used) {
 		fr->used = 1;
 		fr->m4aSoundMain = fr->soundMain = fr->mplayMain = fr->cgbSound = fr->soundMainRAM = fr->vsync = -999999;
+		fr->smReturn = fr->smExit = fr->cgbReturn = fr->cgbLastNext = -999999;
 		fr->c15Before = fr->c15After = -1;
 		fr->tempoC = -1;
 	}
@@ -352,6 +370,10 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 			}
 		} else if (!strcmp(name, "m4aSoundMain")) { if (fr) fr->m4aSoundMain = rel; }
 		else if (!strcmp(name, "SoundMain")) { if (fr) fr->soundMain = rel; }
+		else if (!strcmp(name, "SoundMain_return")) { if (fr) fr->smReturn = rel; }
+		else if (!strcmp(name, "m4aSoundMain_return")) { if (fr) fr->smExit = rel; }
+		else if (!strcmp(name, "SoundMain_cgbret")) { if (fr) fr->cgbReturn = rel; }
+		else if (!strcmp(name, "CgbSound_next")) { if (fr) fr->cgbLastNext = rel; }
 		else if (!strcmp(name, "m4aSoundVSync")) { if (fr) fr->vsync = rel + LINE160 - LINE150; }
 		else if (!strncmp(name, "ply_", 4)) {
 			if (fr) { fr->plyAll++; if (si >= 0 && si < 256) fr->plyCount[si]++; if (!strcmp(name, "ply_note")) fr->plyNote++; }
@@ -387,6 +409,24 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 	d->state = DEBUGGER_RUNNING;
 }
 static void paused(struct mDebugger* d) { d->state = DEBUGGER_RUNNING; }
+
+/* The return address of the first Thumb `bl` in [from, from + span) whose
+ * target is `to` (any target when to == 0): the instruction after it.  0 if
+ * none.  A `bl` is the pair F000|hi11, F800|lo11; target = pc + 4 +
+ * sext(hi11) << 12 + lo11 << 1. */
+static uint32_t blReturn(const uint8_t* rom, size_t size, uint32_t from, uint32_t span, uint32_t to) {
+	from &= ~1u; to &= ~1u;
+	for (uint32_t a = from; a + 4 <= from + span; a += 2) {
+		size_t o = a - 0x08000000u;
+		if (a < 0x08000000u || o + 4 > size) return 0;
+		uint16_t h = rom[o] | rom[o + 1] << 8, l = rom[o + 2] | rom[o + 3] << 8;
+		if ((h & 0xF800) != 0xF000 || (l & 0xF800) != 0xF800) continue;
+		int32_t hi = h & 0x7FF; if (hi & 0x400) hi -= 0x800;
+		uint32_t target = a + 4 + (uint32_t) (hi << 12) + ((uint32_t) (l & 0x7FF) << 1);
+		if (!to || target == to) return a + 4;
+	}
+	return 0;
+}
 
 /* The ROM's parameter block (test/accuracy/rom/main.c struct AccParams,
  * as mgba_render patches it): type, volume, id, pitch (s16), pan (s8),
@@ -448,6 +488,7 @@ int main(int argc, char** argv) {
 	int type = atoi(argv[4]), id = atoi(argv[5]);
 	FILE* f = fopen(argv[1], "rb"); fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
 	uint8_t* rom = malloc(n); if (fread(rom, 1, n, f) != (size_t) n) return 1; fclose(f);
+	uint8_t* romCopy = malloc(n); memcpy(romCopy, rom, n);   /* unpatched: the exits are decoded from it */
 	patchParams(rom, n, type, id, cryPitch, cryPan, cryVolume, cryLength, cryRelease, cryChorus, cryId2, cryStartFrame2, cryId3, cryStartFrame3);
 	gOut = fopen(argv[2], "w");
 	gFrameRecs = calloc(MAX_FRAMES, sizeof *gFrameRecs);
@@ -501,6 +542,32 @@ int main(int argc, char** argv) {
 					gHqMixer = 1;
 				}
 		}
+		/* The exits (header): the return addresses of VBlankIntr's `bl m4aSoundMain`,
+		 * m4aSoundMain's `bl SoundMain` and the first `bl` after SoundMain_4 (CgbSound's
+		 * call through _081DD25E's `bx r3`), as extra breakpoints. */
+		{
+			uint32_t aVBlank = 0, aM4a = 0, aSM = 0, aSM4 = 0;
+			FILE* m2 = fopen(argv[6], "r");
+			while (m2 && fgets(line, sizeof line, m2)) {
+				unsigned long a; char name[128]; char kind;
+				if (sscanf(line, " 0x%lx %127s", &a, name) == 2 || sscanf(line, "%lx %c %127s", &a, &kind, name) == 3) {
+					if (!strcmp(name, "VBlankIntr")) aVBlank = a;
+					if (!strcmp(name, "m4aSoundMain")) aM4a = a;
+					if (!strcmp(name, "SoundMain")) aSM = a;
+					if (!strcmp(name, "SoundMain_4")) aSM4 = a;
+				}
+			}
+			if (m2) fclose(m2);
+			struct { uint32_t addr; const char* name; } ex[3] = {
+				{ aM4a && aSM ? blReturn(romCopy, n, aM4a, 32, aSM) : 0, "SoundMain_return" },
+				{ aVBlank && aM4a ? blReturn(romCopy, n, aVBlank, 64, aM4a) : 0, "m4aSoundMain_return" },
+				{ aSM4 ? blReturn(romCopy, n, aSM4, 16, 0) : 0, "SoundMain_cgbret" },
+			};
+			for (int i = 0; i < 3; ++i) {
+				if (!ex[i].addr) { fprintf(stderr, "note: no %s breakpoint (its `bl` was not found)\n", ex[i].name); continue; }
+				if (gNumSyms < 256) { gSyms[gNumSyms].addr = ex[i].addr; gSyms[gNumSyms].name = ex[i].name; gNumSyms++; }
+			}
+		}
 		if (!playerFound && argc > 7) { fprintf(stderr, "player symbol %s not in %s\n", argv[7], argv[6]); return 1; }
 	}
 	mLogSetDefaultLogger(&sLogger);
@@ -551,12 +618,17 @@ int main(int argc, char** argv) {
 	char path[1024];
 	snprintf(path, sizeof path, "%s.frames", argv[2]);
 	FILE* ff = fopen(path, "w");
-	fprintf(ff, "# frame | m4aSoundMain SoundMain MPlayMain CgbSound SoundMainRAM (cycles from line 160 start) | vsync (from line 150) | mplay calls, ply_note, ply_all, tracks exist/start/count, tempoC (%s) | c15 before->after | writes\n", playerArg);
+	fprintf(ff, "# frame | m4aSoundMain SoundMain MPlayMain CgbSound SoundMainRAM, RET (SoundMain returns) EXIT (m4aSoundMain returns) CR (CgbSound returns) (cycles from line 160 start) | mix = EXIT - RAM, tot = EXIT - sm, tail = CR - last CgbSound_next, s2r = RAM - CR | vsync (from line 150) | mplay calls, ply_note, ply_all, tracks exist/start/count, tempoC (%s) | c15 before->after | writes\n", playerArg);
 	for (int k = 1; k < MAX_FRAMES; ++k) {
 		struct FrameRec* r = &gFrameRecs[k];
 		if (!r->used) continue;
-		fprintf(ff, "frame %4d | sm %6d SM %6d MP %6d CGB %6d RAM %6d | vs %5d | mp %d note %2d ply %3d trk %2d/%2d/%2d tempoC %3d | c15 %2d->%2d |",
-		        k, r->m4aSoundMain, r->soundMain, r->mplayMain, r->cgbSound, r->soundMainRAM, r->vsync,
+		/* derived costs, -1 when an end is missing (a skipped SoundMain, the last, cut-off frame) */
+		int32_t mix = (r->smExit > -999999 && r->soundMainRAM > -999999) ? r->smExit - r->soundMainRAM : -1;
+		int32_t tot = (r->smExit > -999999 && r->m4aSoundMain > -999999) ? r->smExit - r->m4aSoundMain : -1;
+		int32_t tail = (r->cgbReturn > -999999 && r->cgbLastNext > -999999) ? r->cgbReturn - r->cgbLastNext : -1;
+		int32_t s2r = (r->soundMainRAM > -999999 && r->cgbReturn > -999999) ? r->soundMainRAM - r->cgbReturn : -1;
+		fprintf(ff, "frame %4d | sm %6d SM %6d MP %6d CGB %6d RAM %6d RET %6d EXIT %6d CR %6d | mix %6d tot %6d tail %4d s2r %4d | vs %5d | mp %d note %2d ply %3d trk %2d/%2d/%2d tempoC %3d | c15 %2d->%2d |",
+		        k, r->m4aSoundMain, r->soundMain, r->mplayMain, r->cgbSound, r->soundMainRAM, r->smReturn, r->smExit, r->cgbReturn, mix, tot, tail, s2r, r->vsync,
 		        r->mplayMainCalls, r->plyNote, r->plyAll, r->tracksExist, r->tracksStart, r->trackCount, r->tempoC, r->c15Before, r->c15After);
 		for (int i = 0; i < r->numWrites; ++i) {
 			const char* nm = regName(r->writes[i].reg);

@@ -261,7 +261,7 @@ exists, do not read symbols from it.)  The map still works for the function
 entries alone.
 
 **The whole corpus**: `test/accuracy/tools/probe_corpus.sh <rom> <syms.nm>
-<out dir> [name ...]` runs the 67 probed logs from one table (frames,
+<out dir> [name ...]` runs the 81 probed logs (85 on an HQ ROM) from one table (frames,
 players, cry parameters); `tools/probe_hq_compare.py <dir a> <dir b>`
 compares two corpora (boot writes, per-frame entries and PSG writes).  The
 HQ-mixer ROM: `build/probe-hq/syms.nm` from its ELF plus the same
@@ -315,7 +315,9 @@ Type 2 = micro-test, id = its line number (from 0) in
 `~/pokeemerald/include/constants/songs.h` (mus_littleroot 405,
 mus_weather_groudon 444). 70 frames cover 1.2 s; a 3 s micro-test needs 180.
 Outputs: `<name>.txt` raw log (breakpoints `B`, IO writes `W`, lateness
-`L`), `<name>.txt.frames` one line per engine frame, `<name>.txt.events`
+`L`), `<name>.txt.frames` one line per engine frame (with SoundMain's
+exits and the mixer cost, `tools/cost_diff.py`; docs/ACCURACY.md, "SoundMain
+cost model"), `<name>.txt.events`
 mgba scheduler lateness.
 
 **Frame numbering**: engine frame k >= 1 starts at cycle

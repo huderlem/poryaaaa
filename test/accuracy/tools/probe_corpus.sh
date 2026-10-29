@@ -1,6 +1,7 @@
 #!/bin/bash
-# Run mgba_probe over the probed corpus (the 67 logs of build/probe/) for one
-# test ROM: every micro-test, song, SE and cry the harness has a probe log for,
+# Run mgba_probe over the probed corpus (the 81 logs of build/probe/, 85 with
+# the synth_* rows on an HQ ROM) for one test ROM: every micro-test, song, SE
+# and cry the harness has a probe log for,
 # with the frame counts, players and cry parameters those logs were made with.
 #
 #   test/accuracy/tools/probe_corpus.sh <rom.gba> <syms.nm> <out dir> [name ...]
@@ -12,6 +13,7 @@
 set -u
 cd "$(dirname "$0")/../../.."
 ROM=$1; SYMS=$2; OUT=$3; shift 3
+PROBE=${PROBE:-build/probe/mgba_probe}   # another probe binary (e.g. a baseline build) via the environment
 mkdir -p "$OUT"
 D="15360 0 120 140 0 0"          # StartCry's defaults: pitch pan volume length release chorus
 CRY=gPokemonCryMusicPlayers
@@ -20,7 +22,7 @@ CRY=gPokemonCryMusicPlayers
 run2() {
     local n=$1 frames=$2 type=$3 id=$4; shift 4
     if [ -n "$NAMES" ] && ! printf '%s\n' "$NAMES" | grep -qx "$n"; then return; fi
-    build/probe/mgba_probe "$ROM" "$OUT/$n.txt" "$frames" "$type" "$id" "$SYMS" "$@" > "$OUT/$n.stdout" 2>&1 || echo "FAILED $n"
+    "$PROBE" "$ROM" "$OUT/$n.txt" "$frames" "$type" "$id" "$SYMS" "$@" > "$OUT/$n.stdout" 2>&1 || echo "FAILED $n"
     echo "$n"
 }
 NAMES=$(printf '%s\n' "$@")
@@ -29,7 +31,10 @@ i=0
 for m in sq1 sq1_env sq1_sweep sq1_alt sq2 sq2_alt wave wave_alt noise noise7 pcm pcm_hi pcm_adsr pcm_drum pcm_cmp pcm_reverb pcm_chord pcm_bass pan vol vel bend lfo_vib lfo_trem lfo_pan lfo_delay lfo_psg tune tune_psg psg_mix pcm_psg pcm_ratio_1x pcm_short_loop pcm_fix_loop pcm_reverb_max pcm_rev pcm_cmp_hi synth_pulse synth_pulse_lfo synth_saw synth_tri; do
     case $m in
         pcm|pcm_cmp|wave) f=180;;
-        pcm_hi|pcm_adsr|pcm_reverb|pcm_bass|pan|vol|tune|pcm_ratio_1x|pcm_short_loop|pcm_fix_loop|pcm_reverb_max|pcm_rev|pcm_cmp_hi|synth_pulse|synth_pulse_lfo|synth_saw|synth_tri) f=0;;   # not in the probed corpus
+        # the mixer-path rows (docs/ACCURACY.md, "SoundMain cost model"), 3 s like their harness rows
+        pcm_hi|pcm_adsr|pcm_reverb|pcm_bass|pan|vol|tune|pcm_ratio_1x|pcm_short_loop|pcm_fix_loop|pcm_reverb_max|pcm_rev|pcm_cmp_hi) f=180;;
+        # synth_* only on the HQ ROM (the vanilla mixer plays their zero-size sample as a click)
+        synth_pulse|synth_pulse_lfo|synth_saw|synth_tri) if grep -q ' C_downsampler$' "$SYMS"; then f=180; else f=0; fi;;
         *) f=70;;
     esac
     [ $f = 0 ] || run2 $m $f 2 $i

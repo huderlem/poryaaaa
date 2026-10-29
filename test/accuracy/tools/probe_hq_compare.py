@@ -55,7 +55,7 @@ def frames(path):
 
 
 def frame_fields(s):
-    m = re.match(r"sm\s+(-?\d+) SM\s+(-?\d+) MP\s+(-?\d+) CGB\s+(-?\d+) RAM\s+(-?\d+) \| vs\s+(-?\d+) \|(.*)\| c15\s*(-?\d+)->\s*(-?\d+) \|(.*)$", s)
+    m = re.match(r"sm\s+(-?\d+) SM\s+(-?\d+) MP\s+(-?\d+) CGB\s+(-?\d+) RAM\s+(-?\d+)(?: RET.*?\| mix.*?)? \| vs\s+(-?\d+) \|(.*)\| c15\s*(-?\d+)->\s*(-?\d+) \|(.*)$", s)
     if not m:
         return None
     return {"sm": int(m.group(1)), "SM": int(m.group(2)), "MP": int(m.group(3)), "CGB": int(m.group(4)),

@@ -26,6 +26,11 @@ for i in range(16):
     REGS[0x90 + i] = "WAVE"
 
 
+# mgba_probe's return breakpoints (docs/ACCURACY.md, "SoundMain cost model"):
+# not part of a CgbSound pass, which still ends at SoundMainRAM_Buffer
+EXITS = ("SoundMain_cgbret", "SoundMain_return", "m4aSoundMain_return")
+
+
 def passes(path):
     ev = []
     for line in open(path):
@@ -36,6 +41,8 @@ def passes(path):
         t = int(t)
         if kind == "B":
             name = rest.split()[0] if rest else "?"
+            if name in EXITS:
+                continue
             ev.append((t, "B", name, rest))
         else:
             a = int(addr, 16)
@@ -128,6 +135,8 @@ def segments(paths, verbose):
             t = int(t)
             if kind == "B":
                 name = rest.split()[0] if rest else "?"
+                if name in EXITS:
+                    continue
                 if not (name.startswith("CgbSound") or name in ("CgbModVol", "CgbOscOff", "SoundMainRAM_Buffer")):
                     prev = None
                     continue

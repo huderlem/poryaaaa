@@ -189,7 +189,8 @@ Adding to the corpus: the `accuracy-harness` skill, "Add a test".
   compiled CgbSound's internal addresses appended by hand (appendix B).
   Outputs: `<out>.txt` (breakpoints `B` with registers and deciding memory
   bytes, IO writes `W`, lateness `L`), `<out>.frames` (one line per engine
-  frame: CgbSound entry, the selected player's state), `<out>.events`
+  frame: the driver entries, SoundMain's and CgbSound's returns and the
+  mixer's cost, "SoundMain cost model"; the selected player's state), `<out>.events`
   (mgba scheduler lateness, timer-0 slot crossings).  Breakpoints do not
   change the emulation.  Channel deaths are SoundMainRAM's `_081DCFB0`
   store, broken at its IWRAM copy (SoundMainRAM runs from
@@ -588,6 +589,98 @@ Every constant is a probe-measured segment; a few paths the corpus never
 takes are estimates (marked *est.* in the header).  A future song that
 takes one shows up in `cmd_diff` / `track_diff` as a constant offset on
 that command.
+
+### SoundMain cost model
+
+The CPU a frame's SoundMain takes (`m4aSoundMain` entry to its return,
+the number a host shows as a percentage of VBlank) is the sequencer term
+above, CgbSound, and the mixer.  What the probe measures (2026-10-29,
+mGBA 0.10.5, both ROMs at 13379 and 21024 Hz):
+
+- **The exits.**  SoundMain tail-jumps (`bx r3` after `SoundMain_5`) into
+  `SoundMainRAM_Buffer`, whose last instruction returns through the lr
+  SoundMain pushed, i.e. to the instruction after m4aSoundMain's
+  `bl SoundMain`; the HQ mixer returns the same way.  `mgba_probe` decodes
+  three Thumb `bl`s from the ROM (no symbol names them) and breaks after
+  each: `SoundMain_return` (in m4aSoundMain, `RET`), `m4aSoundMain_return`
+  (in the test ROM's `VBlankIntr`, `EXIT`) and `SoundMain_cgbret`
+  (CgbSound's return into SoundMain, after the `bl` that follows
+  `SoundMain_4`, `CR`).  `.frames` carries them after `RAM` and the
+  derived `mix = EXIT − RAM`, `tot = EXIT − sm`, `tail = CR − ` channel 4's
+  `CgbSound_next` breakpoint and `s2r = RAM − CR`.  A frame's terms for
+  `tools/cost_diff.py`: seq = CGB − sm, cgb = RAM − CGB, mixer = EXIT − RAM;
+  they sum to `tot`.  The new breakpoints change nothing: with them, all 81
+  vanilla logs are the earlier probe's line for line once their own lines
+  are removed (raw log, `.events` and every older `.frames` column).
+- **Fixed segments.**  m4aSoundMain's epilogue (`RET` → `EXIT`) 10 (28
+  with the FIFO DMA stall in it).  CgbSound's tail: 36 from channel 4's
+  `CgbSound_next` to `CR` in every frame (54 with the stall); in the
+  CgbSound cursor's terms (`m4a_engine.c`, the cursor after channel 4 is
+  its `next` + 16, where the next loop head would be) **`M4A_CYC_CGB_TAIL`
+  = 20**: a frame with no CGB channel runs CgbSound → `CR` in
+  53 + 4 × 44 + 20 = 249 (247 on the c15 reload).  **`M4A_CYC_SM_TO_RAM`
+  = 63** (`CR` → `SoundMainRAM_Buffer`: `SoundMain_4`'s `ldr`/`str`s, the
+  ring-offset multiply, `SoundMain_5`, `bx r3`), **59** on the frame whose
+  `pcmDmaCounter` is 1 (the `bls SoundMain_5` is taken and the multiply
+  skipped; one frame in `pcmDmaPeriod`), 77 / 81 with the stall.  The HQ
+  mixer's `C_downsampler_return` → `RET` is 39 (57 with the stall).
+- **Mixer floor** (no DirectSound channel; `mix`, so the 10-cycle epilogue
+  is in it):
+
+  | | 13379 Hz | 21024 Hz |
+  |---|---|---|
+  | vanilla, reverb 0 | 498 | 658 |
+  | vanilla, reverb on (the pass over the ring, any amount) | 6489 | 10091 |
+  | HQ (reverb or not) | 7732 | 12038 |
+
+  The vanilla reverb pass is about 26.8 cycles per output sample
+  (5991 / 224, 9433 / 352); `pcm_reverb` (R50) and `pcm_reverb_max` (R127)
+  cost the same.  The HQ floor is the 7683 of `docs/HQ-MIXER-ACCURACY.md`
+  (to `C_downsampler_return`) plus 39 + 10, and does not move with reverb.
+  A frame the FIFO stall misses reads 18 less (HQ 21024's minimum, 12020).
+- **Range over the corpus** (81 logs, 85 on HQ with the `synth_*` rows;
+  frame 2, the idle SoundMain before a test starts, is the minimum):
+  vanilla 13379 498 – 53841 (`cry_over_bgm` frame 87: five BGM channels
+  and a DPCM cry), HQ 13379 7732 – 39923 (`littleroot` frame 702),
+  vanilla 21024 658 – 72801 (`cry_over_bgm` frame 95), HQ 21024
+  12038 – 57133 (`littleroot` frame 702).
+- **First look per channel** (`cost_diff.py --summarize`: a least-squares
+  `mix = a + b · n` over frames 3.., n = the channels `--pcm-log` lists
+  after the frame; b at the two rates split as b = per channel-frame +
+  per output sample):
+
+  | test (path) | vanilla 13379 b (rms) | vanilla 21024 b | → split | HQ 13379 b (rms) | HQ 21024 b | → split |
+  |---|---|---|---|---|---|---|
+  | `pcm` (interpolating, step < 1) | 5937 (176) | 8899 | 753 + 23.1 / smp | 3740 (761) | 5643 | 410 + 14.9 |
+  | `pcm_hi` (interpolating, step > 1) | 8454 (432) | 11955 | 2328 + 27.4 | 6428 (1996) | 9064 | 1816 + 20.6 |
+  | `pcm_short_loop` (loop wrap) | 8916 (8) | 13740 | 473 + 37.7 | 8027 (1587) | 12318 | 517 + 33.5 |
+  | `pcm_fix_loop` (FIX) | 4853 (14) | 7566 | 105 + 21.2 | 2266 (410) | 3455 | 184 + 9.3 |
+  | `pcm_drum` (FIX, 1–2 ch) | 4134 (956) | 7265 | — | 1994 (391) | 3287 | — |
+  | `pcm_cmp` (DPCM forward) | 19047 (1637) | 22296 | 13361 + 25.4 | 7176 (674) | 9080 | 3844 + 14.9 |
+  | `pcm_rev` (reverse) | 6896 (624) | 9986 | 1490 + 24.1 | 4077 (509) | 5986 | 737 + 14.9 |
+  | `pcm_reverb`, `pcm_reverb_max` | 5937 (176), a = 6494 | 8881, a = 10096 | 785 + 23.0 | as `pcm` | | |
+  | `synth_pulse` (HQ) | | | | 1660 (294) | 2505 | 182 + 6.6 |
+  | `littleroot` (2–5 ch) | 7793 (1302), a = 5791 | 11086 | 2031 + 25.7 | 3474 (3361), a = 11045 | 4941 | 906 + 11.5 |
+  | `vs_wild` (1–5 ch) | 7752 (1601), a = 6614 | 11175 | 1760 + 26.8 | 4212 (2948), a = 7100 | 6063 | 973 + 14.5 |
+
+  `pcm_chord` (four channels in every frame) is 25329 (vanilla 13379),
+  37301 (21024), 24100 / 36521 (HQ), rms 16 / 16 / 1050 / 1452.  The micro
+  rows' a is the floor (502 / 662, 7735 / 12041 HQ; the reverb rows 6494 /
+  10096).  Not a model, a map for the per-block constants: the residual
+  is per note (the interpolating cost follows the step, i.e. how many
+  source samples a frame fetches: `pcm`'s one-channel frames run 6428 – 6756), a
+  channel that dies inside the frame (count path, release reaching 0) is
+  not counted but was walked, and DPCM's cost is mostly the block decode,
+  which follows the source rate, not the output rate.  The HQ residuals
+  are larger (its fast loop has three blocks by step).
+
+`tools/probe_corpus.sh` regenerates the logs (`build/probe`,
+`build/probe-hq`, `build/probe-21024`, `build/probe-hq-21024`, each with
+its own `syms.nm`); `cost_diff.py --summarize <dir> --render` renders the
+`--pcm-log`s it needs and prints the tables above;
+`cost_diff.py <.frames> <cost log>` is the acceptance diff against
+`poryaaaa_render --cost-log` (`frame seq cgb mixer total`; every frame's
+total within 2 % or 300 cycles).
 
 ## 5. The MIDI path
 
