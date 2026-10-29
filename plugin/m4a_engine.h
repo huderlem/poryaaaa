@@ -488,6 +488,9 @@ typedef struct {
  * the next one skip). */
 #define M4A_VBLANK_CYCLES 83776
 #define M4A_FRAME_CYCLES  280896
+/* Entries in M4AEngine's per-frame cost history (a power of two; about a
+ * second of frames). */
+#define M4A_COST_HISTORY 64
 
 /* Engine state */
 struct M4AEngine {
@@ -721,6 +724,27 @@ struct M4AEngine {
      * through m4a_engine.c's atomic flag helpers (compiler atomic builtins:
      * the header stays plain C a C++ host can include). */
     volatile int32_t frameCostMaxResetPending;
+    /* Every SoundMain's cost in publication order (a host's per-frame
+     * history: frameCost alone is only the last of an m4a_engine_process
+     * call's frames).  publish_frame_cost writes entry
+     * costHistorySeq % M4A_COST_HISTORY -- costHistory (frameCost's value,
+     * invalid ones included), costHistoryStamp (the frame's SoundMain entry
+     * on the GBA CPU clock, gba.now) and costHistoryEpoch (costEpoch when
+     * it was published) -- then release-stores costHistorySeq + 1.  Same
+     * ownership as frameCost: written on the m4a_engine_process thread; a
+     * host copies the entries newer than its last seq on that thread right
+     * after the call (at most M4A_COST_HISTORY back: older ones are
+     * overwritten), or from frameEndHook.  costHistorySeq only counts up
+     * (m4a_engine_init zeroes it): a configuration change clears the
+     * entries (invalid) but keeps the count, so a host's cursor stays
+     * valid.  costEpoch counts the peak's restarts (a consumed
+     * m4a_engine_reset_frame_cost_max, a configuration change): the frames
+     * of one epoch are the ones frameCostMax was taken over. */
+    M4AFrameCost costHistory[M4A_COST_HISTORY];
+    int64_t costHistoryStamp[M4A_COST_HISTORY];
+    uint32_t costHistoryEpoch[M4A_COST_HISTORY];
+    volatile uint32_t costHistorySeq;
+    uint32_t costEpoch;
     /* Internal: CgbSound's cursor (real pool) after channel 4, where the
      * next loop head would be; and the vanilla mixer's cycles charged by
      * m4a_sound_main_ram this frame (M4A_MIX_* below, FIFO stall not yet

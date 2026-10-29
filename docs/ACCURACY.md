@@ -744,6 +744,17 @@ on the CPU clock from the SoundMain stamp:
   HQ, sound-mode-rate and voicegroup setters clear both (no stale peak
   from another configuration); a host resets the peak itself on
   play-from-stop.
+- **Per-frame history.**  Every SoundMain also goes into
+  `engine->costHistory` (a ring of `M4A_COST_HISTORY` = 64 entries:
+  `frameCost`'s value, invalid ones included, its SoundMain stamp in
+  `costHistoryStamp` and the peak epoch it belongs to in
+  `costHistoryEpoch`), the entry written before `costHistorySeq` is
+  release-stored one higher, so a host copies the frames newer than its
+  last count right after the process call (porydaw's ten-second CPU
+  history).  `costEpoch` counts the peak's restarts (a consumed reset, a
+  configuration change); a configuration change also clears the entries
+  but never the count.  Pure bookkeeping: nothing in the mix or the
+  sequencer reads it.
 
 The mixer constants (`plugin/m4a_engine.h`, each with its label pair) are
 **derived, none fitted**: the instruction count of each block of m4a_1.s at

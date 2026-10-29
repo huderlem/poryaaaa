@@ -17,10 +17,12 @@
 static inline void flag_raise(volatile int32_t *f) { _InterlockedExchange((volatile long *)f, 1); }
 static inline bool flag_take(volatile int32_t *f) { return _InterlockedExchange((volatile long *)f, 0) != 0; }
 static inline void flag_clear(volatile int32_t *f) { _InterlockedExchange((volatile long *)f, 0); }
+static inline void seq_publish(volatile uint32_t *s, uint32_t v) { _InterlockedExchange((volatile long *)s, (long)v); }
 #else
 static inline void flag_raise(volatile int32_t *f) { __atomic_store_n(f, 1, __ATOMIC_RELEASE); }
 static inline bool flag_take(volatile int32_t *f) { return __atomic_exchange_n(f, 0, __ATOMIC_ACQ_REL) != 0; }
 static inline void flag_clear(volatile int32_t *f) { __atomic_store_n(f, 0, __ATOMIC_RELEASE); }
+static inline void seq_publish(volatile uint32_t *s, uint32_t v) { __atomic_store_n(s, v, __ATOMIC_RELEASE); }
 #endif
 
 /* Duty cycle patterns for the pulse-width modulation effect (PWMC command).
@@ -651,6 +653,19 @@ int64_t m4a_engine_mixer_stall(const M4AEngine *engine, int64_t ram, int64_t mix
     return stall;
 }
 
+/* The frame's cost into the per-frame history (costHistory): the entry
+ * first, then the count that publishes it.  Only the engine's thread
+ * writes, so the count is read plainly here. */
+static void cost_history_push(M4AEngine *engine, const M4AFrameCost *c, int64_t stamp)
+{
+    uint32_t seq = engine->costHistorySeq;
+    uint32_t i = seq & (M4A_COST_HISTORY - 1);
+    engine->costHistory[i] = *c;
+    engine->costHistoryStamp[i] = stamp;
+    engine->costHistoryEpoch[i] = engine->costEpoch;
+    seq_publish(&engine->costHistorySeq, seq + 1);
+}
+
 /* SoundMain's cost for the frame just run (docs/ACCURACY.md, "SoundMain
  * cost model"), on the CPU clock from `stamp` (SoundMain's entry):
  * m4aSoundMain's entry 12 before it; CgbSound's entry from the sequencer
@@ -666,12 +681,14 @@ static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCount
     int32_t estimate = engine->externalSequencer ? 0 : m4a_est_publish(engine, stamp);
     if (flag_take(&engine->frameCostMaxResetPending)) {
         memset(&engine->frameCostMax, 0, sizeof(engine->frameCostMax));
+        engine->costEpoch++;
     }
     /* Live mode mixes in pieces (nothing to cost): invalid.  The vanilla
      * and the HQ mixer charge mixCycles the same way (M4A_MIX_* /
      * M4A_HQMIX_*), from SoundMainRAM's entry to m4aSoundMain's return. */
     if (engine->liveMode) {
         engine->frameCost = c;
+        cost_history_push(engine, &c, stamp);
         return;
     }
     const M4AGbaAudio *g = &engine->gba;
@@ -707,6 +724,7 @@ static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCount
     engine->frameCost = c;
     if (!engine->frameCostMax.valid || c.total > engine->frameCostMax.total)
         engine->frameCostMax = c;
+    cost_history_push(engine, &c, stamp);
 }
 
 void m4a_engine_reset_frame_cost_max(M4AEngine *engine)
@@ -724,6 +742,9 @@ static void frame_cost_invalidate(M4AEngine *engine)
     engine->frameCost.valid = false;
     memset(&engine->frameCostMax, 0, sizeof(engine->frameCostMax));
     flag_clear(&engine->frameCostMaxResetPending);
+    /* The history's entries go with the peak (the count stays). */
+    memset(engine->costHistory, 0, sizeof(engine->costHistory));
+    engine->costEpoch++;
 }
 
 static void sound_main(M4AEngine *engine)

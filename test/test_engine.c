@@ -9456,6 +9456,117 @@ static void test_frame_cost_paths(void)
     m4a_engine_destroy(&e);
 }
 
+/* The per-frame cost history: what a frameEndHook saw of frameCost, frame
+ * by frame, with each frame's SoundMain stamp. */
+typedef struct {
+    int frames;
+    M4AFrameCost cost[64];
+    int64_t stamp[64];
+    uint32_t seq[64];
+} CostHistorySeen;
+
+static void cost_history_hook(M4AEngine *e, void *user)
+{
+    CostHistorySeen *seen = (CostHistorySeen *)user;
+    if (seen->frames < 64) {
+        seen->cost[seen->frames] = e->frameCost;
+        /* SoundMain is over by now: soundMainStamp is reset, the last
+         * entry carries the stamp. */
+        seen->stamp[seen->frames] = e->costHistoryStamp[(e->costHistorySeq - 1) & (M4A_COST_HISTORY - 1)];
+        seen->seq[seen->frames] = e->costHistorySeq;
+    }
+    seen->frames++;
+}
+
+static int same_cost(const M4AFrameCost *a, const M4AFrameCost *b)
+{
+    return a->sequencer == b->sequencer && a->cgb == b->cgb && a->mixer == b->mixer &&
+           a->total == b->total && a->valid == b->valid &&
+           a->sequencerEstimated == b->sequencerEstimated;
+}
+
+/* One history entry per SoundMain, published by a count that advances by
+ * one per frame; the entries are the frameCost each frame published, their
+ * stamps a frame apart; a peak reset and a configuration change start a new
+ * epoch, the latter clearing the entries but not the count. */
+static void test_frame_cost_history(void)
+{
+    printf("Testing the cost model: per-frame history...\n");
+    WaveData *looped = live_test_wave(1), *oneShot = live_test_wave(0);
+    ToneData voices[128];
+    live_test_voices(voices, looped, oneShot);
+    float outL[1024], outR[1024];
+
+    M4AEngine e;
+    live_test_setup(&e, false, voices);
+    ASSERT(e.costHistorySeq > 0, "history: the boot's frames are in it");
+    m4a_engine_note_on(&e, 0, 64, 110);
+    m4a_engine_note_on(&e, 2, 67, 110);
+    CostHistorySeen seen;
+    memset(&seen, 0, sizeof(seen));
+    e.frameEndHook = cost_history_hook;
+    e.frameEndHookUser = &seen;
+    uint32_t seq0 = e.costHistorySeq;
+    uint32_t epoch0 = e.costEpoch;
+    /* Calls longer than a frame: several SoundMains each. */
+    for (int i = 0; i < 12; i++)
+        m4a_engine_process(&e, outL, outR, 1024);
+    e.frameEndHook = NULL;
+    uint32_t n = e.costHistorySeq - seq0;
+    ASSERT(seen.frames > 12 && seen.frames < M4A_COST_HISTORY, "history: a dozen calls ran more frames than calls");
+    ASSERT_EQ((int)n, seen.frames, "history: one entry per SoundMain");
+    int seqOk = 1, sameOk = 1, stampOk = 1, epochOk = 1;
+    for (int f = 0; f < seen.frames; f++) {
+        uint32_t i = (seq0 + (uint32_t)f) & (M4A_COST_HISTORY - 1);
+        if (seen.seq[f] != seq0 + (uint32_t)f + 1) seqOk = 0;
+        if (!same_cost(&e.costHistory[i], &seen.cost[f])) sameOk = 0;
+        if (e.costHistoryStamp[i] != seen.stamp[f]) stampOk = 0;
+        if (f > 0 && seen.stamp[f] - seen.stamp[f - 1] != GBA_CYCLES_PER_FRAME) stampOk = 0;
+        if (e.costHistoryEpoch[i] != epoch0) epochOk = 0;
+    }
+    ASSERT(seqOk, "history: the count advances by one per frame, before frameEndHook");
+    ASSERT(sameOk, "history: each entry is the frameCost that frame published");
+    ASSERT(stampOk, "history: the stamps are the frames' SoundMains, a frame apart");
+    ASSERT(epochOk, "history: no reset, one epoch");
+    uint32_t last = (e.costHistorySeq - 1) & (M4A_COST_HISTORY - 1);
+    ASSERT(same_cost(&e.costHistory[last], &e.frameCost), "history: the newest entry is frameCost");
+
+    /* A peak reset: the next frame opens a new epoch. */
+    m4a_engine_reset_frame_cost_max(&e);
+    ASSERT_EQ(e.costEpoch, epoch0, "history: a reset request alone leaves the epoch");
+    advance_frames(&e, 1, outL, outR);
+    last = (e.costHistorySeq - 1) & (M4A_COST_HISTORY - 1);
+    ASSERT(e.costEpoch == epoch0 + 1 && e.costHistoryEpoch[last] == epoch0 + 1,
+           "history: the frame that consumes a reset is the new epoch's first");
+
+    /* A configuration change: entries cleared, the count kept. */
+    uint32_t before = e.costHistorySeq;
+    m4a_engine_set_pcm_freq_mode(&e, m4a_pcm_freq_mode_from_hz(21024));
+    int cleared = 1;
+    for (int i = 0; i < M4A_COST_HISTORY; i++)
+        if (e.costHistory[i].valid) cleared = 0;
+    ASSERT(cleared, "history: a configuration change clears the entries");
+    ASSERT_EQ(e.costHistorySeq, before, "history: ... and keeps the count");
+    ASSERT_EQ(e.costEpoch, epoch0 + 2, "history: ... and starts a new epoch");
+    advance_frames(&e, 1, outL, outR);
+    ASSERT(e.costHistorySeq > before, "history: counting on after the change");
+    m4a_engine_destroy(&e);
+
+    /* Live mode publishes invalid entries (the count still advances). */
+    M4AEngine live;
+    live_test_setup(&live, true, voices);
+    uint32_t liveSeq = live.costHistorySeq;
+    advance_frames(&live, 2, outL, outR);
+    ASSERT(live.costHistorySeq > liveSeq, "history: live mode counts its frames");
+    ASSERT(!live.costHistory[(live.costHistorySeq - 1) & (M4A_COST_HISTORY - 1)].valid,
+           "history: live mode's entries are invalid");
+    m4a_engine_destroy(&live);
+
+    free(looped);
+    free(oneShot);
+    free((void *)voices[3].wav);
+}
+
 /* frameCostMax holds the largest total and resets; live mode publishes
  * invalid, the HQ mixer its own model. */
 static void test_frame_cost_publication(void)
@@ -10711,6 +10822,7 @@ int main(void)
     test_frame_cost_linear();
     test_frame_cost_paths();
     test_frame_cost_publication();
+    test_frame_cost_history();
     test_frame_cost_wiring();
     test_frame_cost_hq_floor();
     test_frame_cost_hq_linear();
