@@ -5,6 +5,7 @@ EXIT / CR columns) against poryaaaa's cost model (docs/ACCURACY.md,
 
     cost_diff.py --summarize <probe dir> [--render] [--hq] [--pcm-rate HZ] [name ...]
     cost_diff.py <probe .frames> <cost log> [max_lines]
+    cost_diff.py --corpus <probe dir> [--out DIR] [--jobs N] [--hq] [--pcm-rate HZ] [--rom DIR] [name ...]
 
 --summarize: per probed test, the mixer cost per frame (mix = EXIT - RAM:
 SoundMainRAM_Buffer entry to m4aSoundMain's return) against the frame's
@@ -41,6 +42,22 @@ percentiles of |d|; the gate: every frame's total within 2 % of the probe's
 or 300 cycles, whichever is larger.  Frames missing on either side (the
 probe's first and last frame, a skipped SoundMain) are counted, not gated.
 Exit status 1 on FAIL.
+
+The probe's cgb term holds CgbSound's tail and SoundMain_4/5 (RAM - CR, the
+s2r column); the engine's does too (M4A_CYC_CGB_TAIL, M4A_CYC_SM_TO_RAM), so
+the per-column deltas compare like with like.  The mixer term holds the
+10-cycle epilogue after SoundMain returns (RET -> EXIT).
+
+--corpus (step 2's gate over a whole probe directory): renders every probed
+test with poryaaaa_render --cost-log (the arguments --summarize --render
+uses; --hq-mixer / --pcm-mix-rate from the directory as there) into --out
+(default <probe dir>/cost; --rom: the built ROM directory whose songs/ and micro/
+.s files to render, default build/accuracy/rom[-hq][-<hz>]), diffs each against its .frames and prints one row
+per test: frames compared, max |d| and the 99th percentile of |d| on total,
+the frames outside the gate, PASS / FAIL; then the overall verdict, the
+corpus's max |d|, and the share of frames within 1 %.  A test poryaaaa
+cannot render (cry_third_*: no third cry player) is listed as n/a and not
+gated.  Exit status 1 when any rendered test fails.
 """
 import collections
 import json
@@ -56,6 +73,8 @@ FRAME_RE = re.compile(r"^frame\s+(\d+) \| (.*)$")
 FIELD_RE = re.compile(r"\b(sm|SM|MP|CGB|RAM|RET|EXIT|CR|mix|tot|tail|s2r)\s+(-?\d+)")
 MISSING = -999999
 VBLANK = 68 * 1232      # the VBlank window, 83776 cycles
+# the renderer --corpus runs (another build, e.g. a coverage one, via the environment)
+RENDER = os.environ.get("PORYAAAA_RENDER", os.path.join(ROOT, "build/poryaaaa_render"))
 
 
 def read_frames(path):
@@ -115,7 +134,8 @@ def song_players():
 def render_args(name, romdir, songs, players):
     """poryaaaa_render's input arguments for a probe log name, or None."""
     base = re.sub(r"_p1$", "", name)
-    base = {"cry_over_se_se": "cry_over_se", "cry_over_bgm_bgm": "cry_over_bgm"}.get(base, base)
+    base = {"cry_over_se_se": "cry_over_se", "cry_over_bgm_bgm": "cry_over_bgm",
+            "wave180": "wave"}.get(base, base)   # wave180: the wave micro-test probed for 180 frames
     if base.startswith("cry_third_alone_"):   # Jynx then Wailord on VBlank 20: a second cry
         return ["--cry", "123", "--cry2", "381", "--cry2-start-frame", "20"]
     if base.startswith("cry_third_"):
@@ -273,17 +293,105 @@ def pct(vals, p):
     return s[min(len(s) - 1, int(round(p / 100 * (len(s) - 1))))]
 
 
-def diff(frames_path, cost_path, limit=20):
-    rows = read_frames(frames_path)
-    probe = {k: probe_terms(r) for k, r in rows.items()}
-    probe = {k: v for k, v in probe.items() if v}
+def read_cost_log(path):
     eng = {}
-    for line in open(cost_path):
+    for line in open(path):
         p = line.split()
         if len(p) != 5 or not p[0].lstrip("-").isdigit():
             continue
         k, seq, cgb, mixer, total = (int(x) for x in p)
         eng[k] = {"seq": seq, "cgb": cgb, "mixer": mixer, "total": total}
+    return eng
+
+
+def render_cost_log(name, nframes, out, hq, rate, romdir=None):
+    """poryaaaa_render --cost-log for a probed test; the log path, or None."""
+    romdir = romdir or os.path.join(ROOT, "build/accuracy/rom" + ("-hq" if hq else "") + ("-%d" % rate if rate != 13379 else ""))
+    songs = json.load(open(os.path.join(ROOT, "test/accuracy/songs.json")))
+    args = render_args(name, romdir, songs, song_players())
+    if args is None:
+        return None
+    seconds = (nframes + 3) * CPF / CPU_HZ
+    cmd = [RENDER, os.path.join(ROOT, "build/accuracy/project")] + args
+    if hq:
+        cmd.append("--hq-mixer")
+    if rate != 13379:
+        cmd += ["--pcm-mix-rate", str(rate)]
+    wav = os.path.join(out, name + ".cost.wav")
+    log = os.path.join(out, name + ".cost")
+    cmd += ["--output", wav, "--sample-rate", "48000", "--total-duration-seconds", "%.3f" % seconds,
+            "--fadeout", "0", "--tail", "0", "--cost-log", log]
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if os.path.exists(wav):
+        os.remove(wav)
+    if r.returncode != 0:
+        print("render failed: %s: %s" % (name, r.stderr.strip()[-200:]), file=sys.stderr)
+        return None
+    return log
+
+
+def corpus(argv):
+    import concurrent.futures
+    hq = None; rate = None; out = None; romdir = None; jobs = os.cpu_count() or 4
+    if "--hq" in argv:
+        hq = True; argv.remove("--hq")
+    for flag in ("--pcm-rate", "--out", "--jobs", "--rom"):
+        if flag in argv:
+            i = argv.index(flag); v = argv[i + 1]; del argv[i:i + 2]
+            if flag == "--pcm-rate": rate = int(v)
+            elif flag == "--out": out = v
+            elif flag == "--rom": romdir = v
+            else: jobs = int(v)
+    d = argv[0]; names = argv[1:]
+    if hq is None:
+        syms = os.path.join(d, "syms.nm")
+        hq = os.path.exists(syms) and " C_downsampler\n" in open(syms).read()
+    if rate is None:
+        m = re.search(r"-(\d{4,5})/?$", d)
+        rate = int(m.group(1)) if m else 13379
+    out = out or os.path.join(d, "cost")
+    os.makedirs(out, exist_ok=True)
+    tests = sorted(f[:-len(".txt.frames")] for f in os.listdir(d) if f.endswith(".txt.frames"))
+    if names:
+        tests = [t for t in tests if t in names]
+    rows = {t: read_frames(os.path.join(d, t + ".txt.frames")) for t in tests}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        logs = dict(zip(tests, ex.map(lambda t: render_cost_log(t, max(rows[t]), out, hq, rate, romdir), tests)))
+    print("%s: %s mixer at %d Hz, cost logs in %s" % (d, "HQ" if hq else "vanilla", rate, out))
+    print("%-34s %6s %7s %6s %6s  %s" % ("test", "frames", "max|d|", "p99", "out", "verdict"))
+    allfails = 0; alld = []; within1 = 0; nfr = 0; worst = (0, None, None)
+    for t in tests:
+        if logs[t] is None:
+            print("%-34s %6s %7s %6s %6s  n/a (not renderable)" % (t, "-", "-", "-", "-"))
+            continue
+        probe = {k: v for k, v in ((k, probe_terms(r)) for k, r in rows[t].items()) if v}
+        eng = read_cost_log(logs[t])
+        common = sorted(k for k in probe if k in eng)
+        d_ = [abs(eng[k]["total"] - probe[k]["total"]) for k in common]
+        bad = [k for k in common if abs(eng[k]["total"] - probe[k]["total"]) > max(0.02 * probe[k]["total"], 300)]
+        for k in common:
+            dd = abs(eng[k]["total"] - probe[k]["total"])
+            if dd <= 0.01 * probe[k]["total"]:
+                within1 += 1
+            if dd > worst[0]:
+                worst = (dd, t, k)
+        nfr += len(common); alld += d_
+        ok = not bad and common
+        allfails += 0 if ok else 1
+        print("%-34s %6d %7d %6d %6d  %s" % (t, len(common), max(d_, default=0), pct(d_, 99), len(bad),
+                                             "PASS" if ok else "FAIL"))
+    print("%s: %d frames over %d rendered tests, max |d| %d%s, p99 %d, %.2f %% of frames within 1 %%" % (
+        "PASS" if allfails == 0 else "FAIL (%d tests)" % allfails, nfr, sum(1 for t in tests if logs[t]),
+        worst[0], " (%s f%d)" % (worst[1], worst[2]) if worst[1] else "", pct(alld, 99),
+        100.0 * within1 / max(nfr, 1)))
+    return 0 if allfails == 0 else 1
+
+
+def diff(frames_path, cost_path, limit=20):
+    rows = read_frames(frames_path)
+    probe = {k: probe_terms(r) for k, r in rows.items()}
+    probe = {k: v for k, v in probe.items() if v}
+    eng = read_cost_log(cost_path)
     common = sorted(k for k in probe if k in eng)
     print("%d frames compared (%d probe-only, %d engine-only)" % (
         len(common), len(set(probe) - set(eng)), len(set(eng) - set(probe))))
@@ -306,6 +414,8 @@ def diff(frames_path, cost_path, limit=20):
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--summarize":
         summarize(sys.argv[2:])
+    elif len(sys.argv) >= 3 and sys.argv[1] == "--corpus":
+        sys.exit(corpus(sys.argv[2:]))
     elif len(sys.argv) >= 3:
         sys.exit(diff(sys.argv[1], sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 20))
     else:

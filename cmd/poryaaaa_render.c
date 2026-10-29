@@ -903,6 +903,11 @@ static void print_usage(const char *prog)
         "  --psg-log <file>            log every PSG register write with its CPU cycle\n"
         "  --pcm-log <file>            log every DirectSound channel's state after each SoundMain\n"
         "                              (also with --midi)\n"
+        "  --cost-log <file>           log each SoundMain's modeled CPU cost, one line per frame:\n"
+        "                              frame seq cgb mixer total (cycles from m4aSoundMain's entry;\n"
+        "                              the frame counter of --pcm-log and mgba_probe's .frames;\n"
+        "                              vanilla mixer only for now; also with --midi, where seq is\n"
+        "                              the fixed one-track value unless --gba-tempo-grid)\n"
         "  --seq-log <file>            log each frame's modeled CgbSound entry cycle\n"
         "\n"
         "Loop options (when MIDI contains '[' / ']' text events):\n"
@@ -941,6 +946,7 @@ typedef struct {
     int loopCount;
     const char *psgLogPath;      /* --psg-log: every PSG register write with its CPU cycle */
     const char *pcmLogPath;      /* --pcm-log: the DirectSound channels after each SoundMain */
+    const char *costLogPath;     /* --cost-log: the SoundMain cost model per frame */
     const char *seqLogPath;      /* --seq-log: the sequencer's per-frame CgbSound entry cycle */
     int player;                  /* --player: M4A_PLAYER_* the song plays on */
 } SongRenderOpts;
@@ -974,12 +980,21 @@ static void psg_log_cb(void *user, uint32_t reg, uint32_t value)
  * envelope right / left and frequency.  For comparing the two paths frame
  * by frame (docs/ACCURACY.md, "Probe and debug logs"). */
 static FILE *sPcmLog;
+/* --cost-log: after each SoundMain, "frame seq cgb mixer total": the
+ * engine's SoundMain cost model (M4AFrameCost; docs/ACCURACY.md, "SoundMain
+ * cost model"), on the same frame counter as --pcm-log and the probe's
+ * .frames, for tools/cost_diff.py.  A frame the model cannot cost (HQ
+ * mixer, for now) is skipped. */
+static FILE *sCostLog;
 static void pcm_log_cb(M4AEngine *engine, void *user)
 {
     (void)user;
+    long long frame = (engine->gba.now - 124773) / GBA_CYCLES_PER_FRAME + 1;
+    if (sCostLog && engine->frameCost.valid)
+        fprintf(sCostLog, "%lld %d %d %d %d\n", frame, engine->frameCost.sequencer, engine->frameCost.cgb,
+                engine->frameCost.mixer, engine->frameCost.total);
     if (!sPcmLog)
         return;
-    long long frame = (engine->gba.now - 124773) / GBA_CYCLES_PER_FRAME + 1;
     fprintf(sPcmLog, "f %lld", frame);
     if (engine->hqMixer)   /* HQ mode: the downsampler's noise-shape residuals after the frame */
         fprintf(sPcmLog, " ns=%02X,%02X", engine->hqNoiseShapeLeft, engine->hqNoiseShapeRight);
@@ -998,11 +1013,17 @@ static void pcm_log_cb(M4AEngine *engine, void *user)
     }
 }
 
-static void pcm_log_open(M4AEngine *engine, const char *path)
+static void pcm_log_open(M4AEngine *engine, const char *path, const char *costPath)
 {
-    if (!path)
+    if (!path && !costPath)
         return;
-    sPcmLog = fopen(path, "w");
+    if (path)
+        sPcmLog = fopen(path, "w");
+    if (costPath) {
+        sCostLog = fopen(costPath, "w");
+        if (sCostLog)
+            fprintf(sCostLog, "# frame seq cgb mixer total (cycles; m4aSoundMain entry to its return)\n");
+    }
     engine->frameLogHook = pcm_log_cb;
     engine->frameLogHookUser = NULL;
 }
@@ -1010,6 +1031,7 @@ static void pcm_log_open(M4AEngine *engine, const char *path)
 static void pcm_log_close(void)
 {
     if (sPcmLog) { fclose(sPcmLog); sPcmLog = NULL; }
+    if (sCostLog) { fclose(sCostLog); sCostLog = NULL; }
 }
 
 /* HQ-mixer mode: the paths the port does not have yet leave the channel
@@ -1165,7 +1187,7 @@ static int render_sequenced(const SongRenderOpts *o, M4ASong *song, LoadedVoiceG
         sPsgLog.engine = &engine;
         engine.psg[0].writeLog = psg_log_cb;
     }
-    pcm_log_open(&engine, o->pcmLogPath);
+    pcm_log_open(&engine, o->pcmLogPath, o->costLogPath);
     FILE *seqLog = o->seqLogPath ? fopen(o->seqLogPath, "w") : NULL;
     seq.traceFile = seqLog;
     if (song2)
@@ -1654,6 +1676,7 @@ int main(int argc, char *argv[])
     double      totalDurSeconds = -1.0; /* -1 = not set */
     const char *psgLogPath    = NULL;
     const char *pcmLogPath    = NULL;
+    const char *costLogPath   = NULL;
     const char *seqLogPath    = NULL;
     int         player        = M4A_PLAYER_BGM;
     bool        playerSet     = false;
@@ -1766,6 +1789,8 @@ int main(int argc, char *argv[])
             psgLogPath = argv[++i];
         } else if (strcmp(argv[i], "--pcm-log") == 0 && i + 1 < argc) {
             pcmLogPath = argv[++i];
+        } else if (strcmp(argv[i], "--cost-log") == 0 && i + 1 < argc) {
+            costLogPath = argv[++i];
         } else if (strcmp(argv[i], "--seq-log") == 0 && i + 1 < argc) {
             seqLogPath = argv[++i];
         } else if (strcmp(argv[i], "--player") == 0 && i + 1 < argc) {
@@ -1871,6 +1896,7 @@ int main(int argc, char *argv[])
             .totalDurSeconds = totalDurSeconds, .loopCount = loopCount,
             .psgLogPath = psgLogPath,
             .pcmLogPath = pcmLogPath,
+            .costLogPath = costLogPath,
             .seqLogPath = seqLogPath,
             .player = player,
         };
@@ -2332,7 +2358,7 @@ oom:
         sPsgLog.engine = &engine;
         engine.psg[0].writeLog = psg_log_cb;
     }
-    pcm_log_open(&engine, pcmLogPath);
+    pcm_log_open(&engine, pcmLogPath, costLogPath);
     /* --gba-tempo-grid: the CgbSound entry of the song mid2agb makes of the
      * MIDI, from a timing-only sequencer on the chosen player (load_timing_song),
      * attached before the boot as the --song path's sequencer is, so frame 2's

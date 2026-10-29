@@ -410,6 +410,24 @@ typedef void (*M4AFrameHook)(M4AEngine *engine, void *user);
 #include "m4a_gba.h"
 #include "m4a_psg.h"
 
+/* SoundMain's CPU cost for one frame (docs/ACCURACY.md, "SoundMain cost
+ * model"): cycles from m4aSoundMain's entry to its return, split as the
+ * probe splits them.  sequencer: m4aSoundMain entry -> CgbSound entry
+ * (MPlayMain); cgb: CgbSound entry -> SoundMainRAM entry (CgbSound, its
+ * return and SoundMain_4/5); mixer: SoundMainRAM entry -> m4aSoundMain's
+ * return (the mix and the 10-cycle epilogue after SoundMain returns).
+ * total = sequencer + cgb + mixer.  valid is false until a complete
+ * frame has been costed, in live mode, and (for now) with the HQ mixer. */
+typedef struct {
+    int32_t sequencer, cgb, mixer, total;
+    bool valid;
+} M4AFrameCost;
+/* The budgets a host shows the cost against: the VBlank window (68 lines
+ * of 1232 cycles) and the whole frame (a SoundMain running past it makes
+ * the next one skip). */
+#define M4A_VBLANK_CYCLES 83776
+#define M4A_FRAME_CYCLES  280896
+
 /* Engine state */
 struct M4AEngine {
     M4ATrack tracks[MAX_TRACKS];
@@ -604,6 +622,20 @@ struct M4AEngine {
      * (the same index on both sides; circular). */
     bool liveMode;
     int liveMixPos;
+
+    /* SoundMain cost model (docs/ACCURACY.md, "SoundMain cost model").
+     * frameCost: the last completed SoundMain; frameCostMax: the one with
+     * the largest total since m4a_engine_reset_frame_cost_max (invalid
+     * frames ignored).  Written by the audio thread at the end of every
+     * SoundMain, before frameEndHook. */
+    M4AFrameCost frameCost;
+    M4AFrameCost frameCostMax;
+    /* Internal: CgbSound's cursor (real pool) after channel 4, where the
+     * next loop head would be; and the vanilla mixer's cycles charged by
+     * m4a_sound_main_ram this frame (M4A_MIX_* below, FIFO stall not yet
+     * added). */
+    int64_t cgbCursorEnd;
+    int64_t mixCycles;
     };
 
 /*
@@ -612,6 +644,7 @@ struct M4AEngine {
  * model" and appendix A).  Cycles relative to the start of VBlank line 160 unless noted.
  */
 #define M4A_CYC_SOUNDMAIN_ENTRY    197   /* SoundMain entered (m4aSoundMain +185) */
+#define M4A_CYC_M4A_SOUNDMAIN      185   /* m4aSoundMain entered (the cost model's zero) */
 #define M4A_CYC_CGB_ENTRY_PAUSED   1007  /* CgbSound entry, BGM player paused */
 #define M4A_CYC_CGB_ENTRY_BASE     1396  /* CgbSound entry, playing, no tempo tick ... */
 #define M4A_CYC_PER_TRACK          6     /* ... + 6 per existing track */
@@ -815,6 +848,133 @@ struct M4AEngine {
 #define M4A_CYC_CGB_ENTRY_TO_LOOP  53    /* CgbSound -> the channel-1 loop head (c15 decremented) ... */
 #define M4A_CYC_CGB_ENTRY_RELOAD   51    /* ... when c15 was 0 and reloads 14 */
 #define M4A_CYC_CGB_INACTIVE       44    /* loop head -> next (28) -> next loop head (16), SF_ON clear */
+/* CgbSound's return and SoundMain_4/5 (docs/ACCURACY.md, "SoundMain cost
+ * model"; probe columns tail and s2r).  The cost model's cgb term ends at
+ * SoundMainRAM's entry, so it holds both. */
+#define M4A_CYC_CGB_TAIL           20    /* the cursor after channel 4 (where the next loop head would be) -> CgbSound's return */
+#define M4A_CYC_SM_TO_RAM          63    /* CgbSound's return -> SoundMainRAM_Buffer (SoundMain_4/5, bx r3) ... */
+#define M4A_CYC_SM_TO_RAM_FIRST    59    /* ... pcmDmaCounter <= 1: the bls SoundMain_5 taken, the slot multiply skipped */
+
+/*
+ * The vanilla mixer's cost (SoundMainRAM, m4a_1.s; charged in m4a_mixer.c
+ * at the translated labels).  Each value is the cycles between two labels
+ * (or one block's instructions), derived from mgba 0.10.5's ARM7 timing
+ * with SoundMainRAM, Unk1 and Unk2 running from IWRAM (SoundMainRAM_Buffer)
+ * and SoundInfo / the channels / the ring / sDecodingBuffer in IWRAM:
+ * an instruction 1, a taken branch or bx 3 (1 not taken), ldr/ldrb/ldrsb
+ * from IWRAM 3, str 2, ldm n regs n + 2 (+2 loading pc), stm n + 1, mul
+ * 1 + m (m 1..4 from the Rs operand's significant bytes), an 8/16-bit load
+ * from the ROM (samples, WaveData's type, gDeltaEncodingTable) 6 (WS0 N 3 +
+ * 2 + the fetch; the prefetch buffer does nothing for code in IWRAM), a
+ * 32-bit ROM load (WaveData's size / loopStart) 8.  All are "derived" and
+ * checked against the probe (`mix` = EXIT - RAM over the vanilla corpus at
+ * 13379 and 21024 Hz, tools/cost_diff.py); none needed fitting except
+ * where marked.  The FIFO DMA stall (M4A_CYC_FIFO_DMA_STALL) is added
+ * across the mixer's span on top (m4a_engine.c, publish_frame_cost).
+ */
+/* frame */
+#define M4A_MIX_ENTRY              7     /* SoundMainRAM -> SoundMainRAM_NoReverb (ldrb reverb, cmp, beq) */
+#define M4A_MIX_NOREVERB           11    /* SoundMainRAM_NoReverb -> _Loop, both bcc taken (spv & 4, spv & 8 clear) */
+#define M4A_MIX_NOREVERB_4         2     /* ... + spv & 4: two stm instead of the bcc */
+#define M4A_MIX_NOREVERB_8         6     /* ... + spv & 8: four stm instead of the bcc */
+#define M4A_MIX_NOREVERB_LOOP      20    /* one _Loop pass (16 samples: eight stm, subs, bgt) */
+#define M4A_MIX_LOOP_LAST          (-2)  /* any loop's last pass: its backward branch not taken */
+#define M4A_MIX_REVERB             15    /* SoundMainRAM -> _081DCEC4 and the exit to _081DCF36 (bx to ARM and back; the loop's last bgt included) */
+#define M4A_MIX_REVERB_SAMPLE      28    /* one _081DCEC4 pass: four ldrsb, mul, two strb (26.8 measured incl. the stall) */
+#define M4A_MIX_CHAN_SETUP         11    /* _081DCF36 -> SoundMainRAM_ChanLoop */
+#define M4A_MIX_SLOT_OFF           30    /* ChanLoop -> _081DCF60 -> _081DD240 -> ChanLoop, SF_ON clear */
+#define M4A_MIX_SLOT_LAST          (-2)  /* the last slot's _081DD240: ble taken, no adds / b */
+#define M4A_MIX_EXIT               33    /* _081DD24A -> RET (pops; the bx r3 refills from ROM, 4 more than from IWRAM) */
+#define M4A_MIX_EPILOGUE           10    /* RET -> EXIT, m4aSoundMain's tail (measured) */
+#define M4A_MIX_EXIT_BX            7     /* ... its last instruction (bx r0, refilling from ROM): a FIFO stall due inside it lands after the return */
+/* a channel with SF_ON: the envelope (_081DCF6A .. _081DD006) */
+#define M4A_MIX_CHAN_ON            20    /* ChanLoop -> _081DCF6A */
+#define M4A_MIX_CHAN_NEXT          9     /* _081DD240 -> ChanLoop */
+#define M4A_MIX_ENV_START          44    /* SF_START: _081DCF6A -> _081DCFF8 (count / pointer / size from ROM), no loop ... */
+#define M4A_MIX_ENV_START_LOOP     5     /* ... + WAVE_DATA_FLAG_LOOP (orrs, strb, b instead of the beq) */
+#define M4A_MIX_ENV_START_STOP     8     /* SF_START | SF_STOP: -> _081DCFB0 */
+#define M4A_MIX_ENV_END            6     /* _081DCFB0 -> _081DD240: the channel ends */
+#define M4A_MIX_ENV_HEAD           10    /* not SF_START: _081DCF6A -> _081DCFA0, the IEC test */
+#define M4A_MIX_ENV_IEC            10    /* SF_IEC, echo continues: -> _081DD006 */
+#define M4A_MIX_ENV_IEC_END        8     /* SF_IEC, echo length out: -> _081DCFB0 */
+#define M4A_MIX_ENV_NOT_IEC        5     /* -> _081DCFB6, the STOP test */
+#define M4A_MIX_ENV_RELEASE        14    /* SF_STOP, above the echo volume: -> _081DD006 */
+#define M4A_MIX_ENV_RELEASE_LOW    12    /* SF_STOP, at or below it: -> _081DCFC8 */
+#define M4A_MIX_ENV_ECHO_START     12    /* _081DCFC8, echo volume set: SF_IEC -> _081DD006 */
+#define M4A_MIX_ENV_ECHO_NONE      7     /* _081DCFC8, no echo -> _081DCFB0 */
+#define M4A_MIX_ENV_NOT_STOP       6     /* -> _081DCFD6, the envelope state */
+#define M4A_MIX_ENV_DECAY          14    /* decay, above sustain: -> _081DD006 */
+#define M4A_MIX_ENV_DECAY_SUSTAIN  20    /* decay reaching sustain (nonzero): -> _081DD006 */
+#define M4A_MIX_ENV_DECAY_ZERO     16    /* decay reaching sustain 0: -> _081DCFC8 */
+#define M4A_MIX_ENV_SUSTAIN        7     /* sustain: _081DCFD6's bne -> _081DCFF4 -> _081DD006 */
+#define M4A_MIX_ENV_TO_ATTACK      5     /* attack: -> _081DCFF8 */
+#define M4A_MIX_ENV_ATTACK         8     /* _081DCFF8 -> _081DD006, below 0xFF */
+#define M4A_MIX_ENV_ATTACK_PEAK    10    /* ... reaching 0xFF (state -> decay) */
+#define M4A_MIX_VOL                63    /* _081DD006 -> _081DD03A -> _081DD044's type test (volumes; no loop) ... */
+#define M4A_MIX_VOL_LOOP           22    /* ... + SF_LOOP: loop start / length from ROM */
+#define M4A_MIX_TO_FIX             10    /* -> _081DD068 -> _081DD07C */
+#define M4A_MIX_TO_INTERP          12    /* -> _081DD068 -> _081DD19C */
+#define M4A_MIX_TO_UNK1            4     /* the bl SoundMainRAM_Unk1 */
+#define M4A_MIX_STORE              11    /* _081DD22C -> _081DD234 -> _081DD240 (count, pointer) */
+#define M4A_MIX_STORE_FW           13    /* _081DD228 -> _081DD240 (fw too) */
+#define M4A_MIX_RETURN_UNK1        16    /* Unk1's return: b _081DD228 -> _081DD240 */
+/* the per-sample work shared by the loops */
+#define M4A_MIX_WORD_LOAD          6     /* a word's two ldr from the ring */
+#define M4A_MIX_NEXT_SAMPLE        4     /* adds r5 / bcc taken: the word's next sample */
+#define M4A_MIX_WORD_STORE         7     /* adds r5 / bcc not taken, two str, subs */
+#define M4A_MIX_WORD_STORE_SP      12    /* ... Unk1's: two str and the frame count on the stack (ldr, subs, str) */
+#define M4A_MIX_NEXT_WORD          3     /* the bgt back to the word loop (1 when it falls through) */
+/* the interpolating loop (_081DD19C) */
+#define M4A_MIX_INTERP_SETUP       20    /* _081DD19C -> _081DD1B4: push, the step multiply (+ its m), two ldrsb from ROM */
+#define M4A_MIX_INTERP_SAMPLE      13    /* _081DD1BC: the interpolation and both accumulates, to the movs */
+#define M4A_MIX_HOLD               3     /* no source advance: beq _081DD208 taken */
+#define M4A_MIX_INTERP_STEP1       14    /* advance by one source sample: the next one ldrsb'd from ROM */
+#define M4A_MIX_INTERP_STEPN       19    /* advance by more: two ldrsb */
+#define M4A_MIX_INTERP_WRAP        32    /* past the end, looping: _081DD134 -> _081DD148 -> _081DD1FC -> _081DD208 */
+#define M4A_MIX_WRAP_ITER          6     /* another _081DD148 / _081DD3B0 pass */
+#define M4A_MIX_INTERP_END         45    /* past the end, no loop: _081DD134 -> _081DD158 -> _081DD174 -> _081DD240 */
+#define M4A_MIX_INTERP_DONE        18    /* the frame done after the bgt: sub, pop, _081DD228 -> _081DD240 */
+/* the fixed-frequency loops (_081DD07C) */
+#define M4A_MIX_FIX_SHORT          4     /* _081DD07C, count <= 4: -> _081DD0EC */
+#define M4A_MIX_FIX_BLOCK          7     /* ... the frame inside the sample: -> _081DD0A8 */
+#define M4A_MIX_FIX_BLOCK_END      11    /* ... the sample ends in the frame: the block to its last word */
+#define M4A_MIX_FIX_SAMPLE         14    /* _081DD0B0 / _081DD0F4: ldrsb from ROM and both accumulates, to add r7 */
+#define M4A_MIX_FIX_BLOCK_DONE     4     /* after the block: adds / beq _081DD22C taken */
+#define M4A_MIX_FIX_BLOCK_TAIL     2     /* ... not taken: -> _081DD0EC */
+#define M4A_MIX_FIX_TAIL           2     /* _081DD0F4: subs r2 / beq not taken (count left) */
+#define M4A_MIX_FIX_WRAP           14    /* count out, looping: _081DD164 -> _081DD118 */
+#define M4A_MIX_FIX_END            34    /* count out, no loop: _081DD164 -> _081DD174 -> _081DD240 */
+#define M4A_MIX_FIX_TAIL_DONE      4     /* the tail word's bgt not taken, b _081DD22C */
+/* SoundMainRAM_Unk1 (TONEDATA_TYPE_CMP / _REV) and Unk2 (the DPCM block) */
+#define M4A_MIX_UNK1_HEAD          10    /* Unk1 -> _081DD2B4, SF_SPECIAL set */
+#define M4A_MIX_UNK1_FIRST         18    /* ... first frame, forward: SF_SPECIAL set, -> _081DD29C */
+#define M4A_MIX_UNK1_FIRST_REV     29    /* ... first frame, reverse (the start from the end, size from ROM) */
+#define M4A_MIX_UNK1_FIRST_RAW     10    /* _081DD29C -> _081DD2B4, uncompressed */
+#define M4A_MIX_UNK1_FIRST_CMP     12    /* ... compressed (the pointer made an index) */
+#define M4A_MIX_UNK1_SETUP         22    /* _081DD2B4 -> the WaveData type test (push, the step: 0x800000, or the multiply + its m) */
+#define M4A_MIX_UNK1_RAW           3     /* -> _081DD468 */
+#define M4A_MIX_UNK1_CMP           8     /* -> the REV test (xpi = 0xFF000000) */
+#define M4A_MIX_UNK1_CMP_FWD       4     /* ... forward: -> _081DD308, around its two Unk2 calls */
+#define M4A_MIX_UNK1_CMP_REV       7     /* ... reverse: -> _081DD3C0 -> _081DD3D8, around its two Unk2 calls */
+#define M4A_MIX_UNK1_RAW_FWD       14    /* _081DD468, not REV: -> _081DD4F0 and the pop */
+#define M4A_MIX_UNK1_RAW_REV       18    /* _081DD468 -> _081DD480 (two ldrsb from ROM) */
+#define M4A_MIX_CMP_STEP1          12    /* CMP advance by one: -> _081DD364 / _081DD434, + one Unk2 call */
+#define M4A_MIX_CMP_STEPN          12    /* CMP advance by more: -> _081DD358 / _081DD428, + two Unk2 calls */
+#define M4A_MIX_CMP_WRAP           31    /* CMP past the end, looping: _081DD398 -> _081DD3B0 -> _081DD358, + two Unk2 calls */
+#define M4A_MIX_CMP_END            35    /* CMP forward past the end, no loop: _081DD398 -> _081DD4F4 -> the pop */
+#define M4A_MIX_REV_STEP           17    /* raw REV advance: two ldrsb from ROM */
+#define M4A_MIX_REV_END            28    /* REV (raw or CMP) past the start: -> _081DD4F4 -> the pop */
+#define M4A_MIX_UNK1_DONE          11    /* the frame done after the bgt: sub / add r3, b _081DD4F0, the pop */
+#define M4A_MIX_UNK1_DONE_RAW      8     /* raw REV: add r3, the pop (no branch) */
+#define M4A_MIX_UNK2_CALL          3     /* a bl SoundMainRAM_Unk2 */
+#define M4A_MIX_UNK2_HIT           32    /* Unk2, the block already decoded (push, xpi test, ldrsb, pop pc) */
+#define M4A_MIX_UNK2_DECODE        1005  /* Unk2 decoding a 64-sample block: the loop 32 x 14 + 31 x 16 - 2, 46 + 17 around it (+ the block-index multiply's m) */
+#define M4A_MIX_UNK2_UNMAPPED      (-99) /* ... a block before the sample (REV past its start): the address wraps to unmapped memory, 33 byte loads 3 instead of 6 */
+/* poryaaaa's extension: a Golden Sun synth voice under the vanilla
+ * accumulate (no ROM routine to measure; est. as the interpolating loop
+ * with no source fetch). */
+#define M4A_MIX_SYNTH_SETUP        20    /* est. */
+#define M4A_MIX_SYNTH_SAMPLE       16    /* est. */
 
 /* Engine lifecycle */
 void m4a_engine_init(M4AEngine *engine, float sampleRate);
@@ -872,6 +1032,9 @@ void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on);
 #define M4A_LIVE_PIECE 16
 #define M4A_LIVE_AHEAD 32
 void m4a_engine_set_live_mode(M4AEngine *engine, bool on);
+
+/* Clear frameCostMax (a host's peak reset: play from stop, a Reset button). */
+void m4a_engine_reset_frame_cost_max(M4AEngine *engine);
 
 /* Set voicegroup (must be loaded by voicegroup_loader) */
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup);

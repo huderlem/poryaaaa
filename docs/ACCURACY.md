@@ -693,13 +693,109 @@ mGBA 0.10.5, both ROMs at 13379 and 21024 Hz):
   which follows the source rate, not the output rate.  The HQ residuals
   are larger (its fast loop has three blocks by step).
 
+**The model (step 2: the vanilla mixer).**  The engine publishes
+`M4AFrameCost {sequencer, cgb, mixer, total, valid}` as `engine->frameCost`
+(the last SoundMain) and `engine->frameCostMax` (the largest total since
+`m4a_engine_reset_frame_cost_max`, with its components), written at the end
+of `sound_main` after SoundMainRAM and before `frameEndHook`
+(`publish_frame_cost`, `m4a_engine.c`).  The terms are the probe's split,
+on the CPU clock from the SoundMain stamp:
+
+- **sequencer** = CgbSound entry − m4aSoundMain entry = `cgbEntryCycles`
+  + 12 (`M4A_CYC_SOUNDMAIN_ENTRY` 197 − `M4A_CYC_M4A_SOUNDMAIN` 185).  With
+  an `M4ASequencer` (or the timing-only one of `--gba-tempo-grid`) it is
+  MPlayMain's charged work, exact on the corpus; without one, the fixed
+  one-track value 1217 (cpu-meter step 4 replaces it with the MIDI-path
+  estimate; the hook point is marked in `publish_frame_cost`).
+- **cgb** = SoundMainRAM entry − CgbSound entry: the real pool's CgbSound
+  cursor after channel 4 (`engine->cgbCursorEnd`) − the entry, +
+  `M4A_CYC_CGB_TAIL` (20) to CgbSound's return, + `M4A_CYC_SM_TO_RAM` (63;
+  `M4A_CYC_SM_TO_RAM_FIRST` 59 when `pcmDmaCounter` ≤ 1), the FIFO stall
+  charged on each span.  The probe's `tail` and `s2r` columns live here, as
+  in `cost_diff.py`'s cgb = RAM − CGB.
+- **mixer** = EXIT − RAM: the `M4A_MIX_*` charges `m4a_mixer.c` sums into
+  `engine->mixCycles` (the epilogue's `RET` → `EXIT` 10 included), plus
+  every FIFO stall due in [RAM, EXIT − 7]: a stall due during
+  m4aSoundMain's final `bx r0` (`M4A_MIX_EXIT_BX`, 7) is serviced after
+  the return and not counted (over the four probed rates, a stall due at
+  `RET` + 3 or later never was; one due at `RET` + 2 was in 3 frames of 4).
+- **total** = sequencer + cgb + mixer = EXIT − m4aSoundMain entry (`tot`).
+- **valid** is false in live mode (the piecewise mix charges nothing) and,
+  until the HQ model (step 3), with the HQ mixer; `frameCostMax` ignores
+  invalid frames.  The polyphony-debug shadow pool costs nothing.
+
+The mixer constants (`plugin/m4a_engine.h`, each with its label pair) are
+**derived, none fitted**: the instruction count of each block of m4a_1.s at
+mgba's ARM7 timing, with SoundMainRAM, Unk1 and Unk2 in IWRAM
+(`SoundMainRAM_Buffer`; the copy covers all three) and SoundInfo, the
+channels, the ring and `sDecodingBuffer` in IWRAM: an instruction 1, a
+taken branch or `bx` 3 (1 not taken), `ldr`/`ldrb`/`ldrsb` from IWRAM 3,
+`str` 2, `ldm` n + 2 (+2 loading pc), `stm` n + 1, `mul` 1 + m (m 1..4 from
+the Rs operand's significant bytes, mgba's `ARM_WAIT_MUL`), an 8/16-bit ROM
+load 6 (WS0 N 3 + 2 + the fetch; the prefetch buffer does nothing for code
+in IWRAM: `GBAMemoryStall` only runs for code in ROM), a 32-bit ROM load 8.
+The test ROM's `WAITCNT` is the game's (WS0 3/1, prefetch on).
+
+| Constant(s) | Labels | Value |
+|---|---|---|
+| `ENTRY`, `NOREVERB` (+`_4`, `_8`), `NOREVERB_LOOP` | SoundMainRAM → `_NoReverb` → `_Loop` (16 samples a pass) | 7, 11 (+2, +6), 20 |
+| `REVERB`, `REVERB_SAMPLE` | → `_081DCEC4` and back to `_081DCF36`; one `_081DCEC4` pass | 15, 28 |
+| `CHAN_SETUP`, `SLOT_OFF`, `SLOT_LAST` | `_081DCF36` → ChanLoop; an idle slot; the last slot's `ble` | 11, 30, −2 |
+| `EXIT`, `EPILOGUE`, `EXIT_BX` | `_081DD24A` → `RET` (the `bx r3` refills from ROM); `RET` → `EXIT`; its `bx r0` | 33, 10 (measured), 7 |
+| `CHAN_ON`, `CHAN_NEXT` | ChanLoop → `_081DCF6A`; `_081DD240` → ChanLoop | 20, 9 |
+| `ENV_*` | `_081DCF6A` → `_081DD006` by state: START 44 (+5 loop), START\|STOP 8, END (`_081DCFB0`) 6, head 10, IEC 10 / out 8, not IEC 5, release 14 / low 12, echo start 12 / none 7, not STOP 6, decay 14 / to sustain 20 / to 0 16, sustain 7, to attack 5, attack 8 / peak 10 | |
+| `VOL`, `VOL_LOOP` | `_081DD006` → `_081DD03A` → `_081DD044`'s type test; + loop start / length from ROM | 63, 22 |
+| `TO_FIX`, `TO_INTERP`, `TO_UNK1`, `STORE`, `STORE_FW`, `RETURN_UNK1` | → `_081DD07C`; → `_081DD19C`; the `bl`; `_081DD22C` / `_081DD228` → `_081DD240`; Unk1's return | 10, 12, 4, 11, 13, 16 |
+| `WORD_LOAD`, `NEXT_SAMPLE`, `WORD_STORE` (`_SP`), `NEXT_WORD`, `LOOP_LAST` | a word's two `ldr`; `adds`/`bcc` taken; the stores (Unk1's frame count on the stack); the `bgt`; any loop's last pass | 6, 4, 7 (12), 3, −2 |
+| `INTERP_SETUP` (+ m), `INTERP_SAMPLE`, `HOLD`, `INTERP_STEP1`, `INTERP_STEPN` | `_081DD19C` → `_081DD1B4`; `_081DD1BC` to the `movs`; no advance; advance by one (one ROM `ldrsb`) / more (two) | 20, 13, 3, 14, 19 |
+| `INTERP_WRAP`, `WRAP_ITER`, `INTERP_END`, `INTERP_DONE` | `_081DD134` → `_081DD148` → `_081DD1FC`; another `_081DD148` pass; `_081DD158` → `_081DD174` → `_081DD240`; the frame's end | 32, 6, 45, 18 |
+| `FIX_SHORT`, `FIX_BLOCK`, `FIX_BLOCK_END`, `FIX_SAMPLE`, `FIX_BLOCK_DONE`/`_TAIL`, `FIX_TAIL`, `FIX_WRAP`, `FIX_END`, `FIX_TAIL_DONE` | `_081DD07C`'s three ways into `_081DD0A8` / `_081DD0EC`; a sample (ROM `ldrsb`, both accumulates); after the block; `_081DD0F4`'s count test; `_081DD164` looping / ending; the tail's exit | 4, 7, 11, 14, 4 / 2, 2, 14, 34, 4 |
+| `UNK1_HEAD`, `UNK1_FIRST` (`_REV`), `UNK1_FIRST_RAW`/`_CMP`, `UNK1_SETUP` (+ m), `UNK1_RAW`, `UNK1_CMP`, `UNK1_CMP_FWD`/`_REV`, `UNK1_RAW_FWD`/`_REV` | Unk1 → `_081DD2B4` (SF_SPECIAL set / first frame); `_081DD29C`; the step; the type tests; around the two first Unk2 calls; `_081DD468` | 10, 18 (29), 10 / 12, 22, 3, 8, 4 / 7, 14 / 18 |
+| `CMP_STEP1`/`STEPN`, `CMP_WRAP`, `CMP_END`, `REV_STEP`, `REV_END`, `UNK1_DONE` (`_RAW`) | a DPCM advance (+ one / two Unk2 calls); `_081DD398` → `_081DD3B0` → `_081DD358`; → `_081DD4F4`; a raw REV advance (two ROM `ldrsb`); past the start; the frame's end | 12 / 12, 31, 35, 17, 28, 11 (8) |
+| `UNK2_CALL`, `UNK2_HIT`, `UNK2_DECODE` (+ m), `UNK2_UNMAPPED` | the `bl`; Unk2 with the block held; decoding a block (32 × 14 + 31 × 16 − 2 + 63); a block before the sample's start (REV): its address wraps to unmapped memory (region 0x8C), 33 byte loads 3 instead of 6 | 3, 32, 1005, −99 |
+| `SYNTH_SETUP`, `SYNTH_SAMPLE` | poryaaaa's Golden Sun synths under the vanilla accumulate (no ROM routine): *est.* as the interpolating loop without its fetch | 20, 16 |
+
+Two values came from the probe rather than the first count, both
+mechanisms of mgba rather than fits: the stall placement at the final
+`bx r0` (18 cycles in 4 frames at 13379, 12 at 21024) and the unmapped
+decode (99 in `cry_bulbasaur_reverse` frame 49 and the two
+`cry_pidgey_echo_start` rows).
+
+**Gate** (`cost_diff.py --corpus`, every frame's total within 2 % or 300
+cycles; the cost log against the probe's `tot`):
+
+| corpus | tests | frames gated | max \|Δ\| | frames within 1 % |
+|---|---|---|---|---|
+| vanilla 13379 (`build/probe`) | 79 | 18333 | **0** | 100 % |
+| vanilla 21024 (`build/probe-21024`) | 79 | 18333 | **0** | 100 % |
+| vanilla 15768 (13 tests, a scratch probe: the `spv & 8` clear) | 13 | 5251 | 18 | 100 % |
+| vanilla 42048 (13 tests, 704 samples a frame) | 13 | 5251 | 0 | 100 % |
+
+Every column (seq, cgb, mixer) matches, not only the total.  Not gated:
+`cry_third_jynx_wailord_bulbasaur` (and its `_p1`), a third cry
+poryaaaa's renderer cannot start.  The corpus does not exercise (derived,
+unchecked): the pseudo-echo (IEC) envelope paths, START|STOP, an attack
+step below 0xFF, the echo start, a DPCM loop wrap or multi-sample DPCM
+advance, the uncompressed CMP no-op, a second `_081DD148` / `_081DD3B0`
+pass, the `spv & 4` clear (7884 Hz only, which the pristine tree cannot
+build: no `SOUND_MODE_FREQ_7884`) and the synth estimate.
+
+**Residual sources.**  The FIFO stall at the epilogue boundary (one frame
+in the 15768 check, 18 cycles: mgba's servicing order around the final
+`bx` is not a pure offset rule); a block index past the end of a DPCM
+sample is assumed to read ROM (6); the model assumes the game's
+`WAITCNT`, samples in ROM, the vanilla m4a_1.s and `maxLines` 0, and
+mgba's timing (docs/cpu-meter D7: hardware may differ by a few percent).
+
 `tools/probe_corpus.sh` regenerates the logs (`build/probe`,
 `build/probe-hq`, `build/probe-21024`, `build/probe-hq-21024`, each with
 its own `syms.nm`); `cost_diff.py --summarize <dir> --render` renders the
 `--pcm-log`s it needs and prints the tables above;
 `cost_diff.py <.frames> <cost log>` is the acceptance diff against
 `poryaaaa_render --cost-log` (`frame seq cgb mixer total`; every frame's
-total within 2 % or 300 cycles).
+total within 2 % or 300 cycles), per column; `cost_diff.py --corpus <dir>`
+renders every probed test with `--cost-log` and gates the whole directory
+(one row per test: frames, max |Δ| and p99 on total, PASS / FAIL).
 
 ## 5. The MIDI path
 

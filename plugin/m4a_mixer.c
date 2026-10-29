@@ -36,6 +36,30 @@
 
 #define BUF (engine->pcmDmaBufSize)   /* PCM_DMA_BUF_SIZE: the B half's offset */
 
+/*
+ * The cost model (docs/ACCURACY.md, "SoundMain cost model"): every block
+ * below charges the cycles the assembly spends on it, M4A_MIX_* in
+ * m4a_engine.h, into engine->mixCycles.  A loop keeps its count in a local
+ * `cy` and adds it on the way out.  Counting only: no charge changes what
+ * is mixed.
+ */
+
+/* mul's extra cycles (mgba's ARM_WAIT_MUL): 1..4 by the significant bytes
+ * of the Rs operand. */
+static inline int mul_m(uint32_t rs)
+{
+    uint32_t h = rs & 0xFFFFFF00u;
+    if (h == 0 || h == 0xFFFFFF00u)
+        return 1;
+    h = rs & 0xFFFF0000u;
+    if (h == 0 || h == 0xFFFF0000u)
+        return 2;
+    h = rs & 0xFF000000u;
+    if (h == 0 || h == 0xFF000000u)
+        return 3;
+    return 4;
+}
+
 static inline uint32_t ld32(const int8_t *p)
 {
     return (uint32_t)(uint8_t)p[0] | ((uint32_t)(uint8_t)p[1] << 8)
@@ -100,6 +124,8 @@ static int32_t unk2(M4AEngine *engine, M4APCMChannel *r4, int32_t r3)
 {
     uint32_t r0 = (uint32_t)r3 >> 6;
     if (r0 != r4->xpi) {
+        engine->mixCycles += M4A_MIX_UNK2_CALL + M4A_MIX_UNK2_DECODE + mul_m(r0)
+                           + (r3 < 0 ? M4A_MIX_UNK2_UNMAPPED : 0);
         r4->xpi = r0;
         uint8_t zero[0x21];
         const uint8_t *r2;
@@ -127,6 +153,8 @@ static int32_t unk2(M4AEngine *engine, M4APCMChannel *r4, int32_t r3)
             lr = (uint8_t)(lr + r6[r1 >> 4]);
             *r5++ = (int8_t)lr;
         }
+    } else {
+        engine->mixCycles += M4A_MIX_UNK2_CALL + M4A_MIX_UNK2_HIT;
     }
     return engine->decodingBuffer[r3 & 0x3F];
 }
@@ -141,7 +169,7 @@ static int32_t unk2(M4AEngine *engine, M4APCMChannel *r4, int32_t r3)
  * `mov r11, r11, lsr#1`), the pulse at +-64 and the triangle at +-128
  * unhalved.  Vanilla's ror-8 packing runs on every sample, so a zero saw
  * state is accumulated (as 0) rather than skipped. */
-static void mix_synth(const M4AEngine *engine, M4APCMChannel *ch, int8_t *r5, int8_t *bufB,
+static void mix_synth(M4AEngine *engine, M4APCMChannel *ch, int8_t *r5, int8_t *bufB,
                       int spv, uint32_t r10, uint32_t r11, bool frameStart)
 {
     uint32_t step8 = ((uint32_t)engine->pcmDivFreq * ch->frequency) << 3;
@@ -157,6 +185,13 @@ static void mix_synth(const M4AEngine *engine, M4APCMChannel *ch, int8_t *r5, in
         r10 = ((r10 >> 16) >> 1) << 16;
         r11 = ((r11 >> 16) >> 1) << 16;
     }
+    /* Not in m4a_1.s: charged as the interpolating loop without its source
+     * fetches (est.). */
+    int words = (spv + 3) / 4;
+    engine->mixCycles += M4A_MIX_TO_INTERP + M4A_MIX_SYNTH_SETUP
+                       + (int64_t)words * (M4A_MIX_WORD_LOAD + 4 * M4A_MIX_SYNTH_SAMPLE + 3 * M4A_MIX_NEXT_SAMPLE
+                                           + M4A_MIX_WORD_STORE + M4A_MIX_NEXT_WORD)
+                       + M4A_MIX_LOOP_LAST + M4A_MIX_INTERP_DONE;
     for (int i = 0; i < spv; i += 4) {
         uint32_t a = ld32(r5), b = ld32(bufB);
         for (int k = 0; k < 4; k++) {
@@ -192,8 +227,11 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
      * compressed data; keep both forms. */
     int8_t *p3 = *pr3;
     int32_t i3 = (int32_t)(p3 - data);
+    int64_t cy;
 
     if (!(r4->status & CHN_SPECIAL)) {
+        cy = ((r4->type & VOICE_TYPE_REV) ? M4A_MIX_UNK1_FIRST_REV : M4A_MIX_UNK1_FIRST)
+           + (r6w->type != 0 ? M4A_MIX_UNK1_FIRST_CMP : M4A_MIX_UNK1_FIRST_RAW);
         r4->status |= CHN_SPECIAL;
         if (r4->type & VOICE_TYPE_REV) {
             p3 = data + r6w->size - (p3 - data);
@@ -203,14 +241,19 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
             i3 = (int32_t)(p3 - data);
             r4->currentPointer = data + i3; /* an index, as the GBA stores ptr - wav - 16 */
         }
+    } else {
+        cy = M4A_MIX_UNK1_HEAD;
     }
     i3 = (int32_t)(p3 - data);
 
     uint32_t r8;
-    if (r4->type & VOICE_TYPE_FIX)
+    cy += M4A_MIX_UNK1_SETUP;                            /* _081DD2B4 */
+    if (r4->type & VOICE_TYPE_FIX) {
         r8 = 0x800000;
-    else
+    } else {
         r8 = (uint32_t)engine->pcmDivFreq * r4->frequency;
+        cy += mul_m(r4->frequency);
+    }
 
     int32_t frameLeft = spv; /* [sp] */
     uint32_t r6 = 0, r7 = 0;
@@ -220,16 +263,20 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
 
     if (r6w->type != 0) {
         r4->xpi = 0xFF000000u;
+        cy += M4A_MIX_UNK1_CMP;
         if (!(r4->type & VOICE_TYPE_REV)) {
             /* compressed, forward */
+            cy += M4A_MIX_UNK1_CMP_FWD;
             r0 = unk2(engine, r4, i3);
             i3 += 1;
             r1 = unk2(engine, r4, i3) - r0;
             for (;;) {                                   /* _081DD308 */
+                cy += M4A_MIX_WORD_LOAD;
                 r6 = ld32(r5);
                 r7 = ld32(r5 + BUF);
                 n = 0;
                 for (;;) {                               /* _081DD310 */
+                    cy += M4A_MIX_INTERP_SAMPLE;
                     int32_t s = r0 + ((int32_t)(r9 * (uint32_t)r1) >> 23);
                     r6 = m4a_mixer_acc(r6, r10, s);
                     r7 = m4a_mixer_acc(r7, r11, s);
@@ -240,13 +287,16 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
                         r2 -= (int32_t)lr;
                         if (r2 <= 0) {                   /* _081DD398 */
                             if (loopLen == 0) {
+                                cy += M4A_MIX_CMP_END;
                                 goto stop_special;
                             }
+                            cy += M4A_MIX_CMP_WRAP;
                             i3 = (int32_t)r6w->loopStart;
                             lr = (uint32_t)(-r2);
                             for (;;) {                   /* _081DD3B0 */
                                 r2 += loopLen;
                                 if (r2 > 0) break;
+                                cy += M4A_MIX_WRAP_ITER;
                                 lr -= (uint32_t)loopLen;
                             }
                             i3 += (int32_t)lr;           /* _081DD358 */
@@ -254,18 +304,25 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
                         } else {
                             lr -= 1;
                             if (lr == 0) {
+                                cy += M4A_MIX_CMP_STEP1;
                                 r0 += r1;
                                 goto cmp_fwd_next;       /* _081DD364 */
                             }
+                            cy += M4A_MIX_CMP_STEPN;
                             i3 += (int32_t)lr;           /* _081DD358 */
                             r0 = unk2(engine, r4, i3);
                         }
                     cmp_fwd_next:                        /* _081DD364 */
                         i3 += 1;
                         r1 = unk2(engine, r4, i3) - r0;
+                    } else {
+                        cy += M4A_MIX_HOLD;
                     }
-                    if (++n < 4)                         /* _081DD370 */
+                    if (++n < 4) {                       /* _081DD370 */
+                        cy += M4A_MIX_NEXT_SAMPLE;
                         continue;
+                    }
+                    cy += M4A_MIX_WORD_STORE_SP + M4A_MIX_NEXT_WORD;
                     st32(r5 + BUF, r7);
                     st32(r5, r6);
                     r5 += 4;
@@ -275,19 +332,23 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
                 if (frameLeft <= 0)
                     break;
             }
+            cy += M4A_MIX_LOOP_LAST + M4A_MIX_UNK1_DONE;
             i3 -= 1;
             goto done_special;
         } else {
             /* compressed, reverse (_081DD3C0) */
+            cy += M4A_MIX_UNK1_CMP_REV;
             i3 -= 1;
             r0 = unk2(engine, r4, i3);
             i3 -= 1;
             r1 = unk2(engine, r4, i3) - r0;
             for (;;) {                                   /* _081DD3D8 */
+                cy += M4A_MIX_WORD_LOAD;
                 r6 = ld32(r5);
                 r7 = ld32(r5 + BUF);
                 n = 0;
                 for (;;) {                               /* _081DD3E0 */
+                    cy += M4A_MIX_INTERP_SAMPLE;
                     int32_t s = r0 + ((int32_t)(r9 * (uint32_t)r1) >> 23);
                     r6 = m4a_mixer_acc(r6, r10, s);
                     r7 = m4a_mixer_acc(r7, r11, s);
@@ -296,20 +357,29 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
                     if (lr != 0) {
                         r9 &= ~0x3F800000u;
                         r2 -= (int32_t)lr;
-                        if (r2 <= 0)
+                        if (r2 <= 0) {
+                            cy += M4A_MIX_REV_END;
                             goto stop_special;           /* _081DD4F4 */
+                        }
                         lr -= 1;
                         if (lr == 0) {
+                            cy += M4A_MIX_CMP_STEP1;
                             r0 += r1;
                         } else {
+                            cy += M4A_MIX_CMP_STEPN;
                             i3 -= (int32_t)lr;           /* _081DD428 */
                             r0 = unk2(engine, r4, i3);
                         }
                         i3 -= 1;                         /* _081DD434 */
                         r1 = unk2(engine, r4, i3) - r0;
+                    } else {
+                        cy += M4A_MIX_HOLD;
                     }
-                    if (++n < 4)                         /* _081DD440 */
+                    if (++n < 4) {                       /* _081DD440 */
+                        cy += M4A_MIX_NEXT_SAMPLE;
                         continue;
+                    }
+                    cy += M4A_MIX_WORD_STORE_SP + M4A_MIX_NEXT_WORD;
                     st32(r5 + BUF, r7);
                     st32(r5, r6);
                     r5 += 4;
@@ -319,6 +389,7 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
                 if (frameLeft <= 0)
                     break;
             }
+            cy += M4A_MIX_LOOP_LAST + M4A_MIX_UNK1_DONE;
             i3 += 2;
             goto done_special;
         }
@@ -326,8 +397,12 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
         /* _081DD468: uncompressed.  Only the reverse case is mixed; a CMP
          * voice on uncompressed data returns without mixing (and without
          * advancing), as the assembly does. */
-        if (!(r4->type & VOICE_TYPE_REV))
+        cy += M4A_MIX_UNK1_RAW;
+        if (!(r4->type & VOICE_TYPE_REV)) {
+            cy += M4A_MIX_UNK1_RAW_FWD;
             goto done_special;
+        }
+        cy += M4A_MIX_UNK1_RAW_REV;
         /* The look-behind of the first sample reads the byte before the
          * data: the last header byte (size >> 24, i.e. 0) on the GBA. */
 #define REV_RD(idx) ((idx) < 0 ? 0 : (int32_t)data[(idx)])
@@ -335,10 +410,12 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
         r0 = REV_RD(i3);
         r1 = REV_RD(i3 - 1) - r0;
         for (;;) {                                       /* _081DD480 */
+            cy += M4A_MIX_WORD_LOAD;
             r6 = ld32(r5);
             r7 = ld32(r5 + BUF);
             n = 0;
             for (;;) {                                   /* _081DD488 */
+                cy += M4A_MIX_INTERP_SAMPLE;
                 int32_t s = r0 + ((int32_t)(r9 * (uint32_t)r1) >> 23);
                 r6 = m4a_mixer_acc(r6, r10, s);
                 r7 = m4a_mixer_acc(r7, r11, s);
@@ -347,14 +424,22 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
                 if (lr != 0) {
                     r9 &= ~0x3F800000u;
                     r2 -= (int32_t)lr;
-                    if (r2 <= 0)
+                    if (r2 <= 0) {
+                        cy += M4A_MIX_REV_END;
                         goto stop_special;               /* _081DD4F4 */
+                    }
+                    cy += M4A_MIX_REV_STEP;
                     i3 -= (int32_t)lr;
                     r0 = REV_RD(i3);
                     r1 = REV_RD(i3 - 1) - r0;
+                } else {
+                    cy += M4A_MIX_HOLD;
                 }
-                if (++n < 4)                             /* _081DD4CC */
+                if (++n < 4) {                           /* _081DD4CC */
+                    cy += M4A_MIX_NEXT_SAMPLE;
                     continue;
+                }
+                cy += M4A_MIX_WORD_STORE_SP + M4A_MIX_NEXT_WORD;
                 st32(r5 + BUF, r7);
                 st32(r5, r6);
                 r5 += 4;
@@ -364,6 +449,7 @@ static void unk1(M4AEngine *engine, M4APCMChannel *r4, int8_t *r5, int32_t *pr2,
             if (frameLeft <= 0)
                 break;
         }
+        cy += M4A_MIX_LOOP_LAST + M4A_MIX_UNK1_DONE_RAW;
         i3 += 1;
 #undef REV_RD
         goto done_special;
@@ -374,6 +460,7 @@ stop_special:                                            /* _081DD4F4: mov r2, 0
     r4->status = 0;
     finish_word(engine, r5, r6, r7, n);
 done_special:                                            /* _081DD4F0 */
+    engine->mixCycles += cy;
     *pr2 = r2;
     *pr3 = data + i3;
     *pr9 = r9;
@@ -416,6 +503,7 @@ void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame
     }
 
     if (r4->type & (VOICE_TYPE_CMP | VOICE_TYPE_REV)) {
+        engine->mixCycles += M4A_MIX_TO_UNK1 + M4A_MIX_RETURN_UNK1;
         unk1(engine, r4, r5, &r2, &r3, &r9, r10, r11, loopLen, r8);
         r4->fw = r9;                                     /* _081DD228 */
         r4->count = r2;                                  /* _081DD22C */
@@ -427,16 +515,20 @@ void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame
     int32_t r0, r1;
     int n = 0;
     uint32_t lr;
+    int64_t cy;
 
     if (r4->type & VOICE_TYPE_FIX) {
         /* Fixed frequency: one source sample per output sample. */
         int32_t r9f = 0;
+        cy = M4A_MIX_TO_FIX;
         for (;;) {                                       /* _081DD07C */
             if (r2 > 4) {
                 r2 -= r8;
                 if (r2 > 0) {
+                    cy += M4A_MIX_FIX_BLOCK;
                     r9f = 0;
                 } else {
+                    cy += M4A_MIX_FIX_BLOCK_END;
                     r9f = r8;
                     r2 += r8;
                     r8 = r2 - 4;
@@ -446,6 +538,8 @@ void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame
                         r2 = 4;
                 }
                 do {                                     /* _081DD0A8 */
+                    cy += M4A_MIX_WORD_LOAD + 4 * M4A_MIX_FIX_SAMPLE + 3 * M4A_MIX_NEXT_SAMPLE
+                        + M4A_MIX_WORD_STORE + M4A_MIX_NEXT_WORD;
                     r6 = ld32(r5);
                     r7 = ld32(r5 + BUF);
                     for (int k = 0; k < 4; k++) {        /* _081DD0B0 */
@@ -458,48 +552,73 @@ void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame
                     r5 += 4;
                     r8 -= 4;
                 } while (r8 > 0);
+                cy += M4A_MIX_LOOP_LAST;
                 r8 += r9f;
-                if (r8 == 0)
+                if (r8 == 0) {
+                    cy += M4A_MIX_FIX_BLOCK_DONE + M4A_MIX_STORE;
+                    engine->mixCycles += cy;
                     goto store_count_ptr;                /* _081DD22C */
+                }
+                cy += M4A_MIX_FIX_BLOCK_TAIL;
+            } else {
+                cy += M4A_MIX_FIX_SHORT;
             }
+            cy += M4A_MIX_WORD_LOAD;
             r6 = ld32(r5);                               /* _081DD0EC */
             r7 = ld32(r5 + BUF);
             n = 0;
             for (;;) {                                   /* _081DD0F4 */
+                cy += M4A_MIX_FIX_SAMPLE;
                 r0 = *r3++;
                 r6 = m4a_mixer_acc(r6, r10, r0);
                 r7 = m4a_mixer_acc(r7, r11, r0);
                 r2 -= 1;
                 if (r2 == 0) {                           /* _081DD164 */
                     r2 = loopLen;
-                    if (r2 == 0)
+                    if (r2 == 0) {
+                        cy += M4A_MIX_FIX_END;
+                        engine->mixCycles += cy;
                         goto stop_channel;               /* _081DD174 */
+                    }
+                    cy += M4A_MIX_FIX_WRAP;
                     r3 = loopStart;
+                } else {
+                    cy += M4A_MIX_FIX_TAIL;
                 }
-                if (++n < 4)                             /* _081DD118 */
+                if (++n < 4) {                           /* _081DD118 */
+                    cy += M4A_MIX_NEXT_SAMPLE;
                     continue;
+                }
+                cy += M4A_MIX_WORD_STORE;
                 st32(r5 + BUF, r7);
                 st32(r5, r6);
                 r5 += 4;
                 r8 -= 4;
                 break;
             }
-            if (r8 <= 0)
+            if (r8 <= 0) {
+                cy += M4A_MIX_FIX_TAIL_DONE + M4A_MIX_STORE;
+                engine->mixCycles += cy;
                 goto store_count_ptr;                    /* _081DD22C */
+            }
+            cy += M4A_MIX_NEXT_WORD;                     /* bgt _081DD07C */
         }
     }
 
     /* _081DD19C: the interpolating loop. */
     {
         uint32_t r4step = (uint32_t)engine->pcmDivFreq * r4->frequency;
+        cy = M4A_MIX_TO_INTERP + M4A_MIX_INTERP_SETUP + mul_m(r4->frequency);
         r0 = r3[0];
         r3 += 1;
         r1 = r3[0] - r0;
         for (;;) {                                       /* _081DD1B4 */
+            cy += M4A_MIX_WORD_LOAD;
             r6 = ld32(r5);
             r7 = ld32(r5 + BUF);
             n = 0;
             for (;;) {                                   /* _081DD1BC */
+                cy += M4A_MIX_INTERP_SAMPLE;
                 int32_t s = r0 + ((int32_t)(r9 * (uint32_t)r1) >> 23);
                 r6 = m4a_mixer_acc(r6, r10, s);
                 r7 = m4a_mixer_acc(r7, r11, s);
@@ -510,14 +629,18 @@ void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame
                     r2 -= (int32_t)lr;
                     if (r2 <= 0) {                       /* _081DD134 */
                         if (loopLen == 0) {
+                            cy += M4A_MIX_INTERP_END;
+                            engine->mixCycles += cy;
                             r2 = 0;                      /* _081DD158 */
                             goto stop_channel;
                         }
+                        cy += M4A_MIX_INTERP_WRAP;
                         r3 = loopStart;
                         lr = (uint32_t)(-r2);
                         for (;;) {                       /* _081DD148 */
                             r2 += loopLen;
                             if (r2 > 0) break;
+                            cy += M4A_MIX_WRAP_ITER;
                             lr -= (uint32_t)loopLen;
                         }
                         r3 += (int32_t)lr;               /* _081DD1FC (ne) */
@@ -525,17 +648,24 @@ void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame
                     } else {
                         lr -= 1;
                         if (lr == 0) {
+                            cy += M4A_MIX_INTERP_STEP1;
                             r0 += r1;
                         } else {
+                            cy += M4A_MIX_INTERP_STEPN;
                             r3 += (int32_t)lr;           /* _081DD1FC */
                             r0 = r3[0];
                         }
                     }
                     r3 += 1;
                     r1 = r3[0] - r0;
+                } else {
+                    cy += M4A_MIX_HOLD;
                 }
-                if (++n < 4)                             /* _081DD208 */
+                if (++n < 4) {                           /* _081DD208 */
+                    cy += M4A_MIX_NEXT_SAMPLE;
                     continue;
+                }
+                cy += M4A_MIX_WORD_STORE + M4A_MIX_NEXT_WORD;
                 st32(r5 + BUF, r7);
                 st32(r5, r6);
                 r5 += 4;
@@ -545,6 +675,7 @@ void m4a_mixer_mix_channel_n(M4AEngine *engine, M4APCMChannel *r4, int8_t *frame
             if (r8 <= 0)
                 break;
         }
+        engine->mixCycles += cy + M4A_MIX_LOOP_LAST + M4A_MIX_INTERP_DONE;
         r3 -= 1;
         r4->fw = r9;                                     /* _081DD228 */
         goto store_count_ptr;
@@ -564,8 +695,74 @@ store_count_ptr:                                         /* _081DD22C */
     r4->currentPointer = r3;
 }
 
+/* The envelope block's cycles for the channel's state before its step:
+ * _081DCF6A to _081DD006, or to _081DD240 (M4A_MIX_ENV_END included) when
+ * the step ends the channel.  The same decisions as m4a_pcm_channel_tick
+ * (m4a_channel.c), which runs after this. */
+static int env_cycles(const M4APCMChannel *ch)
+{
+    uint8_t st = ch->status;
+    unsigned env = ch->envelopeVolume;
+    int c;
+    if (st & CHN_START) {
+        if (st & CHN_STOP)
+            return M4A_MIX_ENV_START_STOP + M4A_MIX_ENV_END;
+        c = M4A_MIX_ENV_START + (ch->isLoop ? M4A_MIX_ENV_START_LOOP : 0);
+        env = 0;
+        goto attack;
+    }
+    c = M4A_MIX_ENV_HEAD;
+    if (st & CHN_IEC)
+        return c + (ch->pseudoEchoLength <= 1 ? M4A_MIX_ENV_IEC_END + M4A_MIX_ENV_END : M4A_MIX_ENV_IEC);
+    c += M4A_MIX_ENV_NOT_IEC;
+    if (st & CHN_STOP) {
+        env = (env * ch->release) >> 8;
+        if (env > ch->pseudoEchoVolume)
+            return c + M4A_MIX_ENV_RELEASE;
+        c += M4A_MIX_ENV_RELEASE_LOW;
+        goto echo;
+    }
+    c += M4A_MIX_ENV_NOT_STOP;
+    if ((st & CHN_ENV_MASK) == CHN_ENV_DECAY) {
+        env = (env * ch->decay) >> 8;
+        if (env > ch->sustain)
+            return c + M4A_MIX_ENV_DECAY;
+        if (ch->sustain != 0)
+            return c + M4A_MIX_ENV_DECAY_SUSTAIN;
+        c += M4A_MIX_ENV_DECAY_ZERO;
+        goto echo;
+    }
+    if ((st & CHN_ENV_MASK) != CHN_ENV_ATTACK)
+        return c + M4A_MIX_ENV_SUSTAIN;
+    c += M4A_MIX_ENV_TO_ATTACK;
+attack:                                                  /* _081DCFF8 */
+    return c + (env + ch->attack >= 0xFF ? M4A_MIX_ENV_ATTACK_PEAK : M4A_MIX_ENV_ATTACK);
+echo:                                                    /* _081DCFC8 */
+    return c + (ch->pseudoEchoVolume == 0 ? M4A_MIX_ENV_ECHO_NONE + M4A_MIX_ENV_END : M4A_MIX_ENV_ECHO_START);
+}
+
+/* SoundMainRAM's frame work outside the channels: the reverb pass or the
+ * clear, and the walk's entry. */
+static int64_t frame_cycles(const M4AEngine *engine, int spv)
+{
+    if (engine->reverb.amount != 0)
+        return M4A_MIX_REVERB + (int64_t)M4A_MIX_REVERB_SAMPLE * spv;
+    int c = M4A_MIX_ENTRY + M4A_MIX_NOREVERB;
+    if (spv & 4)
+        c += M4A_MIX_NOREVERB_4;
+    if (spv & 8)
+        c += M4A_MIX_NOREVERB_8;
+    int passes = spv >> 4;
+    if (passes < 1)
+        passes = 1;
+    return c + (int64_t)passes * M4A_MIX_NOREVERB_LOOP + M4A_MIX_LOOP_LAST;
+}
+
 void m4a_sound_main_ram(M4AEngine *engine, int frameOffset, int pcmDmaCounter)
 {
+    /* The frame's cost starts here; m4a_engine.c publishes it. */
+    engine->mixCycles = frame_cycles(engine, engine->pcmSamplesPerVBlank) + M4A_MIX_CHAN_SETUP
+                      + M4A_MIX_SLOT_LAST + M4A_MIX_EXIT + M4A_MIX_EPILOGUE;
     m4a_sound_main_ram_range(engine, frameOffset, pcmDmaCounter, 0, engine->pcmSamplesPerVBlank,
                              M4A_ENVELOPE_STEP_ALL);
 }
@@ -591,20 +788,34 @@ void m4a_sound_main_ram_range(M4AEngine *engine, int frameOffset, int pcmDmaCoun
      * invert mode makes it the audible one. */
     int8_t *muted = engine->mutedFrame;
     bool invert = engine->polyDebugInvert;
+    /* The cost: SoundMainRAM walks maxChans slots of the real pool; the
+     * shadow pool (debug only) costs nothing. */
+    int slots = engine->maxPcmChannels < MAX_PCM_CHANNELS ? engine->maxPcmChannels : MAX_PCM_CHANNELS;
+    int64_t cy = 0;
     for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
         M4APCMChannel *r4 = &engine->pcmChannels[i];
-        if (!(r4->status & CHN_ON))
+        bool slot = i < slots;
+        if (!(r4->status & CHN_ON)) {
+            if (slot)
+                cy += M4A_MIX_SLOT_OFF;
             continue;
+        }
+        bool stepped = envelopeStep == M4A_ENVELOPE_STEP_ALL ||
+                       (envelopeStep == M4A_ENVELOPE_STEP_STARTING && (r4->status & CHN_START));
+        if (slot)
+            cy += M4A_MIX_CHAN_ON + M4A_MIX_CHAN_NEXT + (stepped ? env_cycles(r4) : 0);
         /* The envelope step (the SF_START / IEC / STOP / DECAY / ATTACK
          * block of SoundMainRAM, _081DCF6A.._081DD006 and the volume
          * products that follow).  Live mode's pieces step only a channel
          * keyed since the frame's own step (CHN_START), so it joins the
          * mix now instead of at the next frame. */
-        if (envelopeStep == M4A_ENVELOPE_STEP_ALL ||
-            (envelopeStep == M4A_ENVELOPE_STEP_STARTING && (r4->status & CHN_START)))
+        if (stepped)
             m4a_pcm_channel_tick(r4, engine->masterVolume);
         if (!(r4->status & CHN_ON) || (r4->status & CHN_START) || count <= 0)
             continue;
+        if (slot)
+            cy += M4A_MIX_VOL + ((r4->status & CHN_LOOP) ? M4A_MIX_VOL_LOOP : 0);
+        int64_t before = engine->mixCycles;
         bool audible = ((i >= MAX_PCM_CHANNELS) == invert)
                     || (i < MAX_PCM_CHANNELS && r4->audition);
         if (audible) {
@@ -614,5 +825,8 @@ void m4a_sound_main_ram_range(M4AEngine *engine, int frameOffset, int pcmDmaCoun
             memset(muted + start + BUF, 0, (size_t)spv);
             m4a_mixer_mix_channel_n(engine, r4, muted + start, count, start == 0);
         }
+        if (!slot)
+            engine->mixCycles = before;
     }
+    engine->mixCycles += cy;
 }

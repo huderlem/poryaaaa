@@ -600,9 +600,63 @@ static void sound_vsync(M4AEngine *engine)
  * SoundMainRAM into the ring slot pcmDmaCounter selects (SoundMain_4/5:
  * pcmBuffer + (pcmDmaPeriod - (pcmDmaCounter - 1)) * pcmSamplesPerVBlank
  * when pcmDmaCounter - 1 > 0, else the start). */
+/* SoundMain's cost for the frame just run (docs/ACCURACY.md, "SoundMain
+ * cost model"), on the CPU clock from `stamp` (SoundMain's entry):
+ * m4aSoundMain's entry 12 before it; CgbSound's entry from the sequencer
+ * term (cgbEntryCycles); CgbSound's return from the cursor after its last
+ * channel; SoundMainRAM's entry after SoundMain_4/5; the mixer's cycles
+ * (m4a_mixer.c) to m4aSoundMain's return.  The FIFO DMA stall is charged
+ * on every span it falls in, as the sequencer and CgbSound charge it. */
+static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCounter)
+{
+    M4AFrameCost c = { 0, 0, 0, 0, false };
+    /* Live mode mixes in pieces (nothing to cost); the HQ mixer's model is
+     * not in yet (step 3 of docs/cpu-meter): both publish invalid. */
+    if (engine->liveMode || engine->hqMixer) {
+        engine->frameCost = c;
+        return;
+    }
+    const M4AGbaAudio *g = &engine->gba;
+    int64_t sm = stamp - (M4A_CYC_SOUNDMAIN_ENTRY - M4A_CYC_M4A_SOUNDMAIN);
+    /* The sequencer term.  With an M4ASequencer (or a timing-only one),
+     * cgbEntryCycles is MPlayMain's charged work, exact on the corpus.
+     * Without one it is the fixed one-track value (m4a_engine_init).
+     * TODO(cpu-meter step 4): the MIDI-path estimate of MPlayMain from the
+     * events the tick applied replaces that fixed value here. */
+    int64_t cgb = stamp + engine->cgbEntryCycles;
+    int64_t cr = engine->cgbCursorEnd + M4A_CYC_CGB_TAIL;
+    cr += m4a_gba_fifo_dma_stall(g, engine->cgbCursorEnd, cr);
+    int s2r = pcmDmaCounter <= 1 ? M4A_CYC_SM_TO_RAM_FIRST : M4A_CYC_SM_TO_RAM;
+    int64_t ram = cr + s2r;
+    ram += m4a_gba_fifo_dma_stall(g, cr, ram);
+    int64_t mix = engine->mixCycles, stall = 0;
+    for (;;) {   /* the stalls the span itself grows into; one due during
+                  * m4aSoundMain's final bx is serviced after the return */
+        int64_t s2 = m4a_gba_fifo_dma_stall(g, ram, ram + mix + stall - M4A_MIX_EXIT_BX);
+        if (s2 == stall)
+            break;
+        stall = s2;
+    }
+    int64_t exit = ram + mix + stall;
+    c.sequencer = (int32_t)(cgb - sm);
+    c.cgb = (int32_t)(ram - cgb);
+    c.mixer = (int32_t)(exit - ram);
+    c.total = (int32_t)(exit - sm);
+    c.valid = true;
+    engine->frameCost = c;
+    if (!engine->frameCostMax.valid || c.total > engine->frameCostMax.total)
+        engine->frameCostMax = c;
+}
+
+void m4a_engine_reset_frame_cost_max(M4AEngine *engine)
+{
+    memset(&engine->frameCostMax, 0, sizeof(engine->frameCostMax));
+}
+
 static void sound_main(M4AEngine *engine)
 {
-    engine->soundMainStamp = engine->gba.now;
+    int64_t stamp = engine->gba.now;
+    engine->soundMainStamp = stamp;
     m4a_engine_tick(engine);
     engine->soundMainStamp = -1;
     int counter = engine->pcmDmaCounter;
@@ -616,6 +670,7 @@ static void sound_main(M4AEngine *engine)
         m4a_hq_sound_main_ram(engine, offset, counter);
     else
         m4a_sound_main_ram(engine, offset, counter);
+    publish_frame_cost(engine, stamp, counter);
     if (engine->frameEndHook)
         engine->frameEndHook(engine, engine->frameEndHookUser);
     if (engine->frameLogHook)
@@ -828,6 +883,7 @@ void m4a_engine_set_live_mode(M4AEngine *engine, bool on)
         return;
     engine->liveMode = on;
     engine->liveMixPos = 0;
+    engine->frameCost.valid = false;
     if (on && engine->hqMixer)
         m4a_engine_set_hq_mixer(engine, false);
 }
@@ -2407,6 +2463,8 @@ void m4a_engine_tick(M4AEngine *engine)
             }
             m4a_cgb_channel_tick(ch, engine->c15, &engine->psg[pool], &engine->gba, &cursor);
         }
+        if (pool == 0)
+            engine->cgbCursorEnd = cursor;   /* the cost model's CgbSound tail starts here */
     }
 
     /* With a sequencer, portamento and PWM keep their place after CgbSound

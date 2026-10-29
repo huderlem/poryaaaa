@@ -9212,6 +9212,310 @@ static void test_live_mode_vanilla_only(void)
     m4a_engine_destroy(&engine);
 }
 
+/* ---- SoundMain cost model (docs/ACCURACY.md, "SoundMain cost model") ---- */
+
+/* The vanilla mixer's charge for one hand-built channel's frame. */
+static int64_t mix_cost(M4AEngine *e, M4APCMChannel *ch)
+{
+    static int8_t frame[GBA_PCM_DMA_BUF_SIZE * 2];
+    memset(frame, 0, sizeof(frame));
+    e->mixCycles = 0;
+    m4a_mixer_mix_channel(e, ch, frame);
+    return e->mixCycles;
+}
+
+/* One interpolating / FIX / Unk1 word of the frame without its source
+ * advances (those are charged per sample on top). */
+#define WORD_INTERP (M4A_MIX_WORD_LOAD + 4 * M4A_MIX_INTERP_SAMPLE + 3 * M4A_MIX_NEXT_SAMPLE \
+                     + M4A_MIX_WORD_STORE + M4A_MIX_NEXT_WORD)
+#define WORD_UNK1   (M4A_MIX_WORD_LOAD + 4 * M4A_MIX_INTERP_SAMPLE + 3 * M4A_MIX_NEXT_SAMPLE \
+                     + M4A_MIX_WORD_STORE_SP + M4A_MIX_NEXT_WORD)
+
+/* No channel: the frame's fixed cost, the probe's floor (mix = EXIT - RAM
+ * with no DirectSound channel: 498 / 6489 at 224 samples, 658 / 10091 at
+ * 352, the latter with one FIFO stall in it, which the mixer's own charge
+ * leaves to m4a_engine.c). */
+static void test_frame_cost_floor(void)
+{
+    printf("Testing the cost model: the mixer's fixed cost...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    ASSERT_EQ(e.pcmSamplesPerVBlank, 224, "floor: 13379 Hz frame");
+    m4a_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 498, "floor: reverb off, 224 samples (probe 498)");
+    e.reverb.amount = 50;
+    m4a_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 6489, "floor: reverb on, 224 samples (probe 6489)");
+    e.reverb.amount = 127;
+    m4a_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 6489, "floor: any reverb amount costs the same");
+    m4a_engine_set_pcm_freq_mode(&e, m4a_pcm_freq_mode_from_hz(21024));
+    ASSERT_EQ(e.pcmSamplesPerVBlank, 352, "floor: 21024 Hz frame");
+    m4a_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 10091 - M4A_CYC_FIFO_DMA_STALL, "floor: reverb on, 352 samples (probe 10091 with a stall)");
+    e.reverb.amount = 0;
+    m4a_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 658, "floor: reverb off, 352 samples (probe 658)");
+    /* Every slot of maxChans is walked: one more slot, one more pass. */
+    e.maxPcmChannels = 6;
+    m4a_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 658 + M4A_MIX_SLOT_OFF, "floor: a sixth slot costs its walk");
+    m4a_engine_destroy(&e);
+
+    /* Published: a booted engine's idle frame, no sequencer: the fixed
+     * one-track sequencer term, CgbSound with four idle channels and its
+     * tail (249 or 247 on the c15 reload) + SoundMain_4/5 (63 or 59), the
+     * floor; total is their sum, m4aSoundMain entry to its return. */
+    M4AEngine b;
+    engine_init_booted(&b, 44100.0f);
+    float outL[256], outR[256];
+    ASSERT(b.frameCost.valid, "published: the boot's frame is costed");
+    for (int f = 0; f < 20; f++) {
+        advance_frames(&b, 1, outL, outR);
+        M4AFrameCost c = b.frameCost;
+        ASSERT(c.valid, "published: valid");
+        ASSERT_EQ(c.sequencer, b.cgbEntryCycles + M4A_CYC_SOUNDMAIN_ENTRY - M4A_CYC_M4A_SOUNDMAIN,
+                  "published: sequencer = CgbSound entry - m4aSoundMain entry");
+        ASSERT_EQ(c.sequencer, 1217, "published: the fixed one-track value (1402 - 185)");
+        ASSERT(c.cgb == 312 || c.cgb == 310 || c.cgb == 308, "published: idle CgbSound + tail + SoundMain_4/5");
+        ASSERT_EQ(c.mixer, 498, "published: the floor");
+        ASSERT_EQ(c.total, c.sequencer + c.cgb + c.mixer, "published: total = sequencer + cgb + mixer");
+    }
+    m4a_engine_destroy(&b);
+}
+
+/* N identical interpolating channels cost N times one (each replacing an
+ * idle slot's walk). */
+static void test_frame_cost_linear(void)
+{
+    printf("Testing the cost model: identical channels scale linearly...\n");
+    WaveData *wd = ramp_wave(1000, 1, 0);
+    int64_t cost[6];
+    for (int n = 0; n <= 5; n++) {
+        M4AEngine e;
+        m4a_engine_init(&e, 44100.0f);
+        for (int i = 0; i < n; i++) {
+            M4APCMChannel *ch = &e.pcmChannels[i];
+            m4a_pcm_channel_start(ch, wd, VOICE_DIRECTSOUND);
+            ch->status = CHN_ENV_SUSTAIN | CHN_LOOP;
+            ch->envelopeVolume = 200;
+            ch->rightVolume = ch->leftVolume = 100;
+            ch->frequency = 0x1000;   /* x pcmDivFreq: about 0.7 source samples per output */
+        }
+        m4a_sound_main_ram(&e, 0, 5);
+        cost[n] = e.mixCycles;
+        m4a_engine_destroy(&e);
+    }
+    int64_t per = cost[1] - cost[0];
+    ASSERT(per > 224 * 16, "linear: a channel costs at least its 224 samples");
+    int ok = 1;
+    for (int n = 1; n <= 5; n++)
+        if (cost[n] - cost[n - 1] != per) ok = 0;
+    ASSERT(ok, "linear: every added channel costs the same");
+    ASSERT_EQ(cost[5], cost[0] + 5 * per, "linear: five channels");
+    free(wd);
+}
+
+/* Each path's charge for one synthetic channel-frame (224 samples,
+ * pcmDivFreq 1 so `frequency` is the 23-bit step), from the constants. */
+static void test_frame_cost_paths(void)
+{
+    printf("Testing the cost model: each mixer path's charge...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    e.pcmDivFreq = 1;
+    WaveData *wd = ramp_wave(1000, 0, 0);
+    M4APCMChannel ch;
+
+    /* Interpolating at half speed: holds and one-sample advances alternate.
+     * The step multiply's Rs is 0x400000: m 3. */
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+    ch.status = CHN_ENV_SUSTAIN;
+    ch.frequency = 0x400000;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_INTERP + M4A_MIX_INTERP_SETUP + 3 + 56 * WORD_INTERP
+              + 112 * M4A_MIX_HOLD + 112 * M4A_MIX_INTERP_STEP1 + M4A_MIX_LOOP_LAST + M4A_MIX_INTERP_DONE,
+              "paths: interpolating, step 0.5");
+
+    /* Interpolating at 2.5: every sample advances by two or three (m 4). */
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND);
+    ch.status = CHN_ENV_SUSTAIN;
+    ch.frequency = 0x1400000;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_INTERP + M4A_MIX_INTERP_SETUP + 4 + 56 * WORD_INTERP
+              + 224 * M4A_MIX_INTERP_STEPN + M4A_MIX_LOOP_LAST + M4A_MIX_INTERP_DONE,
+              "paths: interpolating, step 2.5");
+
+    /* Fixed frequency, the frame inside the sample: one block. */
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND_NO_RESAMPLE);
+    ch.status = CHN_ENV_SUSTAIN;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_FIX + M4A_MIX_FIX_BLOCK
+              + 56 * (M4A_MIX_WORD_LOAD + 4 * M4A_MIX_FIX_SAMPLE + 3 * M4A_MIX_NEXT_SAMPLE + M4A_MIX_WORD_STORE
+                      + M4A_MIX_NEXT_WORD)
+              + M4A_MIX_LOOP_LAST + M4A_MIX_FIX_BLOCK_DONE + M4A_MIX_STORE,
+              "paths: FIX block");
+
+    /* Uncompressed reverse at step 1, first frame: two ROM fetches per
+     * sample. */
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, wd, VOICE_DIRECTSOUND_ALT);
+    ch.status = CHN_ENV_SUSTAIN;
+    ch.frequency = 0x800000;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_UNK1 + M4A_MIX_RETURN_UNK1 + M4A_MIX_UNK1_FIRST_REV + M4A_MIX_UNK1_FIRST_RAW
+              + M4A_MIX_UNK1_SETUP + 3 + M4A_MIX_UNK1_RAW + M4A_MIX_UNK1_RAW_REV
+              + 56 * WORD_UNK1 + 224 * M4A_MIX_REV_STEP + M4A_MIX_LOOP_LAST + M4A_MIX_UNK1_DONE_RAW,
+              "paths: REV, first frame");
+    /* The next frame: SF_SPECIAL already set. */
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_UNK1 + M4A_MIX_RETURN_UNK1 + M4A_MIX_UNK1_HEAD
+              + M4A_MIX_UNK1_SETUP + 3 + M4A_MIX_UNK1_RAW + M4A_MIX_UNK1_RAW_REV
+              + 56 * WORD_UNK1 + 224 * M4A_MIX_REV_STEP + M4A_MIX_LOOP_LAST + M4A_MIX_UNK1_DONE_RAW,
+              "paths: REV, a later frame");
+
+    /* DPCM forward at step 1, first frame: block 0 decoded by the first
+     * Unk2 call, then one call per sample (positions 2..225), decoding at
+     * 64, 128 and 192 and hitting the rest. */
+    static int8_t decoded[1100];
+    WaveData *cw = make_dpcm_wave(1000, 0, 0, decoded);
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, cw, VOICE_CRY);
+    ch.status = CHN_ENV_SUSTAIN;
+    ch.frequency = 0x800000;
+    int64_t decode = M4A_MIX_UNK2_CALL + M4A_MIX_UNK2_DECODE + 1, hit = M4A_MIX_UNK2_CALL + M4A_MIX_UNK2_HIT;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_UNK1 + M4A_MIX_RETURN_UNK1 + M4A_MIX_UNK1_FIRST + M4A_MIX_UNK1_FIRST_CMP
+              + M4A_MIX_UNK1_SETUP + 3 + M4A_MIX_UNK1_CMP + M4A_MIX_UNK1_CMP_FWD + decode + hit
+              + 56 * WORD_UNK1 + 224 * M4A_MIX_CMP_STEP1 + 3 * decode + 221 * hit
+              + M4A_MIX_LOOP_LAST + M4A_MIX_UNK1_DONE,
+              "paths: CMP forward, first frame");
+    /* The decode is per frame too: xpi is reset on every Unk1 entry. */
+    int64_t next = mix_cost(&e, &ch);
+    ASSERT(next > 4 * M4A_MIX_UNK2_DECODE, "paths: CMP decodes its blocks again every frame");
+    free(cw);
+
+    /* A Golden Sun synth (not in m4a_1.s; est.). */
+    static const uint8_t descPulse[] = { 0x80, 0x00, 0x40, 0x20, 0x80, 0x10 };
+    WaveData *sw = make_synth_wave(descPulse, sizeof(descPulse));
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, sw, VOICE_DIRECTSOUND);
+    ch.status = CHN_ENV_SUSTAIN;
+    ch.frequency = 0x400000;
+    ASSERT(ch.synthType != M4A_SYNTH_NONE, "paths: the synth voice is a synth");
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_INTERP + M4A_MIX_SYNTH_SETUP
+              + 56 * (M4A_MIX_WORD_LOAD + 4 * M4A_MIX_SYNTH_SAMPLE + 3 * M4A_MIX_NEXT_SAMPLE + M4A_MIX_WORD_STORE
+                      + M4A_MIX_NEXT_WORD)
+              + M4A_MIX_LOOP_LAST + M4A_MIX_INTERP_DONE,
+              "paths: synth (est.)");
+    free(sw);
+
+    /* A channel that ends inside the frame charges what it ran: a 10-sample
+     * one-shot at step 1 mixes 9 advancing samples and stops on the 10th,
+     * mid-word (two full words, then two samples). */
+    WaveData *shortw = ramp_wave(10, 0, 0);
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, shortw, VOICE_DIRECTSOUND);
+    ch.status = CHN_ENV_SUSTAIN;
+    ch.frequency = 0x800000;
+    int64_t partial = mix_cost(&e, &ch);
+    ASSERT_EQ(partial,
+              M4A_MIX_TO_INTERP + M4A_MIX_INTERP_SETUP + 3 + 2 * (WORD_INTERP + 4 * M4A_MIX_INTERP_STEP1)
+              + M4A_MIX_WORD_LOAD + M4A_MIX_INTERP_SAMPLE + M4A_MIX_INTERP_STEP1 + M4A_MIX_NEXT_SAMPLE
+              + M4A_MIX_INTERP_SAMPLE + M4A_MIX_INTERP_END,
+              "paths: a channel ending mid-frame charges its partial frame");
+    ASSERT_EQ(ch.status, 0, "paths: ... and ended");
+    /* The same through SoundMainRAM: the slot walk, the envelope and the
+     * volumes, then the partial mix. */
+    m4a_pcm_channel_start(&e.pcmChannels[0], shortw, VOICE_DIRECTSOUND);
+    e.pcmChannels[0].status = CHN_ENV_SUSTAIN;
+    e.pcmChannels[0].frequency = 0x800000;
+    m4a_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 498 - M4A_MIX_SLOT_OFF + M4A_MIX_CHAN_ON + M4A_MIX_CHAN_NEXT + M4A_MIX_ENV_HEAD
+                           + M4A_MIX_ENV_NOT_IEC + M4A_MIX_ENV_NOT_STOP + M4A_MIX_ENV_SUSTAIN + M4A_MIX_VOL + partial,
+              "paths: the partial frame inside SoundMainRAM");
+    /* A channel whose release ends it in the envelope step mixes nothing. */
+    m4a_pcm_channel_start(&e.pcmChannels[0], shortw, VOICE_DIRECTSOUND);
+    e.pcmChannels[0].status = CHN_STOP | CHN_ENV_SUSTAIN;
+    e.pcmChannels[0].envelopeVolume = 1;
+    e.pcmChannels[0].release = 0;
+    m4a_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 498 - M4A_MIX_SLOT_OFF + M4A_MIX_CHAN_ON + M4A_MIX_CHAN_NEXT + M4A_MIX_ENV_HEAD
+                           + M4A_MIX_ENV_NOT_IEC + M4A_MIX_ENV_RELEASE_LOW + M4A_MIX_ENV_ECHO_NONE + M4A_MIX_ENV_END,
+              "paths: a release reaching 0 ends the channel in _081DCFB0");
+    ASSERT_EQ(e.pcmChannels[0].status, 0, "paths: ... and ended");
+    free(shortw);
+    free(wd);
+    m4a_engine_destroy(&e);
+}
+
+/* frameCostMax holds the largest total and resets; live mode and the HQ
+ * mixer publish invalid. */
+static void test_frame_cost_publication(void)
+{
+    printf("Testing the cost model: publication, max, live and HQ...\n");
+    WaveData *looped = live_test_wave(1), *oneShot = live_test_wave(0);
+    ToneData voices[128];
+    live_test_voices(voices, looped, oneShot);
+    float outL[256], outR[256];
+
+    M4AEngine e;
+    live_test_setup(&e, false, voices);
+    m4a_engine_reset_frame_cost_max(&e);
+    ASSERT(!e.frameCostMax.valid, "max: invalid after a reset");
+    m4a_engine_note_on(&e, 0, 64, 110);
+    m4a_engine_note_on(&e, 0, 67, 110);
+    int32_t seen = 0, quiet = 0;
+    int sumOk = 1;
+    for (int f = 0; f < 10; f++) {
+        advance_frames(&e, 1, outL, outR);
+        if (e.frameCost.total > seen) seen = e.frameCost.total;
+        if (e.frameCost.total != e.frameCost.sequencer + e.frameCost.cgb + e.frameCost.mixer) sumOk = 0;
+    }
+    ASSERT(sumOk, "max: every frame's total is the sum of its terms");
+    ASSERT(e.frameCostMax.valid, "max: valid once a frame ran");
+    ASSERT_EQ(e.frameCostMax.total, seen, "max: the largest total seen");
+    ASSERT_EQ(e.frameCostMax.total, e.frameCostMax.sequencer + e.frameCostMax.cgb + e.frameCostMax.mixer,
+              "max: kept with its components");
+    m4a_engine_all_sound_off(&e);
+    for (int f = 0; f < 5; f++)
+        advance_frames(&e, 1, outL, outR);
+    quiet = e.frameCost.total;
+    ASSERT(quiet < seen, "max: a quiet frame costs less");
+    ASSERT_EQ(e.frameCostMax.total, seen, "max: holds after the notes end");
+    m4a_engine_reset_frame_cost_max(&e);
+    ASSERT(!e.frameCostMax.valid, "max: reset");
+    advance_frames(&e, 1, outL, outR);
+    ASSERT(e.frameCostMax.valid && e.frameCostMax.total == e.frameCost.total, "max: the next frame after a reset");
+    m4a_engine_destroy(&e);
+
+    M4AEngine live;
+    live_test_setup(&live, true, voices);
+    m4a_engine_reset_frame_cost_max(&live);
+    m4a_engine_note_on(&live, 0, 64, 110);
+    for (int f = 0; f < 3; f++)
+        advance_frames(&live, 1, outL, outR);
+    ASSERT(!live.frameCost.valid, "live: invalid");
+    ASSERT(!live.frameCostMax.valid, "live: no max");
+    m4a_engine_destroy(&live);
+
+    M4AEngine hq;
+    m4a_engine_init(&hq, 44100.0f);
+    m4a_engine_set_hq_mixer(&hq, true);
+    m4a_engine_boot(&hq, false);
+    advance_frames(&hq, 2, outL, outR);
+    ASSERT(!hq.frameCost.valid, "HQ: invalid until its model (step 3)");
+    m4a_engine_destroy(&hq);
+
+    free(looped);
+    free(oneShot);
+    free((void *)voices[3].wav);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -9296,6 +9600,10 @@ int main(void)
     test_live_mode_latency();
     test_live_mode_sustain_matches();
     test_live_mode_vanilla_only();
+    test_frame_cost_floor();
+    test_frame_cost_linear();
+    test_frame_cost_paths();
+    test_frame_cost_publication();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
