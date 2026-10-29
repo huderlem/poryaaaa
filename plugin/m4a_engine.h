@@ -626,10 +626,21 @@ struct M4AEngine {
     /* SoundMain cost model (docs/ACCURACY.md, "SoundMain cost model").
      * frameCost: the last completed SoundMain; frameCostMax: the one with
      * the largest total since m4a_engine_reset_frame_cost_max (invalid
-     * frames ignored).  Written by the audio thread at the end of every
-     * SoundMain, before frameEndHook. */
+     * frames ignored).  Written by plain struct assignment at the end of
+     * every SoundMain (before frameEndHook), on the thread that calls
+     * m4a_engine_process.  A host reads them on that thread -- right after
+     * m4a_engine_process returns, or from frameEndHook -- and hands them on
+     * itself (e.g. atomics per field, total written last); never read them
+     * from another thread while the engine runs.  One m4a_engine_process
+     * call can run several SoundMains: frameCost is then the last of them
+     * and frameCostMax covers the others.  The live-mode, HQ-mixer and
+     * sound-mode-rate setters and a new voicegroup clear both (frameCost
+     * invalid, no peak); a host also resets the peak on play-from-stop
+     * (porydaw docs/cpu-meter D8). */
     M4AFrameCost frameCost;
     M4AFrameCost frameCostMax;
+    /* Set by m4a_engine_reset_frame_cost_max, consumed by the next frame. */
+    volatile bool frameCostMaxResetPending;
     /* Internal: CgbSound's cursor (real pool) after channel 4, where the
      * next loop head would be; and the vanilla mixer's cycles charged by
      * m4a_sound_main_ram this frame (M4A_MIX_* below, FIFO stall not yet
@@ -648,6 +659,8 @@ struct M4AEngine {
 #define M4A_CYC_CGB_ENTRY_PAUSED   1007  /* CgbSound entry, BGM player paused */
 #define M4A_CYC_CGB_ENTRY_BASE     1396  /* CgbSound entry, playing, no tempo tick ... */
 #define M4A_CYC_PER_TRACK          6     /* ... + 6 per existing track */
+/* cgbEntryCycles (from the SoundMain entry) without a sequencer: the steady one-track value, 1205 */
+#define M4A_CYC_CGB_ENTRY_DEFAULT  (M4A_CYC_CGB_ENTRY_BASE + M4A_CYC_PER_TRACK - M4A_CYC_SOUNDMAIN_ENTRY)
 /*
  * MPlayMain, segment by segment (docs/ACCURACY.md, appendix A: every number is the measured delta between two of
  * m4a_1.s's labels; "est." marks a path the corpus never took, estimated
@@ -969,7 +982,7 @@ struct M4AEngine {
 #define M4A_MIX_UNK2_CALL          3     /* a bl SoundMainRAM_Unk2 */
 #define M4A_MIX_UNK2_HIT           32    /* Unk2, the block already decoded (push, xpi test, ldrsb, pop pc) */
 #define M4A_MIX_UNK2_DECODE        1005  /* Unk2 decoding a 64-sample block: the loop 32 x 14 + 31 x 16 - 2, 46 + 17 around it (+ the block-index multiply's m) */
-#define M4A_MIX_UNK2_UNMAPPED      (-99) /* ... a block before the sample (REV past its start): the address wraps to unmapped memory, 33 byte loads 3 instead of 6 */
+#define M4A_MIX_UNK2_UNMAPPED      (-99) /* ... a block before the sample (REV past its start): the address wraps to region 0x8C, GBALoad8's default case, 33 byte loads 3 instead of 6 */
 /* poryaaaa's extension: a Golden Sun synth voice under the vanilla
  * accumulate (no ROM routine to measure; est. as the interpolating loop
  * with no source fetch). */
@@ -1033,7 +1046,10 @@ void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on);
 #define M4A_LIVE_AHEAD 32
 void m4a_engine_set_live_mode(M4AEngine *engine, bool on);
 
-/* Clear frameCostMax (a host's peak reset: play from stop, a Reset button). */
+/* Clear frameCostMax (a host's peak reset: play from stop, a Reset button).
+ * Safe to call from any thread: it only raises a flag, and the next
+ * SoundMain (on the m4a_engine_process thread) clears the peak before
+ * publishing its own cost, so frameCostMax is that frame's afterwards. */
 void m4a_engine_reset_frame_cost_max(M4AEngine *engine);
 
 /* Set voicegroup (must be loaded by voicegroup_loader) */

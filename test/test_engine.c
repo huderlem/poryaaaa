@@ -9465,8 +9465,10 @@ static void test_frame_cost_publication(void)
 
     M4AEngine e;
     live_test_setup(&e, false, voices);
+    ASSERT(e.frameCostMax.valid, "max: the boot's frames set it");
     m4a_engine_reset_frame_cost_max(&e);
-    ASSERT(!e.frameCostMax.valid, "max: invalid after a reset");
+    ASSERT(e.frameCostMaxResetPending, "max: a reset is a request ...");
+    ASSERT(e.frameCostMax.valid, "max: ... the caller's thread does not touch the peak");
     m4a_engine_note_on(&e, 0, 64, 110);
     m4a_engine_note_on(&e, 0, 67, 110);
     int32_t seen = 0, quiet = 0;
@@ -9488,19 +9490,34 @@ static void test_frame_cost_publication(void)
     ASSERT(quiet < seen, "max: a quiet frame costs less");
     ASSERT_EQ(e.frameCostMax.total, seen, "max: holds after the notes end");
     m4a_engine_reset_frame_cost_max(&e);
-    ASSERT(!e.frameCostMax.valid, "max: reset");
     advance_frames(&e, 1, outL, outR);
+    ASSERT(!e.frameCostMaxResetPending, "max: the next frame consumes the reset");
     ASSERT(e.frameCostMax.valid && e.frameCostMax.total == e.frameCost.total, "max: the next frame after a reset");
+    ASSERT(e.frameCostMax.total < seen, "max: the old peak is gone");
+    /* A configuration change drops the last cost and the peak. */
+    m4a_engine_set_pcm_freq_mode(&e, m4a_pcm_freq_mode_from_hz(21024));
+    ASSERT(!e.frameCost.valid && !e.frameCostMax.valid, "invalidate: sound-mode rate");
+    advance_frames(&e, 1, outL, outR);
+    ASSERT(e.frameCost.valid && e.frameCostMax.valid, "invalidate: costed again at the new rate");
+    m4a_engine_set_voicegroup(&e, NULL);
+    ASSERT(!e.frameCost.valid && !e.frameCostMax.valid, "invalidate: a new voicegroup");
+    advance_frames(&e, 1, outL, outR);
+    m4a_engine_set_live_mode(&e, true);
+    ASSERT(!e.frameCost.valid && !e.frameCostMax.valid, "invalidate: live mode");
+    m4a_engine_set_live_mode(&e, false);
+    advance_frames(&e, 1, outL, outR);
+    m4a_engine_set_hq_mixer(&e, true);
+    ASSERT(!e.frameCost.valid && !e.frameCostMax.valid, "invalidate: HQ mixer");
     m4a_engine_destroy(&e);
 
     M4AEngine live;
     live_test_setup(&live, true, voices);
-    m4a_engine_reset_frame_cost_max(&live);
     m4a_engine_note_on(&live, 0, 64, 110);
     for (int f = 0; f < 3; f++)
         advance_frames(&live, 1, outL, outR);
     ASSERT(!live.frameCost.valid, "live: invalid");
     ASSERT(!live.frameCostMax.valid, "live: no max");
+    ASSERT(live.mixCycles < 100000, "live: the pieces' charge does not accumulate across frames");
     m4a_engine_destroy(&live);
 
     M4AEngine hq;
@@ -9514,6 +9531,155 @@ static void test_frame_cost_publication(void)
     free(looped);
     free(oneShot);
     free((void *)voices[3].wav);
+}
+
+/* The wiring of the branches the probe corpus never takes (their
+ * constants are counted from m4a_1.s; this checks each is charged where
+ * the translation takes it, with the iteration / decode counts the model
+ * must see).  16-sample frames keep the traces short. */
+static void test_frame_cost_wiring(void)
+{
+    printf("Testing the cost model: the wiring of the unprobed branches...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    e.pcmDivFreq = 1;
+    e.pcmSamplesPerVBlank = 16;
+    M4APCMChannel ch;
+    const int64_t fixWord = M4A_MIX_WORD_LOAD + 4 * M4A_MIX_FIX_SAMPLE + 3 * M4A_MIX_NEXT_SAMPLE
+                          + M4A_MIX_WORD_STORE + M4A_MIX_NEXT_WORD;
+    /* The FIX tail word: four samples, three of them followed by the next. */
+    const int64_t fixTail = M4A_MIX_WORD_LOAD + 4 * M4A_MIX_FIX_SAMPLE + 3 * M4A_MIX_NEXT_SAMPLE + M4A_MIX_WORD_STORE;
+
+    /* FIX, a 6-sample loop (count 6): _081DD07C's block-end way (one
+     * word, count 2 left), a tail word wrapping once (count 2 -> 0 -> 6),
+     * _081DD07C's short way (count 4), a tail word wrapping on its last
+     * sample, then the block way for the frame's last word.  2 wraps. */
+    WaveData *loop6 = ramp_wave(6, 1, 0);
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, loop6, VOICE_DIRECTSOUND_NO_RESAMPLE);
+    ch.status = CHN_ENV_SUSTAIN | CHN_LOOP;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_FIX + M4A_MIX_FIX_BLOCK_END + fixWord + M4A_MIX_LOOP_LAST + M4A_MIX_FIX_BLOCK_TAIL
+              + fixTail + 3 * M4A_MIX_FIX_TAIL + 1 * M4A_MIX_FIX_WRAP + M4A_MIX_NEXT_WORD
+              + M4A_MIX_FIX_SHORT + fixTail + 3 * M4A_MIX_FIX_TAIL + 1 * M4A_MIX_FIX_WRAP + M4A_MIX_NEXT_WORD
+              + M4A_MIX_FIX_BLOCK + fixWord + M4A_MIX_LOOP_LAST + M4A_MIX_FIX_BLOCK_DONE + M4A_MIX_STORE,
+              "wiring: FIX looping mid-frame (two wraps, the three ways through _081DD07C)");
+    ASSERT((ch.status & CHN_ON) != 0, "wiring: ... still playing");
+    free(loop6);
+
+    /* FIX, a 6-sample one-shot: the block word, then the tail ends it on
+     * its second sample. */
+    WaveData *one6 = ramp_wave(6, 0, 0);
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, one6, VOICE_DIRECTSOUND_NO_RESAMPLE);
+    ch.status = CHN_ENV_SUSTAIN;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_FIX + M4A_MIX_FIX_BLOCK_END + fixWord + M4A_MIX_LOOP_LAST + M4A_MIX_FIX_BLOCK_TAIL
+              + M4A_MIX_WORD_LOAD + 2 * M4A_MIX_FIX_SAMPLE + M4A_MIX_FIX_TAIL + M4A_MIX_NEXT_SAMPLE + M4A_MIX_FIX_END,
+              "wiring: FIX ending mid-frame");
+    ASSERT_EQ(ch.status, 0, "wiring: ... ended");
+    free(one6);
+
+    /* Interpolating at step 5 over a 2-sample loop (size 4, loop from 2):
+     * every sample wraps; counts 4 -> -1 (no extra pass), 1 -> -4 (two),
+     * 2 -> -3 (one), 1 -> -4 (two): 4 wraps, 5 extra _081DD148 passes.
+     * The step multiply's Rs is 0x2800000: m 4.  4-sample frame. */
+    e.pcmSamplesPerVBlank = 4;
+    WaveData *tiny = ramp_wave(4, 1, 2);
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, tiny, VOICE_DIRECTSOUND);
+    ch.status = CHN_ENV_SUSTAIN | CHN_LOOP;
+    ch.frequency = 0x2800000;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_INTERP + M4A_MIX_INTERP_SETUP + 4 + WORD_INTERP + 4 * M4A_MIX_INTERP_WRAP
+              + 5 * M4A_MIX_WRAP_ITER + M4A_MIX_LOOP_LAST + M4A_MIX_INTERP_DONE,
+              "wiring: interpolating loop wraps and second wrap passes");
+    free(tiny);
+    e.pcmSamplesPerVBlank = 16;
+
+    /* DPCM reverse at step 1, first frame: from index 1000 down; the two
+     * first calls decode block 15 (999) and hit (998), then one hit per
+     * sample (997 .. 982). */
+    static int8_t decoded[1100];
+    WaveData *cw = make_dpcm_wave(1000, 0, 0, decoded);
+    int64_t decode = M4A_MIX_UNK2_CALL + M4A_MIX_UNK2_DECODE + 1, hit = M4A_MIX_UNK2_CALL + M4A_MIX_UNK2_HIT;
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, cw, VOICE_CRY_REVERSE);
+    ch.status = CHN_ENV_SUSTAIN;
+    ch.frequency = 0x800000;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_UNK1 + M4A_MIX_RETURN_UNK1 + M4A_MIX_UNK1_FIRST_REV + M4A_MIX_UNK1_FIRST_CMP
+              + M4A_MIX_UNK1_SETUP + 3 + M4A_MIX_UNK1_CMP + M4A_MIX_UNK1_CMP_REV + decode + hit
+              + 4 * WORD_UNK1 + 16 * M4A_MIX_CMP_STEP1 + 16 * hit + M4A_MIX_LOOP_LAST + M4A_MIX_UNK1_DONE,
+              "wiring: DPCM reverse (one decode, 17 hits)");
+    free(cw);
+
+    /* DPCM reverse reaching the start: a 10-sample cry; block 0 decoded,
+     * nine advancing samples (the ninth reads index -1: the block before
+     * the sample, unmapped on the GBA, its index 0x3FFFFFF making the
+     * multiply's m 4), the tenth past the start. */
+    WaveData *cs = make_dpcm_wave(10, 0, 0, decoded);
+    memset(&ch, 0, sizeof(ch));
+    m4a_pcm_channel_start(&ch, cs, VOICE_CRY_REVERSE);
+    ch.status = CHN_ENV_SUSTAIN;
+    ch.frequency = 0x800000;
+    ASSERT_EQ(mix_cost(&e, &ch),
+              M4A_MIX_TO_UNK1 + M4A_MIX_RETURN_UNK1 + M4A_MIX_UNK1_FIRST_REV + M4A_MIX_UNK1_FIRST_CMP
+              + M4A_MIX_UNK1_SETUP + 3 + M4A_MIX_UNK1_CMP + M4A_MIX_UNK1_CMP_REV + decode + hit
+              + 3 * M4A_MIX_WORD_LOAD + 10 * M4A_MIX_INTERP_SAMPLE + 9 * M4A_MIX_CMP_STEP1 + 8 * hit
+              + (M4A_MIX_UNK2_CALL + M4A_MIX_UNK2_DECODE + 4 + M4A_MIX_UNK2_UNMAPPED)
+              + 7 * M4A_MIX_NEXT_SAMPLE + 2 * (M4A_MIX_WORD_STORE_SP + M4A_MIX_NEXT_WORD) + M4A_MIX_REV_END,
+              "wiring: DPCM reverse past its start (the unmapped block, REV_END mid-word)");
+    ASSERT_EQ(ch.status, 0, "wiring: ... ended");
+    free(cs);
+    m4a_engine_destroy(&e);
+
+    /* Envelope branches, through SoundMainRAM (224 samples): the mix is
+     * the same whatever the volume, so each state's frame differs from a
+     * sustaining one's by its envelope block only. */
+    WaveData *wd = ramp_wave(1000, 1, 0);
+    int64_t frame[8];
+    for (int k = 0; k < 7; k++) {
+        M4AEngine r;
+        m4a_engine_init(&r, 44100.0f);
+        M4APCMChannel *c = &r.pcmChannels[0];
+        m4a_pcm_channel_start(c, wd, VOICE_DIRECTSOUND);
+        c->status = CHN_ENV_SUSTAIN | CHN_LOOP;
+        c->envelopeVolume = 100;
+        c->frequency = 0x100;
+        c->attack = 40;
+        c->release = 128;
+        switch (k) {
+        case 1: c->status = CHN_IEC | CHN_LOOP; c->pseudoEchoLength = 5; break;            /* echo continues */
+        case 2: c->status = CHN_IEC | CHN_LOOP; c->pseudoEchoLength = 1; break;            /* echo out: ends */
+        case 3: c->status |= CHN_STOP; c->pseudoEchoVolume = 60; break;                    /* 100 * 128 >> 8 = 50 <= 60: echo starts */
+        case 4: c->status = CHN_ENV_ATTACK | CHN_LOOP; c->envelopeVolume = 10; break;      /* 10 + 40 < 0xFF */
+        case 5: c->status = CHN_START | CHN_STOP; break;                                   /* keyed and stopped: ends */
+        case 6: c->status = CHN_ENV_DECAY | CHN_LOOP; c->decay = 0; c->sustain = 0; c->pseudoEchoVolume = 30; break; /* decay to 0, echo */
+        }
+        m4a_sound_main_ram(&r, 0, 5);
+        frame[k] = r.mixCycles;
+        if (k == 2 || k == 5)
+            ASSERT_EQ(c->status, 0, "wiring: the envelope ended the channel");
+        else
+            ASSERT((c->status & CHN_ON) != 0, "wiring: the envelope kept the channel");
+        m4a_engine_destroy(&r);
+    }
+    int64_t sus = M4A_MIX_ENV_HEAD + M4A_MIX_ENV_NOT_IEC + M4A_MIX_ENV_NOT_STOP + M4A_MIX_ENV_SUSTAIN;
+    int64_t idle = 498;   /* the frame with the slot idle */
+    int64_t mixed = frame[0] - sus;   /* the slot's walk, volumes and mix around the envelope */
+    ASSERT_EQ(frame[1], mixed + M4A_MIX_ENV_HEAD + M4A_MIX_ENV_IEC, "wiring: IEC, echo continues");
+    ASSERT_EQ(frame[2], idle - M4A_MIX_SLOT_OFF + M4A_MIX_CHAN_ON + M4A_MIX_CHAN_NEXT + M4A_MIX_ENV_HEAD
+                        + M4A_MIX_ENV_IEC_END + M4A_MIX_ENV_END, "wiring: IEC, echo out");
+    ASSERT_EQ(frame[3], mixed + M4A_MIX_ENV_HEAD + M4A_MIX_ENV_NOT_IEC + M4A_MIX_ENV_RELEASE_LOW
+                        + M4A_MIX_ENV_ECHO_START, "wiring: release reaching the echo volume starts the echo");
+    ASSERT_EQ(frame[4], mixed + M4A_MIX_ENV_HEAD + M4A_MIX_ENV_NOT_IEC + M4A_MIX_ENV_NOT_STOP
+                        + M4A_MIX_ENV_TO_ATTACK + M4A_MIX_ENV_ATTACK, "wiring: an attack step below 0xFF");
+    ASSERT_EQ(frame[5], idle - M4A_MIX_SLOT_OFF + M4A_MIX_CHAN_ON + M4A_MIX_CHAN_NEXT + M4A_MIX_ENV_START_STOP
+                        + M4A_MIX_ENV_END, "wiring: START | STOP");
+    ASSERT_EQ(frame[6], mixed + M4A_MIX_ENV_HEAD + M4A_MIX_ENV_NOT_IEC + M4A_MIX_ENV_NOT_STOP
+                        + M4A_MIX_ENV_DECAY_ZERO + M4A_MIX_ENV_ECHO_START, "wiring: decay to sustain 0, echo starts");
+    free(wd);
 }
 
 int main(void)
@@ -9604,6 +9770,7 @@ int main(void)
     test_frame_cost_linear();
     test_frame_cost_paths();
     test_frame_cost_publication();
+    test_frame_cost_wiring();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

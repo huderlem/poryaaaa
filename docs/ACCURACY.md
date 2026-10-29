@@ -723,6 +723,15 @@ on the CPU clock from the SoundMain stamp:
 - **valid** is false in live mode (the piecewise mix charges nothing) and,
   until the HQ model (step 3), with the HQ mixer; `frameCostMax` ignores
   invalid frames.  The polyphony-debug shadow pool costs nothing.
+- **Threading.**  Both fields are written by plain struct assignment on
+  the thread that calls `m4a_engine_process`; a host snapshots them there
+  (atomics, total last) and never reads them concurrently.  One process
+  call can run several SoundMains: `frameCost` is the last, `frameCostMax`
+  covers the rest.  `m4a_engine_reset_frame_cost_max` only raises a flag
+  the next SoundMain consumes, so any thread may call it.  The live-mode,
+  HQ, sound-mode-rate and voicegroup setters clear both (no stale peak
+  from another configuration); a host resets the peak itself on
+  play-from-stop.
 
 The mixer constants (`plugin/m4a_engine.h`, each with its label pair) are
 **derived, none fitted**: the instruction count of each block of m4a_1.s at
@@ -743,16 +752,19 @@ The test ROM's `WAITCNT` is the game's (WS0 3/1, prefetch on).
 | `CHAN_SETUP`, `SLOT_OFF`, `SLOT_LAST` | `_081DCF36` → ChanLoop; an idle slot; the last slot's `ble` | 11, 30, −2 |
 | `EXIT`, `EPILOGUE`, `EXIT_BX` | `_081DD24A` → `RET` (the `bx r3` refills from ROM); `RET` → `EXIT`; its `bx r0` | 33, 10 (measured), 7 |
 | `CHAN_ON`, `CHAN_NEXT` | ChanLoop → `_081DCF6A`; `_081DD240` → ChanLoop | 20, 9 |
-| `ENV_*` | `_081DCF6A` → `_081DD006` by state: START 44 (+5 loop), START\|STOP 8, END (`_081DCFB0`) 6, head 10, IEC 10 / out 8, not IEC 5, release 14 / low 12, echo start 12 / none 7, not STOP 6, decay 14 / to sustain 20 / to 0 16, sustain 7, to attack 5, attack 8 / peak 10 | |
+| `ENV_START` (+`_LOOP`), `ENV_START_STOP`, `ENV_END` | SF_START: `_081DCF6A` → `_081DCFF8` (+ the loop flag); SF_START\|SF_STOP: → `_081DCFB0`; `_081DCFB0` → `_081DD240` | 44 (+5), 8, 6 |
+| `ENV_HEAD`, `ENV_IEC`, `ENV_IEC_END`, `ENV_NOT_IEC` | not START: `_081DCF6A` → `_081DCFA0`'s IEC test; IEC: → `_081DD006` / → `_081DCFB0`; → `_081DCFB6` | 10, 10, 8, 5 |
+| `ENV_RELEASE`, `ENV_RELEASE_LOW`, `ENV_ECHO_START`, `ENV_ECHO_NONE` | SF_STOP: `_081DCFB6` → `_081DD006` / → `_081DCFC8`; `_081DCFC8` → `_081DD006` (IEC set) / → `_081DCFB0` | 14, 12, 12, 7 |
+| `ENV_NOT_STOP`, `ENV_DECAY`, `ENV_DECAY_SUSTAIN`, `ENV_DECAY_ZERO`, `ENV_SUSTAIN`, `ENV_TO_ATTACK`, `ENV_ATTACK`, `ENV_ATTACK_PEAK` | → `_081DCFD6`; decay → `_081DD006` / reaching sustain / reaching 0 → `_081DCFC8`; sustain → `_081DCFF4` → `_081DD006`; → `_081DCFF8`; `_081DCFF8` → `_081DD006` below / at 0xFF | 6, 14, 20, 16, 7, 5, 8, 10 |
 | `VOL`, `VOL_LOOP` | `_081DD006` → `_081DD03A` → `_081DD044`'s type test; + loop start / length from ROM | 63, 22 |
 | `TO_FIX`, `TO_INTERP`, `TO_UNK1`, `STORE`, `STORE_FW`, `RETURN_UNK1` | → `_081DD07C`; → `_081DD19C`; the `bl`; `_081DD22C` / `_081DD228` → `_081DD240`; Unk1's return | 10, 12, 4, 11, 13, 16 |
-| `WORD_LOAD`, `NEXT_SAMPLE`, `WORD_STORE` (`_SP`), `NEXT_WORD`, `LOOP_LAST` | a word's two `ldr`; `adds`/`bcc` taken; the stores (Unk1's frame count on the stack); the `bgt`; any loop's last pass | 6, 4, 7 (12), 3, −2 |
+| `WORD_LOAD`, `NEXT_SAMPLE`, `WORD_STORE` (`_SP`), `NEXT_WORD`, `LOOP_LAST` | per-word instruction groups of every word loop: the word head's two `ldr` (`_081DD0A8`, `_081DD0EC`, `_081DD1B4`, `_081DD308`, `_081DD3D8`, `_081DD480`); the sample tail `adds r5` / `bcc` taken (`_081DD0B0`, `_081DD118`, `_081DD208`, `_081DD370`, `_081DD440`, `_081DD4CC`); the same `bcc` falling through to the two `str` and `subs r8` (Unk1: and `ldr`/`subs`/`str` of `[sp]`); the `bgt` back to the word head (1 when it falls through); any loop's last backward branch | 6, 4, 7 (12), 3, −2 |
 | `INTERP_SETUP` (+ m), `INTERP_SAMPLE`, `HOLD`, `INTERP_STEP1`, `INTERP_STEPN` | `_081DD19C` → `_081DD1B4`; `_081DD1BC` to the `movs`; no advance; advance by one (one ROM `ldrsb`) / more (two) | 20, 13, 3, 14, 19 |
 | `INTERP_WRAP`, `WRAP_ITER`, `INTERP_END`, `INTERP_DONE` | `_081DD134` → `_081DD148` → `_081DD1FC`; another `_081DD148` pass; `_081DD158` → `_081DD174` → `_081DD240`; the frame's end | 32, 6, 45, 18 |
 | `FIX_SHORT`, `FIX_BLOCK`, `FIX_BLOCK_END`, `FIX_SAMPLE`, `FIX_BLOCK_DONE`/`_TAIL`, `FIX_TAIL`, `FIX_WRAP`, `FIX_END`, `FIX_TAIL_DONE` | `_081DD07C`'s three ways into `_081DD0A8` / `_081DD0EC`; a sample (ROM `ldrsb`, both accumulates); after the block; `_081DD0F4`'s count test; `_081DD164` looping / ending; the tail's exit | 4, 7, 11, 14, 4 / 2, 2, 14, 34, 4 |
 | `UNK1_HEAD`, `UNK1_FIRST` (`_REV`), `UNK1_FIRST_RAW`/`_CMP`, `UNK1_SETUP` (+ m), `UNK1_RAW`, `UNK1_CMP`, `UNK1_CMP_FWD`/`_REV`, `UNK1_RAW_FWD`/`_REV` | Unk1 → `_081DD2B4` (SF_SPECIAL set / first frame); `_081DD29C`; the step; the type tests; around the two first Unk2 calls; `_081DD468` | 10, 18 (29), 10 / 12, 22, 3, 8, 4 / 7, 14 / 18 |
 | `CMP_STEP1`/`STEPN`, `CMP_WRAP`, `CMP_END`, `REV_STEP`, `REV_END`, `UNK1_DONE` (`_RAW`) | a DPCM advance (+ one / two Unk2 calls); `_081DD398` → `_081DD3B0` → `_081DD358`; → `_081DD4F4`; a raw REV advance (two ROM `ldrsb`); past the start; the frame's end | 12 / 12, 31, 35, 17, 28, 11 (8) |
-| `UNK2_CALL`, `UNK2_HIT`, `UNK2_DECODE` (+ m), `UNK2_UNMAPPED` | the `bl`; Unk2 with the block held; decoding a block (32 × 14 + 31 × 16 − 2 + 63); a block before the sample's start (REV): its address wraps to unmapped memory (region 0x8C), 33 byte loads 3 instead of 6 | 3, 32, 1005, −99 |
+| `UNK2_CALL`, `UNK2_HIT`, `UNK2_DECODE` (+ m), `UNK2_UNMAPPED` | the `bl SoundMainRAM_Unk2`; SoundMainRAM_Unk2 → `_081DD594` → its `pop {…, pc}` with the block held; SoundMainRAM_Unk2 → `_081DD568`/`_081DD57C` (32 × 14 + 31 × 16 − 2) → `_081DD594` → the `pop`, 46 + 17 around the loop; a block before the sample's start (REV): its address wraps to region 0x8C, which mgba's `GBALoad8` serves from its `default:` case (no waitstate), so the 33 byte loads cost 3 instead of 6 | 3, 32, 1005, −99 |
 | `SYNTH_SETUP`, `SYNTH_SAMPLE` | poryaaaa's Golden Sun synths under the vanilla accumulate (no ROM routine): *est.* as the interpolating loop without its fetch | 20, 16 |
 
 Two values came from the probe rather than the first count, both
@@ -778,12 +790,16 @@ unchecked): the pseudo-echo (IEC) envelope paths, START|STOP, an attack
 step below 0xFF, the echo start, a DPCM loop wrap or multi-sample DPCM
 advance, the uncompressed CMP no-op, a second `_081DD148` / `_081DD3B0`
 pass, the `spv & 4` clear (7884 Hz only, which the pristine tree cannot
-build: no `SOUND_MODE_FREQ_7884`) and the synth estimate.
+build: no `SOUND_MODE_FREQ_7884`) and the synth estimate.  Their wiring
+(each charged where the translation takes the branch, with the expected
+iteration and decode counts) is unit-tested (`test_frame_cost_wiring`).
 
 **Residual sources.**  The FIFO stall at the epilogue boundary (one frame
 in the 15768 check, 18 cycles: mgba's servicing order around the final
-`bx` is not a pure offset rule); a block index past the end of a DPCM
-sample is assumed to read ROM (6); the model assumes the game's
+`bx` is not a pure offset rule).  A DPCM block past the end of a sample
+reads cartridge space, 6 per byte even beyond the ROM's size (mgba's
+`GBALoad8` sets the cart waitstate before its bounds check).  The model
+assumes the game's
 `WAITCNT`, samples in ROM, the vanilla m4a_1.s and `maxLines` 0, and
 mgba's timing (docs/cpu-meter D7: hardware may differ by a few percent).
 

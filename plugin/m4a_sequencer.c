@@ -1437,14 +1437,19 @@ void m4a_sequencer_detach(M4ASequencer *s)
         s->outer->inner = NULL;
         s->outer = NULL;
     }
+    /* The engine without this sequencer: the CgbSound entry (PSG write
+     * timing and the cost model's sequencer term) goes back to the fixed
+     * value instead of keeping the last sequenced frame's. */
     if (s->engine && s->engine->frameHookUser == s) {
         s->engine->frameHook = NULL;
         s->engine->frameHookUser = NULL;
         s->engine->externalSequencer = false;
+        s->engine->cgbEntryCycles = M4A_CYC_CGB_ENTRY_DEFAULT;
     }
     if (s->engine && s->engine->frameEndHookUser == s) {
         s->engine->frameEndHook = NULL;
         s->engine->frameEndHookUser = NULL;
+        s->engine->cgbEntryCycles = M4A_CYC_CGB_ENTRY_DEFAULT;
     }
 }
 

@@ -53,11 +53,14 @@ test with poryaaaa_render --cost-log (the arguments --summarize --render
 uses; --hq-mixer / --pcm-mix-rate from the directory as there) into --out
 (default <probe dir>/cost; --rom: the built ROM directory whose songs/ and micro/
 .s files to render, default build/accuracy/rom[-hq][-<hz>]), diffs each against its .frames and prints one row
-per test: frames compared, max |d| and the 99th percentile of |d| on total,
-the frames outside the gate, PASS / FAIL; then the overall verdict, the
+per test: frames compared, the probe-only and engine-only frames inside the
+probe log's window (its first and last frame excluded: they never carry tot),
+max |d| and the 99th percentile of |d| on total, the frames outside the gate,
+PASS / FAIL (a test also fails on any probe-only or engine-only frame, or when
+its render fails); then the overall verdict, the
 corpus's max |d|, and the share of frames within 1 %.  A test poryaaaa
 cannot render (cry_third_*: no third cry player) is listed as n/a and not
-gated.  Exit status 1 when any rendered test fails.
+gated.  Exit status 1 when any test fails or nothing was rendered.
 """
 import collections
 import json
@@ -305,12 +308,13 @@ def read_cost_log(path):
 
 
 def render_cost_log(name, nframes, out, hq, rate, romdir=None):
-    """poryaaaa_render --cost-log for a probed test; the log path, or None."""
+    """poryaaaa_render --cost-log for a probed test: the log path, NOT_RENDERABLE when
+    the test has no render (render_args is None), or RENDER_FAILED."""
     romdir = romdir or os.path.join(ROOT, "build/accuracy/rom" + ("-hq" if hq else "") + ("-%d" % rate if rate != 13379 else ""))
     songs = json.load(open(os.path.join(ROOT, "test/accuracy/songs.json")))
     args = render_args(name, romdir, songs, song_players())
     if args is None:
-        return None
+        return NOT_RENDERABLE
     seconds = (nframes + 3) * CPF / CPU_HZ
     cmd = [RENDER, os.path.join(ROOT, "build/accuracy/project")] + args
     if hq:
@@ -319,15 +323,21 @@ def render_cost_log(name, nframes, out, hq, rate, romdir=None):
         cmd += ["--pcm-mix-rate", str(rate)]
     wav = os.path.join(out, name + ".cost.wav")
     log = os.path.join(out, name + ".cost")
+    if os.path.exists(log):
+        os.remove(log)          # never gate a stale log
     cmd += ["--output", wav, "--sample-rate", "48000", "--total-duration-seconds", "%.3f" % seconds,
             "--fadeout", "0", "--tail", "0", "--cost-log", log]
     r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if os.path.exists(wav):
         os.remove(wav)
-    if r.returncode != 0:
-        print("render failed: %s: %s" % (name, r.stderr.strip()[-200:]), file=sys.stderr)
-        return None
+    if r.returncode != 0 or not os.path.exists(log):
+        print("render failed: %s (exit %d): %s" % (name, r.returncode, r.stderr.strip()[-200:]), file=sys.stderr)
+        return RENDER_FAILED
     return log
+
+
+NOT_RENDERABLE = "n/a"
+RENDER_FAILED = "render failed"
 
 
 def corpus(argv):
@@ -358,15 +368,27 @@ def corpus(argv):
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         logs = dict(zip(tests, ex.map(lambda t: render_cost_log(t, max(rows[t]), out, hq, rate, romdir), tests)))
     print("%s: %s mixer at %d Hz, cost logs in %s" % (d, "HQ" if hq else "vanilla", rate, out))
-    print("%-34s %6s %7s %6s %6s  %s" % ("test", "frames", "max|d|", "p99", "out", "verdict"))
-    allfails = 0; alld = []; within1 = 0; nfr = 0; worst = (0, None, None)
+    print("%-34s %6s %6s %6s %7s %6s %6s  %s" % ("test", "frames", "p-only", "e-only", "max|d|", "p99", "out",
+                                                  "verdict"))
+    allfails = 0; alld = []; within1 = 0; nfr = 0; worst = (0, None, None); rendered = 0
     for t in tests:
-        if logs[t] is None:
-            print("%-34s %6s %7s %6s %6s  n/a (not renderable)" % (t, "-", "-", "-", "-"))
+        if logs[t] == NOT_RENDERABLE:
+            print("%-34s %6s %6s %6s %7s %6s %6s  n/a (not renderable)" % (t, "-", "-", "-", "-", "-", "-"))
             continue
+        if logs[t] == RENDER_FAILED:
+            allfails += 1
+            print("%-34s %6s %6s %6s %7s %6s %6s  FAIL (render failed)" % (t, "-", "-", "-", "-", "-", "-"))
+            continue
+        rendered += 1
         probe = {k: v for k, v in ((k, probe_terms(r)) for k, r in rows[t].items()) if v}
         eng = read_cost_log(logs[t])
         common = sorted(k for k in probe if k in eng)
+        # coverage: inside the probe log's window (its first and last frame
+        # never carry tot) every frame must be on both sides
+        lo, hi = min(rows[t]), max(rows[t])
+        window = set(range(lo + 1, hi))
+        ponly = len((set(probe) & window) - set(eng))
+        eonly = len((set(eng) & window) - set(probe))
         d_ = [abs(eng[k]["total"] - probe[k]["total"]) for k in common]
         bad = [k for k in common if abs(eng[k]["total"] - probe[k]["total"]) > max(0.02 * probe[k]["total"], 300)]
         for k in common:
@@ -376,15 +398,17 @@ def corpus(argv):
             if dd > worst[0]:
                 worst = (dd, t, k)
         nfr += len(common); alld += d_
-        ok = not bad and common
+        ok = not bad and common and ponly == 0 and eonly == 0
         allfails += 0 if ok else 1
-        print("%-34s %6d %7d %6d %6d  %s" % (t, len(common), max(d_, default=0), pct(d_, 99), len(bad),
-                                             "PASS" if ok else "FAIL"))
+        print("%-34s %6d %6d %6d %7d %6d %6d  %s" % (t, len(common), ponly, eonly, max(d_, default=0), pct(d_, 99),
+                                                     len(bad), "PASS" if ok else "FAIL"))
+    passed = allfails == 0 and rendered > 0
     print("%s: %d frames over %d rendered tests, max |d| %d%s, p99 %d, %.2f %% of frames within 1 %%" % (
-        "PASS" if allfails == 0 else "FAIL (%d tests)" % allfails, nfr, sum(1 for t in tests if logs[t]),
+        "PASS" if passed else "FAIL (%d tests%s)" % (allfails, ", none rendered" if rendered == 0 else ""),
+        nfr, rendered,
         worst[0], " (%s f%d)" % (worst[1], worst[2]) if worst[1] else "", pct(alld, 99),
         100.0 * within1 / max(nfr, 1)))
-    return 0 if allfails == 0 else 1
+    return 0 if passed else 1
 
 
 def diff(frames_path, cost_path, limit=20):

@@ -610,6 +610,10 @@ static void sound_vsync(M4AEngine *engine)
 static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCounter)
 {
     M4AFrameCost c = { 0, 0, 0, 0, false };
+    if (engine->frameCostMaxResetPending) {
+        engine->frameCostMaxResetPending = false;
+        memset(&engine->frameCostMax, 0, sizeof(engine->frameCostMax));
+    }
     /* Live mode mixes in pieces (nothing to cost); the HQ mixer's model is
      * not in yet (step 3 of docs/cpu-meter): both publish invalid. */
     if (engine->liveMode || engine->hqMixer) {
@@ -650,13 +654,28 @@ static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCount
 
 void m4a_engine_reset_frame_cost_max(M4AEngine *engine)
 {
+    /* Consumed by the next publish_frame_cost, on the thread that runs
+     * m4a_engine_process: a UI thread may call this while it runs. */
+    engine->frameCostMaxResetPending = true;
+}
+
+/* A configuration change (live mode, mixer, sound-mode rate, voicegroup):
+ * the last frame's cost and the peak belong to the old one.  Called by the
+ * setters, on the thread that drives the engine. */
+static void frame_cost_invalidate(M4AEngine *engine)
+{
+    engine->frameCost.valid = false;
     memset(&engine->frameCostMax, 0, sizeof(engine->frameCostMax));
+    engine->frameCostMaxResetPending = false;
 }
 
 static void sound_main(M4AEngine *engine)
 {
     int64_t stamp = engine->gba.now;
     engine->soundMainStamp = stamp;
+    /* The mixer's charge is per frame (live mode's pieces add to it but are
+     * never costed): start every frame from zero. */
+    engine->mixCycles = 0;
     m4a_engine_tick(engine);
     engine->soundMainStamp = -1;
     int counter = engine->pcmDmaCounter;
@@ -787,7 +806,7 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
      * starts from 0 as the ROM does.  (The harness cannot tell 0 from 14:
      * every micro-test envelope is in sustain when the double-step lands.) */
     engine->c15 = 0;
-    engine->cgbEntryCycles = M4A_CYC_CGB_ENTRY_BASE + M4A_CYC_PER_TRACK - M4A_CYC_SOUNDMAIN_ENTRY;
+    engine->cgbEntryCycles = M4A_CYC_CGB_ENTRY_DEFAULT;
     engine->soundMainStamp = -1;
     engine->tempoD = 150;
     engine->tempoU = 0x100;
@@ -883,7 +902,7 @@ void m4a_engine_set_live_mode(M4AEngine *engine, bool on)
         return;
     engine->liveMode = on;
     engine->liveMixPos = 0;
-    engine->frameCost.valid = false;
+    frame_cost_invalidate(engine);
     if (on && engine->hqMixer)
         m4a_engine_set_hq_mixer(engine, false);
 }
@@ -898,6 +917,7 @@ void m4a_engine_set_pcm_freq_mode(M4AEngine *engine, int mode)
         return;
     engine->pcmFreqMode = (uint8_t)mode;
     pcm_reprogram(engine);
+    frame_cost_invalidate(engine);
 }
 
 void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on)
@@ -914,6 +934,7 @@ void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on)
     if (on == engine->hqMixer)
         return;
     engine->hqMixer = on;
+    frame_cost_invalidate(engine);
     memset(engine->hqBuffer, 0, sizeof(engine->hqBuffer));
     memset(engine->hqMutedBuffer, 0, sizeof(engine->hqMutedBuffer));
     engine->hqNoiseShapeLeft = engine->hqNoiseShapeRight = 0;
@@ -957,6 +978,8 @@ void m4a_engine_set_tick_tempo(M4AEngine *engine, uint16_t tempoI)
 
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
 {
+    if (voiceGroup != engine->voiceGroup)
+        frame_cost_invalidate(engine);   /* a new song's voices: a new peak */
     engine->voiceGroup = voiceGroup;
 }
 
