@@ -997,7 +997,12 @@ void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on)
 void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm)
 {
     if (bpm < 1.0) bpm = 1.0;
-    engine->tempoI = (uint16_t)(bpm + 0.5);
+    uint16_t tempoI = (uint16_t)(bpm + 0.5);
+    /* A tempo change while a song plays is the song's TEMPO command (the
+     * cost estimate; once per tick with m4a_engine_set_tick_tempo). */
+    if (tempoI != engine->tempoI && m4a_est_active(engine))
+        m4a_est_tempo(engine);
+    engine->tempoI = tempoI;
 }
 
 void m4a_engine_start_song_tempo(M4AEngine *engine)
@@ -1024,8 +1029,10 @@ void m4a_engine_set_tick_tempo(M4AEngine *engine, uint16_t tempoI)
 
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
 {
-    if (voiceGroup != engine->voiceGroup)
+    if (voiceGroup != engine->voiceGroup) {
         frame_cost_invalidate(engine);   /* a new song's voices: a new peak */
+        m4a_est_reset(engine);           /* and no song state from the old one */
+    }
     engine->voiceGroup = voiceGroup;
 }
 
@@ -2198,6 +2205,8 @@ void m4a_engine_all_sound_off(M4AEngine *engine)
         if (engine->cgbChannels[i].status)
             m4a_engine_kill_channel(engine, TOTAL_PCM_CHANNELS + i);
     m4a_engine_reset_portamento(engine);
+    if (m4a_est_active(engine))
+        m4a_est_sound_off(engine);       /* the cost estimate's chains (and an inferred song) end too */
 }
 
 void m4a_engine_kill_channel(M4AEngine *engine, int handle)

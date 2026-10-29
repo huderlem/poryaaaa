@@ -978,35 +978,56 @@ exact term unless `m4a_engine_set_cost_estimate_forced` (renderer
 |---|---|---|
 | frame skeleton | the player's entry / head / exit (`MP_BGM_ENTRY`, `MP_HEAD`, `MP_EXIT`; SE players by `m4a_sequencer_set_player`'s rule), or the paused player (822 for BGM) | `m4a_engine_cost_song_start` (player), whether any track exists |
 | tick passes | per tempo tick `TICK_ENTER`, the trackCount slots (`TICK_TRACK` + `TICK_TRACK_END` per existing track, `TICK_NO_TRACK` per empty slot, `TICK_NEXT` / `TICK_LAST`), `TICK_EXIT`; `TICK_ALL_DONE` and then paused once every track has ended | the engine's own tempoC / 150 loop (`mplay_main_tail`); the existing tracks |
-| chain walk | per existing track and tick, its chained channels newest first: dead → `WALK_DEAD` + the unlink by links (`WALK_UNLINK_*`); a note-off since the last walk (an N## gate expiring) → `GATE_EXPIRE`; released, a TIE (predicted, ended by EOT, or older than 96 ticks) → `GATE0`; else `GATE_DEC`; `TICK_CHAIN` + `NEXT` / `END`, or `TICK_NO_CHAIN` | the estimate's own chains (membership and order by note-on, like the sequencer's `chainOwner` / `chanSeq`) over the engine's channel status |
+| chain walk | per existing track and tick, its chained channels newest first, those started before the tick: dead → `WALK_DEAD` + the unlink by links (`WALK_UNLINK_*`); the tick its N## gate expires (start + length, known at the note-off) → `GATE_EXPIRE`, after it `GATE0`, before it `GATE_DEC`; released otherwise, or a TIE (predicted, ended by EOT, or older than 96 ticks) → `GATE0`; else `GATE_DEC`; `TICK_CHAIN` + `NEXT` / `END`, or `TICK_NO_CHAIN` | the estimate's own chains (membership and order by note-on, like the sequencer's `chainOwner` / `chanSeq`) over the engine's channel status |
 | START | `TICK_START` on a track's first tick, else `TICK_NO_START` | the song start / a track's first note |
 | wait / LFO path | per existing track and tick, the branch the LFO step takes: `WAIT_LFOS0`, `WAIT_NO_LFO`, `WAIT_LFO_DELAY`, `LFO_STEP` + `NEG` / `POS` + `SAME` / `PIT` / `VOL` | the engine's `m4a_lfo_tick` (lfoSpeed, mod, lfoDelayC, modM) |
 | W## | 93 per track on a tick with any of its events, on mid2agb's bar marks, and 96 ticks after its last one (TimeSplit) | events, `m4a_engine_cost_time_signature`, the clock |
 | VOLCHG / PITCHG pass | `APPLY_*` per slot: flagged tracks `FLAGGED` + `TVPS` + VOLSET / PITSET, then per chained channel `CH`, VOL (`_PCM` / `_CGB`) or not, PIT (`_PCM` / `_CGB` / `_NOISE` + the low-key / noise-clamp adjustments) or not, dead `CH_DEAD` | the engine's `chgFlags` before its own pass, plus the flags of commands it never sees (KEYSH, the implicit VOL); keyM from TrkVolPitSet on a copy |
-| note-on | the command byte (running status when mid2agb's last op is the same N## and a wait came between: 25, else explicit 21 + 10), `CMD_NOTE`, ply_note's bytes (key when key or velocity changed, velocity when it changed, the `-E` gate byte when the length is not a gClockTable value), voice (plain / keysplit / drum, the ROM-voice extras), the CGB test or the DirectSound scan channel by channel over the engine's channels as the note finds them, `NOTE_TAKE` + the unlink (`NOTE_UNLINK_*` by links or `_NONE`) + `CHAIN_EMPTY`, `LFODL0` / `LFODL` (clear_modM), `NOTE_TVPS` + the pending flags, `CHNVOL`, the frequency routine (PCM / CGB / noise + key adjustments + sweep), `STORE` + `EXIT`; a rejected note `EXIT` | the note's length predicted from the track's previous note (mid2agb writes it at the note-on; the real one is known only at the note-off, which then corrects the running-status state); the 4-step velocity table |
+| note-on | the command byte (running status only when key / velocity / gate bytes follow, mid2agb's last op is the same N## and a wait came between: 25, else explicit 21 + 10; a repeat with the same key and velocity is the bare explicit command), `CMD_NOTE`, ply_note's bytes (key when key or velocity changed, velocity when it changed, the `-E` gate byte when the length is not a gClockTable value), voice (plain / keysplit / drum, the ROM-voice extras), the CGB test or the DirectSound scan channel by channel over the engine's channels as the note finds them, `NOTE_TAKE` + the unlink (`NOTE_UNLINK_*` by links or `_NONE`) + `CHAIN_EMPTY`, `LFODL0` / `LFODL` (clear_modM), `NOTE_TVPS` + the pending flags, `CHNVOL`, the frequency routine (PCM / CGB / noise + key adjustments + sweep), `STORE` + `EXIT`; a rejected note `EXIT` | the note's length predicted from the track's previous note (mid2agb writes it at the note-on; the real one is known only at the note-off, which then corrects the running-status state); the 4-step velocity table |
 | note-off | no command for an N## note (its gate expires in the walk); a note longer than 96 ticks was a TIE: EOT (`CMD_TABLE` + `ENDTIE` + key byte + the walk to the match) | the note's length in ticks |
 | controllers | `CMD_TABLE` + the handler (VOL 89, PAN 91, BEND 91, BENDR 89, LFOS 69 / 109 at 0, LFODL 81, MOD 69 / 109 at 0, MODT 91 / 95 changed, TUNE 91, VOICE 184, xIECV / xIECL `XCMD_SUB` + `XIEC`, PRIO the default), explicit or running status by mid2agb's last op | the CC number and value, the old modT |
-| song structure | KEYSH and the START per track at the song start, the implicit `VOL 127` before a track's first note when no VOL came first, TEMPO (`m4a_engine_set_tick_tempo`), FINE (`m4a_engine_track_end`, with ply_fine's chain), the loop's GOTO per track and the labels' compression reset (`m4a_engine_cost_loop_point`) | the host's calls |
+| song structure | KEYSH and the START per track at the song start, the implicit `VOL 127` when no VOL came before a track's first note, TEMPO (`m4a_engine_set_tick_tempo`, or a changed `m4a_engine_set_tempo_bpm` while a song plays; once per tick), FINE (`m4a_engine_track_end`, with ply_fine's chain), the loop's GOTO per track and the labels' compression reset (`m4a_engine_cost_loop_point`) | the host's calls |
 | FIFO stall | 18 per refill due in the span, from the player's entry | the CPU clock |
 
-A channel a command takes from a chain on the frame's first tick (a note
-stealing it, FINE) was already met by the owner's walk when the owner is
-the same or an earlier track (MPlayMain walks and runs track by track):
-its walk step is charged then.  All costs are ROM-song values (a song
-from MIDI is in ROM).
+A channel a command takes from a chain (a note stealing it, FINE) was
+already met by its owner's walks of the frame's earlier ticks, and of
+this tick when the owner is the same or an earlier track (MPlayMain walks
+and runs track by track): those steps are charged then.  On a frame with
+several ticks (the renderer's tick boundaries) each event, channel start
+and gate expiry belongs to its own tick.  **Events in a frame without a
+tick** (a free-running accumulator below 150 BPM, events between its
+ticks) are held, cost and W## alike, for the next frame with a tick, where
+MPlayMain would read them.  All costs are ROM-song values (a song from MIDI
+is in ROM).
 
-**What the host provides** (`m4a_engine.h`): `m4a_engine_cost_song_start
-(trackMask, player)` at the song's start (the tracks mid2agb would write:
-those with notes; bars every 96 ticks), `m4a_engine_cost_time_signature
-(clocksPerBar)` at each time signature (mid2agb's `96 · numerator ·
-clocksPerBeat / 2^denominator`; the marks restart there),
-`m4a_engine_cost_loop_point(false / true)` at the loop start and at the
-GOTO (the marks' phase is restored there), `m4a_engine_track_end` and
-`m4a_engine_set_tick_tempo` as section 5 describes, and
-`m4a_engine_cost_song_stop` when it stops.  Without `song_start` the
-estimate infers: a track exists from its first note, BGM, no bar marks.
-The tick is always the engine's own tempo accumulator; on the renderer's
-grid that is the game's, in a plugin it free-runs at the host's tempo.
+**Two forms.**  *Declared*: the host calls `m4a_engine_cost_song_start`
+with the song's tracks and player, then gives the time signatures and the
+loop points, so the song exists from its first tick with mid2agb's bar
+marks (every 96 ticks until a time signature says otherwise), GOTOs and
+labels; only the declared tracks' events are commands (mid2agb drops a
+channel without notes), and a note on another track adds it.  *Inferred*
+(a host that calls none of them, e.g. the plugin): a track exists from its
+first note (with its START and KEYSH then), the player is BGM (an SE plays
+on fewer slots), there are no bar marks, GOTOs or labels, and a
+controller of any track is a command; `m4a_engine_all_sound_off` (a stop)
+ends the inferred song, so the engine shows the paused player again.  In
+both forms `m4a_engine_set_voicegroup` with a new voicegroup and
+`m4a_engine_cost_song_stop` reset the estimate to the paused player with
+no song state, and all sound off forgets the chains and held notes.
+
+**The host contract** (`m4a_engine.h`; every call on the thread that
+drives the engine, like the MIDI events, between `m4a_engine_process`
+calls): `m4a_engine_cost_song_start(trackMask, player)` on play-from-stop
+(and after a seek that restarts the song), with the engine tracks that
+have notes anywhere in the song (not only those heard so far: a track
+starting late exists in the game from tick 0) and `M4A_PLAYER_BGM` for
+music; `m4a_engine_cost_time_signature(96 · num · clocksPerBeat /
+2^den)` at tick 0 and at each time signature change, as the event of
+that tick; `m4a_engine_cost_loop_point(false)` at the loop start and
+`(true)` at the wrap, before the next pass's events of that tick;
+`m4a_engine_set_tempo_bpm` with the song's tempo (it is also the tick
+rate); `m4a_engine_cost_song_stop` on stop.  Not calling them is the
+inferred form.
 
 **Assumptions.**  mid2agb with `-E` and compression on (the vanilla
 `midi.cfg`); one AGB track per engine track (a Type 1 MTrk with one note
@@ -1014,26 +1035,30 @@ channel); a tick's controllers before its notes; priority 0 (no PRIO
 handler); the vanilla player table.  The note length at a note-on is the
 previous note's, so the first note of a track and a length change cost the
 running-status (6) and gate-byte (15 + the key / velocity bytes it forces)
-difference.
+difference.  Placement approximations: the implicit `VOL 127` (mid2agb
+writes it at the track's head, tick 0, before KEYSH) is charged at the
+track's first note, so on that note's frame when the first note is
+later; a host's tempo change is charged as TEMPO on the tick it reaches
+the engine.
 
-**Measured** (2026-10-29, `tools/seq_estimate_diff.py`, `build/probe`:
-every probed test with a MIDI rendered `--midi --gba-tempo-grid
---cost-log` twice, with and without `--cost-estimate`; frames 3 to the
-probe's last; cycles):
+**Measured on the game's grid** (2026-10-29, `tools/seq_estimate_diff.py`,
+`build/probe`: every probed test with a MIDI rendered `--midi
+--gba-tempo-grid --cost-log` twice, with and without `--cost-estimate`;
+the declared form; frames 3 to the probe's last; cycles):
 
 | test | frames | mean | mean \|d\| | max \|d\| | p50 | p90 | p99 | p99 % of total |
 |---|---|---|---|---|---|---|---|---|
 | credits | 596 | −0.1 | 1.8 | 18 | 0 | 6 | 6 | 0.04 % |
 | groudon | 1196 | −3.5 | 3.5 | 1151 | 0 | 0 | 0 | 0.00 % |
 | littleroot | 1196 | −1.3 | 1.3 | 386 | 0 | 0 | 12 | 0.02 % |
-| mt_chimney | 1196 | −7.3 | 7.3 | 1258 | 0 | 6 | 35 | 0.06 % |
-| rg_vs_trainer | 1196 | −8.6 | 11.7 | 1336 | 0 | 12 | 216 | 0.35 % |
-| vs_trainer | 1196 | −13.5 | 13.9 | 1616 | 0 | 0 | 332 | 0.61 % |
-| vs_wild | 1196 | −17.1 | 18.0 | 1755 | 0 | 0 | 984 | 1.70 % |
-| **songs** | 7772 | −7.9 | 8.7 | 1755 | 0 | 6 | **105** | 0.21 % |
-| SEs (6) | 1056 | 0.2 | 0.8 | 151 | 0 | 0 | 12 | 0.13 % |
+| mt_chimney | 1196 | −6.8 | 6.8 | 1258 | 0 | 6 | 30 | 0.06 % |
+| rg_vs_trainer | 1196 | −7.1 | 10.0 | 1330 | 0 | 12 | 93 | 0.20 % |
+| vs_trainer | 1196 | −11.3 | 11.3 | 1446 | 0 | 0 | 332 | 0.61 % |
+| vs_wild | 1196 | −15.7 | 15.7 | 1749 | 0 | 0 | 978 | 1.68 % |
+| **songs** | 7772 | −7.0 | 7.6 | 1749 | 0 | 0 | **36** | 0.08 % |
+| SEs (6) | 1056 | 0.5 | 0.6 | 24 | 0 | 0 | 12 | 0.13 % |
 | micro-tests (38) | 4378 | −0.0 | 0.0 | 6 | 0 | 0 | 0 | 0.00 % |
-| **all** | 13206 | −4.6 | 5.2 | 1755 | 0 | 0 | 42 | 0.12 % |
+| **all** | 13206 | −4.1 | 4.5 | 1749 | 0 | 0 | 18 | 0.07 % |
 
 Against the probe (mgba's CgbSound entry − m4aSoundMain entry) the table
 is the same frame for frame: the timing-only sequencer's term equals the
@@ -1041,67 +1066,89 @@ probe's on every one of these frames.  `--quantize` (the plugin's latch)
 gives the same numbers.  The micro-tests are exact but for single 6-cycle
 running-status guesses; the SEs but for `se_exp`'s first note (a TIE the
 estimate cannot know for its first 96 ticks: `GATE_DEC` 26 instead of
-`GATE0` 20 per tick) and one EOT frame each in `se_rain_stop` /
-`se_contest_place`.
+`GATE0` 20 per tick) and one frame of `se_contest_place`.
 
 **Residual sources** (the songs; `--seq-log` of the exact render names
 each frame's commands):
 
 - **PATT / PEND** (mid2agb's compression of a repeated bar: `PATT` 237 at
   the repeat's start, `PEND` 137 at the end of both bars): all of the
-  large misses.  On the frames that run them the residual is −18094 /
-  −13347 / −6764 / −9140 / −945 / −4148 (vs_wild, vs_trainer, mt_chimney,
+  large misses.  On the frames that run them the residual is −17858 /
+  −12769 / −6764 / −8983 / −945 / −4148 (vs_wild, vs_trainer, mt_chimney,
   rg_vs_trainer, littleroot, groudon) against their PATT / PEND cost of
   16778 / 12079 / 6628 / 8750 / 885 / 4051; the rest is the compression
   reset at the pattern labels (explicit command, key and velocity bytes
   the estimate predicted as running).  Not causal: a bar is a pattern only
   once its repeat is known.  These are 4–14 frames in 1196.
-- **The note length guess** (running status ±6, the gate byte 15, the key
-  and velocity bytes 19 / 17 it forces) and the scan / unlink differences
-  of channels the two models hold differently: on the other frames the
-  songs' p99 is 0–84 and max 224 (rg_vs_trainer: eight notes in one frame).
 - **mid2agb's LUT wait split** (a wait not in gClockTable is two W##, the
   second mid-wait): −93 on a frame with no event.  Not causal (the split
   point depends on the next event).
+- **The note length guess** (running status ±6, the gate byte 15, the key
+  and velocity bytes 19 / 17 it forces) and the scan / unlink differences
+  of channels the two models hold differently.  Together with the split:
+  on the frames without PATT / PEND the songs' p99 is 0–36, max 93.
 - **TIEs before 96 ticks**: +6 per tick.
 
-**Without the grid** (a plugin's situation: the host's tempo, no time
-signatures, the estimate's song started with the render; the
-`--no-gba-tempo-grid` stand-in), frames do not line up with the game's,
-so the distributions are compared (sequencer term, frames 3 to the
-probe's last):
+**Without the grid** (a plugin's situation: the MIDI's own tempo, no
+timing-only sequencer, MIDI time 0 at sample 0; `seq_estimate_diff.py
+--no-grid`).  Frames do not line up with the game's, so per test the
+distributions of the sequencer term over frames 3 to the probe's last are
+compared: the mean's difference and W1, the mean |difference| of the two
+sorted series (the earth mover's distance of the per-frame values).
+Declared is the renderer's default (song start with the tracks that have
+notes, the MIDI's time signatures and loop points: the form porydaw uses
+from cpu-meter step 5, with its own time signatures and loop points);
+inferred is `--cost-inferred`.
 
-| song | probe mean / p50 / p90 / p99 / max | estimate mean / p50 / p90 / p99 / max |
+| song | probe mean / p50 / p99 / max | declared mean / p50 / p99 / max (Δmean, W1) | inferred mean / p50 / p99 / max (Δmean, W1) |
+|---|---|---|---|
+| credits | 2110 / 2365 / 5129 / 20696 | 2107 / 2345 / 5155 / 18716 (−2.9, 16.6) | 1839 / 1937 / 4757 / 14606 (−271.4, 270.0) |
+| groudon | 1778 / 1817 / 4470 / 10518 | 1777 / 1817 / 4470 / 10518 (−0.9, 7.8) | 1776 / 1817 / 4470 / 10876 (−2.0, 6.7) |
+| littleroot | 2709 / 2361 / 8526 / 22510 | 2715 / 2361 / 8530 / 21190 (+5.6, 23.6) | 2511 / 2089 / 8304 / 18824 (−198.5, 215.2) |
+| mt_chimney | 3554 / 2998 / 11449 / 25374 | 3552 / 3016 / 11339 / 25546 (−1.6, 45.4) | 3483 / 2947 / 11271 / 25724 (−70.1, 89.7) |
+| rg_vs_trainer | 3693 / 2548 / 12554 / 23988 | 3701 / 2564 / 11816 / 23988 (+8.2, 64.6) | 3601 / 2494 / 11850 / 22196 (−91.9, 118.3) |
+| vs_trainer | 3101 / 2319 / 9696 / 17899 | 3104 / 2325 / 9167 / 17899 (+3.3, 60.4) | 3055 / 2319 / 9167 / 16599 (−45.3, 74.7) |
+| vs_wild | 3164 / 2368 / 10023 / 15735 | 3165 / 2400 / 9266 / 15735 (+1.0, 65.8) | 3053 / 2314 / 9148 / 13561 (−110.5, 129.7) |
+
+Per group (the mean over the tests of Δmean, of |Δmean| in % of the
+probe's mean, and of W1):
+
+| group | declared Δmean / \|Δmean\| % / W1 | inferred Δmean / \|Δmean\| % / W1 |
 |---|---|---|
-| littleroot | 2709 / 2361 / 4341 / 8526 / 22510 | 2704 / 2367 / 4244 / 8278 / 19588 |
-| groudon | 1778 / 1817 / 2365 / 4470 / 10518 | 1771 / 1817 / 2365 / 4215 / 9168 |
-| vs_wild | 3164 / 2368 / 4608 / 10023 / 15735 | 3164 / 2400 / 4577 / 9260 / 15547 |
-| mt_chimney | 3554 / 2998 / 6155 / 11449 / 25374 | 3541 / 3020 / 5822 / 11132 / 22400 |
-| rg_vs_trainer | 3693 / 2548 / 6920 / 12554 / 23988 | 3701 / 2564 / 6611 / 11816 / 23800 |
-| vs_trainer | 3101 / 2319 / 4534 / 9696 / 17899 | 3103 / 2325 / 4422 / 9155 / 17711 |
-| credits | 2110 / 2365 / 2409 / 5129 / 20696 | 2102 / 2345 / 2409 / 5057 / 17512 |
+| songs (7) | +1.8 / 0.11 % / 40.6 | −112.8 / 4.25 % / 129.2 |
+| SEs (6) | −14.5 / 1.20 % / 23.4 | +171.0 / 14.34 % / 190.6 |
+| micro-tests (38) | −13.8 / 0.86 % / 10.3 | −13.7 / 0.86 % / 10.9 |
 
-The means agree within 0.5 %; the tails are lower without bar marks and
-PATT / PEND.  The sequencer term is a few percent of the frame's total
-(the mixer dominates), so the CPU meter's error from it is well under 1 %
-of VBlank on almost every frame.
+Declared, the songs' means agree within 0.3 % and the tails are only short
+of PATT / PEND; the micro-tests' −14 is the window (without the start
+delay the render's song ends three frames earlier, which adds three
+paused frames).  Inferred lacks the bar-mark W##s, the START and KEYSH of
+tracks before their first note, the GOTOs and labels, and an SE's player
+(BGM's 10 slots instead of 1–9: `se_low_health` +563 per frame): about
+4 % low on songs and well off on SEs.  The sequencer term is a few
+percent of the frame's total (the mixer dominates), so even the inferred
+form's error is under 1 % of VBlank on most frames.
 
 **Exactness.**  The estimate only publishes a number: with a sequencer
 attached nothing changes (`cost_diff.py --corpus` on all four probe
 corpora: max \|Δ\| 0, no probe-only or engine-only frame), the PSG writes
 stay where the fixed entry puts them (`claim_check.sh`, vanilla and HQ: 0
 moved writes, no harness row moved), and a `--midi` render is the same
-sample for sample with and without the renderer's new cost events
+sample for sample with and without the renderer's cost events
 (`RENDER_EVT_TIMESIG`, `RENDER_EVT_LOOP`).  Unit-tested
 (`test_seq_estimate`): the paused player, the no-tick and tick skeletons
 (1217 and 1655 with one track), a note-on's sum, the walk's gate
-decrement and expiry, a controller's command, running status, the flag,
-and that a sequencer (forced or not) or a timing-only sequencer keeps its
-exact term.
+decrement and expiry, a controller's command, running status, the
+identical-repeat note (explicit), a command held from a frame without a
+tick, an undeclared track's controller, TEMPO from the host's tempo
+(once per tick), the two-tick frame (a note on the second tick, a note-off
+expiring there), the inferred song and its end at all sound off, the
+reset on a new voicegroup and at song stop, the flag, and that a
+sequencer (forced or not) or a timing-only sequencer keeps its exact term.
 
-`tools/seq_estimate_diff.py [--probe DIR] [--out DIR] [--quantize]
-[--worst N] [name ...]` reproduces the tables (`--worst N` lists the N
-largest frames per test).
+`tools/seq_estimate_diff.py [--probe DIR] [--out DIR] [--jobs N]
+[--quantize] [--worst N] [--no-grid] [name ...]` reproduces the tables
+(`--worst N` lists the N largest frames per test).
 
 ## 5. The MIDI path
 
@@ -1285,7 +1332,8 @@ above, and none of the renderer-only mechanisms:
   boot, not phase-locked to the host's beat grid.
 - **Cost model**: the sequencer term is the MIDI-path estimate in its
   inferred form (no `m4a_engine_cost_song_start`: a track exists from its
-  first note, BGM, no bar marks); see "MIDI-path sequencer estimate".
+  first note, BGM, no bar marks, all sound off ends the song); see
+  "MIDI-path sequencer estimate".
 - What the plugin cannot have, and why: the tick grid and the start origin
   (the host's timeline is the clock), the timing-only CgbSound entry (a
   live stream does not carry mid2agb's encoding, part of which is not even

@@ -10379,8 +10379,113 @@ static void test_seq_estimate(void)
               "CC: running status on the second LFODL");
     ASSERT_EQ((M4A_CYC_CMD_BYTE + M4A_CYC_CMD_BYTE_RS) - M4A_CYC_CMD_RUNNING, 6,
               "running status saves 6 of the explicit byte's 31");
+
+    /* A command applied in a frame without a tick waits for the next tick
+     * (MPlayMain reads it there), with its W##. */
+    m4a_engine_cc(&a, 1, 0x1A, 6);
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v, 0, "no tick: the command is held");
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v, w + M4A_CYC_CMD_FETCH + M4A_CYC_CMD_RUNNING + lfodl, "the next tick runs it, with its W##");
+
+    /* A controller of a track the declared song does not have: no command. */
+    m4a_engine_cc(&a, 2, 0x1A, 6);
+    (void)est_frame(&b);
+    v = est_frame(&a);
+    ASSERT_EQ(v, sk0, "declared: a track outside the song is not charged");
+
+    /* TEMPO from the host's tempo (m4a_engine_set_tempo_bpm), once per tick
+     * even with m4a_engine_set_tick_tempo on the same tick.  (75 -> 76 keeps
+     * this tick: tempoC 75.) */
+    m4a_engine_set_tempo_bpm(&a, 76.0);
+    m4a_engine_set_tick_tempo(&a, 76);
+    m4a_engine_set_tempo_bpm(&a, 76.0);
+    m4a_engine_set_tempo_bpm(&b, 75.0);       /* unchanged: nothing */
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v, w + M4A_CYC_CMD_FETCH + M4A_CYC_CMD_BYTE + M4A_CYC_CMD_BYTE_LOW + M4A_CYC_CMD_TABLE + 91,
+              "TEMPO: one command and its W##");
     m4a_engine_destroy(&a);
     m4a_engine_destroy(&b);
+
+    /* A note repeating the last one (same key and velocity, no gate byte)
+     * is written with its command byte (mid2agb's PrintOp without data
+     * bytes): no running status.  A different key on the same length is
+     * running status plus the key byte: 13 more, not 19. */
+    est_engine(&a, voices);
+    est_engine(&b, voices);
+    for (int k = 0; k < 2; k++) {
+        M4AEngine *x = k ? &b : &a;
+        m4a_engine_note_on(x, 1, 60, 100);
+        (void)est_frame(x);                   /* tick */
+        (void)est_frame(x);
+        m4a_engine_note_off(x, 1, 60);        /* two ticks: N02 */
+        (void)est_frame(x);                   /* tick */
+        (void)est_frame(x);
+        (void)est_frame(x);                   /* tick */
+        (void)est_frame(x);
+    }
+    m4a_engine_note_on(&a, 1, 60, 100);
+    m4a_engine_note_on(&b, 1, 62, 100);
+    v = est_frame(&b) - est_frame(&a);
+    ASSERT_EQ(v, M4A_CYC_CMD_RUNNING + M4A_CYC_NOTE_KEY_BYTE - (M4A_CYC_CMD_BYTE + M4A_CYC_CMD_BYTE_RS),
+              "identical repeat: explicit; new key: running status + key byte");
+    m4a_engine_destroy(&a);
+    m4a_engine_destroy(&b);
+
+    /* Two ticks in a frame (the renderer's tick boundaries): a note on the
+     * second is not walked on it; its note-off on the next frame's second
+     * tick expires there (the first tick still counts the gate down). */
+    est_engine(&a, voices);
+    est_engine(&b, voices);
+    a.tempoI = b.tempoI = 300;                /* two ticks a frame */
+    (void)est_frame(&a);
+    (void)est_frame(&b);
+    m4a_engine_tick_boundary(&a);
+    m4a_engine_tick_boundary(&b);
+    m4a_engine_note_on(&a, 1, 60, 100);
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v, note + w, "tick 1: the note and its W##, no walk of it");
+    m4a_engine_tick_boundary(&a);
+    m4a_engine_tick_boundary(&b);
+    m4a_engine_note_off(&a, 1, 60);
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v, (M4A_CYC_TICK_CHAIN + M4A_CYC_WALK_GATE_DEC + M4A_CYC_WALK_END - M4A_CYC_TICK_NO_CHAIN)
+                 + (M4A_CYC_TICK_CHAIN + M4A_CYC_WALK_GATE_EXPIRE + M4A_CYC_WALK_END - M4A_CYC_TICK_NO_CHAIN),
+              "note-off on tick 1: gate counted on tick 0, expiring on tick 1");
+    m4a_engine_destroy(&a);
+    m4a_engine_destroy(&b);
+
+    /* Without a declared song (a plugin): a track exists from its first
+     * note; all sound off ends the inferred song (the paused player), and so
+     * does a new voicegroup -- for a declared one too.  An inferred song's
+     * controllers are charged on any track. */
+    const int paused = M4A_CYC_CGB_ENTRY_PAUSED - M4A_CYC_M4A_SOUNDMAIN;
+    m4a_engine_init(&a, 44100.0f);
+    m4a_engine_set_voicegroup(&a, voices);
+    m4a_engine_program_change(&a, 1, 0);
+    v = est_frame(&a);
+    ASSERT_EQ(v, paused, "inferred: paused before a note");
+    m4a_engine_note_on(&a, 1, 60, 100);
+    v = est_frame(&a);
+    ASSERT(v > paused + 1000, "inferred: a note starts the song");
+    m4a_engine_cc(&a, 2, 0x1A, 6);
+    a.tempoI = 0;                              /* no tick: the controller is held */
+    (void)est_frame(&a);
+    ASSERT(a.seqEst.held > 0, "inferred: any track's controller is a command");
+    m4a_engine_all_sound_off(&a);
+    v = est_frame(&a);
+    ASSERT_EQ(v, paused, "inferred: all sound off -> paused");
+    m4a_engine_cost_song_start(&a, 1u << 1, M4A_PLAYER_BGM);
+    m4a_engine_set_voicegroup(&a, NULL);
+    v = est_frame(&a);
+    ASSERT_EQ(v, paused, "a new voicegroup -> paused, no song state");
+    ASSERT(!a.seqEst.songDeclared && a.seqEst.exist == 0, "a new voicegroup clears the song");
+    m4a_engine_set_voicegroup(&a, voices);
+    m4a_engine_cost_song_start(&a, 1u << 1, M4A_PLAYER_BGM);
+    m4a_engine_cost_song_stop(&a);
+    v = est_frame(&a);
+    ASSERT_EQ(v, paused, "song stop -> paused");
+    m4a_engine_destroy(&a);
 
     /* Publication: the flag and when the estimate is used. */
     float outL[256], outR[256];

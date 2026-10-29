@@ -3,7 +3,7 @@
 the probe (docs/ACCURACY.md, "MIDI-path sequencer estimate").
 
     seq_estimate_diff.py [--probe DIR] [--out DIR] [--jobs N] [--quantize]
-                         [--worst N] [name ...]
+                         [--worst N] [--no-grid] [name ...]
 
 For every probed test (<probe dir>/<name>.txt.frames, default build/probe)
 that has a MIDI -- the micro-tests (test/accuracy/rom/micro/micro.cfg) and
@@ -25,7 +25,21 @@ max |d|, p50 / p90 / p99 of |d|, and p99 of |d| as a percentage of the
 frame's total (the probe's tot).  Then the corpus summary per group (song,
 se, micro) and overall.  --quantize renders both with --quantize (the
 plugin's latch).  --worst N lists the N largest |d| frames per test (vs
-exact).  The cost logs stay in --out (default <probe dir>/seq-estimate[-q]).
+exact).
+
+--no-grid: a plugin's situation instead.  Without --gba-tempo-grid the
+renders play at the MIDI's own tempo and no timing-only sequencer exists,
+so each test is rendered twice with the estimate published: declared (the
+renderer's m4a_engine_cost_song_start with the tracks that have notes, the
+time signatures and the loop points: what porydaw does) and inferred
+(--cost-inferred: none of them, the estimate infers the tracks from their
+first notes and has no bar marks: a host that calls nothing).  Frames do
+not line up with the game's, so per test the distributions of the seq
+term (frames 3 to the probe's last) are compared with the probe's: mean,
+p50 / p90 / p99, max, and W1 = the mean |difference| of the two sorted
+series (the earth mover's distance of the per-frame values).
+
+The cost logs stay in --out (default <probe dir>/seq-estimate[-q]).
 The mixer, HQ mode and the PCM rate do not enter the seq term;
 the probe dir only chooses the frames.
 """
@@ -102,25 +116,29 @@ def midi_test(name, micro, songs, pl):
     return ("se" if song.startswith("se_") else "song"), os.path.join(MIDI_DIR, song + ".mid"), songs[song], pl.get(song)
 
 
-def render(t, nframes, out, estimate, quantize):
+def render(t, nframes, out, estimate, quantize, mode="grid"):
     group, midi, opts, player = t["midi"]
     vg, vol, rev, ext = mid2agb_opts(opts)
     seconds = (nframes + 3) * CPF / CPU_HZ
-    tag = "est" if estimate else "exact"
+    tag = ("est" if estimate else "exact") if mode == "grid" else mode
     log = os.path.join(out, "%s.%s.cost" % (t["name"], tag))
     wav = os.path.join(out, "%s.%s.wav" % (t["name"], tag))
     if os.path.exists(log):
         os.remove(log)
     cmd = [cost_diff.RENDER, PROJECT, vg, "--midi", midi, "--song-volume", str(vol), "--reverb", str(rev),
-           "--gba-tempo-grid", "--output", wav, "--sample-rate", "48000",
+           "--output", wav, "--sample-rate", "48000",
            "--total-duration-seconds", "%.3f" % seconds, "--fadeout", "0", "--tail", "0", "--cost-log", log]
+    if mode == "grid":
+        cmd.append("--gba-tempo-grid")
+    elif mode == "inferred":
+        cmd.append("--cost-inferred")
     if ext:
         cmd.append("--extended-clocks")
     if player and player != "bgm":
         cmd += ["--player", player]
     if quantize:
         cmd.append("--quantize")
-    if estimate:
+    if estimate and mode == "grid":
         cmd.append("--cost-estimate")
     r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if os.path.exists(wav):
@@ -153,9 +171,68 @@ HEAD = "%-22s %6s %8s %7s %6s %5s %5s %6s %7s" % ("test", "frames", "mean", "mea
                                                   "p99", "p99 %tot")
 
 
+def dist(v):
+    s = sorted(v)
+    n = len(s)
+    return {"n": n, "mean": sum(s) / n if n else 0.0, "p50": pct(s, 50), "p90": pct(s, 90),
+            "p99": pct(s, 99), "max": s[-1] if s else 0}
+
+
+def w1(a, b):
+    """Mean |difference| of the sorted series, the shorter one stretched."""
+    a, b = sorted(a), sorted(b)
+    if not a or not b:
+        return 0.0
+    n = max(len(a), len(b))
+    return sum(abs(a[i * len(a) // n] - b[i * len(b) // n]) for i in range(n)) / n
+
+
+def no_grid(tests, out, jobs, quantize):
+    jobsl = [(t, m) for t in tests for m in ("declared", "inferred")]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        logs = list(ex.map(lambda j: render(j[0], max(j[0]["rows"]), out, True, quantize, j[1]), jobsl))
+    logs = {(j[0]["name"], j[1]): l for j, l in zip(jobsl, logs)}
+    print("MIDI-path sequencer estimate without the grid%s: seq distributions, frames 3.. (cycles)" % (
+        " (--quantize)" if quantize else ""))
+    print("%-18s %-9s %6s %8s %6s %6s %6s %6s %7s %7s" % ("test", "", "frames", "mean", "p50", "p90", "p99",
+                                                       "max", "mean d", "W1"))
+    groups = {}
+    for t in tests:
+        n = max(t["rows"])
+        probe = [v["seq"] for k, v in sorted((k, cost_diff.probe_terms(r)) for k, r in t["rows"].items()
+                                             if k >= 3) if v]
+        dp = dist(probe)
+        print("%-18s %-9s %6d %8.0f %6d %6d %6d %6d" % (t["name"], "probe", dp["n"], dp["mean"], dp["p50"],
+                                                        dp["p90"], dp["p99"], dp["max"]))
+        for m in ("declared", "inferred"):
+            l = logs[(t["name"], m)]
+            if not l:
+                print("%-18s %-9s render failed" % ("", m))
+                continue
+            e = cost_diff.read_cost_log(l)
+            est = [e[k]["seq"] for k in sorted(e) if 3 <= k <= n]
+            de = dist(est)
+            md = de["mean"] - dp["mean"]
+            wd = w1(est, probe)
+            print("%-18s %-9s %6d %8.0f %6d %6d %6d %6d %+7.1f %7.1f" % ("", m, de["n"], de["mean"], de["p50"],
+                                                                      de["p90"], de["p99"], de["max"], md, wd))
+            for grp in (t["midi"][0], "all"):
+                g = groups.setdefault((grp, m), {"md": [], "w1": [], "rel": []})
+                g["md"].append(md); g["w1"].append(wd); g["rel"].append(100.0 * md / dp["mean"] if dp["mean"] else 0)
+    print("summary (per test: mean of the means' difference, of |its %|, of W1):")
+    for grp in ("song", "se", "micro", "all"):
+        for m in ("declared", "inferred"):
+            if (grp, m) in groups:
+                g = groups[(grp, m)]
+                k = len(g["md"])
+                print("  %-6s %-9s tests %2d  mean d %+7.1f  |mean d| %5.2f %%  W1 %6.1f" % (
+                    grp, m, k, sum(g["md"]) / k, sum(abs(x) for x in g["rel"]) / k, sum(g["w1"]) / k))
+    return 0
+
+
 def main(argv):
     probe = os.path.join(ROOT, "build/probe"); out = None; jobs = os.cpu_count() or 4
-    quantize = False; worst = 0; names = []
+    quantize = False; worst = 0; names = []; nogrid = False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -164,9 +241,10 @@ def main(argv):
         elif a == "--jobs": jobs = int(argv[i + 1]); i += 2
         elif a == "--worst": worst = int(argv[i + 1]); i += 2
         elif a == "--quantize": quantize = True; i += 1
+        elif a == "--no-grid": nogrid = True; i += 1
         elif a in ("-h", "--help"): print(__doc__); return 0
         else: names.append(a); i += 1
-    out = out or os.path.join(probe, "seq-estimate" + ("-q" if quantize else ""))
+    out = out or os.path.join(probe, "seq-estimate" + ("-nogrid" if nogrid else "") + ("-q" if quantize else ""))
     os.makedirs(out, exist_ok=True)
     micro = parse_cfg(os.path.join(MICRO_DIR, "micro.cfg"))
     songs = parse_cfg(os.path.join(MIDI_DIR, "midi.cfg"))
@@ -181,6 +259,8 @@ def main(argv):
         m = midi_test(name, micro, songs, pl)
         if m:
             tests.append({"name": name, "midi": m, "rows": cost_diff.read_frames(os.path.join(probe, f))})
+    if nogrid:
+        return no_grid(tests, out, jobs, quantize)
     jobsl = [(t, est) for t in tests for est in (True, False)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         logs = list(ex.map(lambda j: render(j[0], max(j[0]["rows"]), out, j[1], quantize), jobsl))

@@ -12,6 +12,12 @@
 static inline bool m4a_est_active(const M4AEngine *e) { return !e->externalSequencer; }
 
 void m4a_est_init(M4AEngine *e);
+/* A new voicegroup (a new song): the paused player, no song state. */
+void m4a_est_reset(M4AEngine *e);
+/* m4a_engine_all_sound_off: the channels are gone.  Inferred (no declared
+ * song) the estimate resets to the paused player; a declared song keeps its
+ * tracks until m4a_engine_cost_song_stop. */
+void m4a_est_sound_off(M4AEngine *e);
 /* ply_note's cost for a note-on about to be applied (after TrkVolPitSet,
  * before the channel is taken); voice is the resolved voice or NULL. */
 void m4a_est_note_on(M4AEngine *e, int track, uint8_t key, uint8_t velocity, const ToneData *voice);

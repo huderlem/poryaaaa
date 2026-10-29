@@ -435,8 +435,10 @@ typedef struct {
  * events the engine applied, charged with the M4A_CYC_* constants.  Engine
  * state; a host only calls the m4a_engine_cost_* functions below. */
 #define M4A_EST_CHANNELS (TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS)
+#define M4A_EST_TICKS 8              /* ticks of one frame the estimate tells apart */
 typedef struct {
     int32_t cycles;          /* MPlayMain's body since the last SoundMain (head / exit at publication) */
+    int32_t held;            /* commands applied in frames without a tick: run at the next tick */
     uint32_t clock;          /* tempo ticks completed (the engine's tempoC / 150 accumulator) */
     uint8_t tickInFrame;     /* m4a_engine_tick_boundary calls since the last SoundMain */
     bool songDeclared;       /* m4a_engine_cost_song_start ran: the existing tracks are the host's */
@@ -444,37 +446,41 @@ typedef struct {
     bool allDone;            /* this frame's tick found no track (TICK_ALL_DONE, then PAUSE) */
     uint8_t slots;           /* the player's track count (MusicPlayerInfo.trackCount) */
     int16_t mpEntry, mpHead, mpPaused, mpExit;
+    uint16_t declared;       /* the song's tracks (declared, or joined by a note) */
     uint16_t exist;          /* MPT_FLG_EXIST per engine track */
     uint16_t startPending;   /* MPT_FLG_START: the START init at the next tick */
-    uint16_t ended;          /* FINE ran this frame (EXIST for this frame's tick pass only) */
+    uint16_t ended;          /* FINE ran in this frame, on tick endTick[] */
     uint16_t firstNote;      /* a note has been seen since the start (mid2agb's implicit VOL) */
     uint16_t volSeen;        /* a VOL came before it */
     uint16_t barLen;         /* mid2agb's WholeNoteMark period in ticks (0: none) */
     uint32_t barStart;       /* the clock of the last time signature's mark */
+    uint16_t loopBarLen;     /* the bar marks at the loop start ('['), restored by the GOTO */
+    uint16_t loopBarPhase;
+    bool loopSaved;
+    uint32_t tempoClock;     /* the tick of the last TEMPO charged (UINT32_MAX: none) */
     /* per track: mid2agb's compression state and the W## bookkeeping */
     uint8_t lastOp[MAX_TRACKS];      /* s_lastOpName as the command byte (0: none) */
+    uint8_t lastOpKey[MAX_TRACKS];   /* key + 1 of the note whose (predicted) command is lastOp, 0: none */
     uint8_t lastKey[MAX_TRACKS];     /* s_lastNote (0xFF: none) */
     uint8_t lastVel[MAX_TRACKS];     /* s_lastVelocity (0xFF: none) */
     uint8_t extraChg[MAX_TRACKS];    /* VOLCHG / PITCHG from commands the engine never sees (KEYSH, the implicit VOL) */
-    uint8_t cmdTicks[MAX_TRACKS];    /* the frame's ticks (bit = tick index) the track had an event on */
+    uint8_t cmdTicks[MAX_TRACKS];    /* the ticks (bit = tick index in the frame) the track had an event on */
+    uint8_t endTick[MAX_TRACKS];     /* the tick index of this frame's FINE */
     bool keep[MAX_TRACKS];           /* s_keepLastOpName: a wait since the last note */
     uint32_t lastEvClock[MAX_TRACKS];
     uint32_t lastWClock[MAX_TRACKS];
     uint16_t lastDur[MAX_TRACKS];    /* the last finished note's length in ticks (0: none) */
-    uint8_t lastOpKey[MAX_TRACKS];   /* key + 1 of the note whose (predicted) command is lastOp, 0: none */
     uint32_t keyOn[MAX_TRACKS][128]; /* the clock of each key's note-on (UINT32_MAX: none): its length at the note-off */
-    uint16_t loopBarLen;             /* the bar marks at the loop start ('['), restored by the GOTO */
-    uint16_t loopBarPhase;
-    bool loopSaved;
-    /* channels a note of this frame's first tick took from the track's chain
-     * after the walk had met them (charged with that walk) */
-    uint8_t ghostWalked[MAX_TRACKS];
-    int16_t ghostCycles[MAX_TRACKS];
+    /* the walk steps of channels a command took from a chain after the
+     * owner's walk of that tick had met them, per tick of the frame */
+    uint8_t ghostWalked[MAX_TRACKS][M4A_EST_TICKS];
+    int16_t ghostCycles[MAX_TRACKS][M4A_EST_TICKS];
     /* per channel handle (m4a_engine_note_on's): the track chains */
     uint8_t owner[M4A_EST_CHANNELS]; /* track + 1 while chained */
-    uint8_t chFlags[M4A_EST_CHANNELS];
+    bool tie[M4A_EST_CHANNELS];      /* a TIE (predicted, or ended by EOT): gate 0 */
     uint32_t chSeq[M4A_EST_CHANNELS];
-    uint32_t chStart[M4A_EST_CHANNELS];
+    uint32_t chStart[M4A_EST_CHANNELS];  /* the tick of its note (walked from the next one) */
+    uint32_t chExpire[M4A_EST_CHANNELS]; /* the tick its N## gate expires (UINT32_MAX: not known) */
     uint32_t seqCounter;
 } M4ASeqEstimate;
 /* The budgets a host shows the cost against: the VBlank window (68 lines
@@ -1449,7 +1455,17 @@ void m4a_engine_start_song_tempo(M4AEngine *engine);
  * mid2agb's bar marks restart there, every clocksPerBar ticks
  * (96 * numerator * clocksPerBeat / 2^denominator; 0 = no marks).
  *
- * Call them where the events go (the thread that drives the engine). */
+ * Without them (the inferred form) m4a_engine_all_sound_off ends the
+ * inferred song (the paused player again); in both forms a new voicegroup
+ * and m4a_engine_cost_song_stop reset the estimate, and all sound off drops
+ * its chains.  m4a_engine_set_tempo_bpm with a changed tempo while a song
+ * plays is a TEMPO command.  A host should declare its song (song_start /
+ * time signatures / loop points / song_stop) for the lead-in, the bar
+ * marks and the GOTOs; events of a frame without a tempo tick count on the
+ * next tick.
+ *
+ * Call them where the events go (the thread that drives the engine,
+ * between m4a_engine_process calls). */
 void m4a_engine_cost_song_start(M4AEngine *engine, uint32_t trackMask, int player);
 void m4a_engine_cost_song_stop(M4AEngine *engine);
 void m4a_engine_cost_time_signature(M4AEngine *engine, uint32_t clocksPerBar);

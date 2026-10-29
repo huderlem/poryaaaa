@@ -420,6 +420,10 @@ static int cmp_raw_events(const void *a, const void *b)
     const RawMidiEvent *eb = (const RawMidiEvent *)b;
     if (ea->tick < eb->tick) return -1;
     if (ea->tick > eb->tick) return  1;
+    /* The loop markers (the cost estimate's label / GOTO) before every
+     * other event of their tick, as mid2agb sorts LoopBegin / LoopEnd. */
+    bool loopA = ea->type == RENDER_EVT_LOOP, loopB = eb->type == RENDER_EVT_LOOP;
+    if (loopA != loopB) return loopA ? -1 : 1;
     /* A track end (mid2agb's FINE) after its own MTrk's events of the tick
      * and before the next MTrk's: MPlayMain runs each track's commands,
      * FINE included, before the next track's.  (origIndex rises with the
@@ -939,6 +943,9 @@ static void print_usage(const char *prog)
         "  --cost-estimate             --midi only: publish the MIDI-path sequencer estimate\n"
         "                              even under --gba-tempo-grid (whose timing-only sequencer\n"
         "                              still places the PSG writes), to compare the two\n"
+        "  --cost-inferred             --midi only: leave the estimate to infer the song (no\n"
+        "                              song start, time signatures or loop points: a plugin's\n"
+        "                              situation)\n"
         "  --seq-log <file>            log each frame's modeled CgbSound entry cycle\n"
         "\n"
         "Loop options (when MIDI contains '[' / ']' text events):\n"
@@ -1600,7 +1607,7 @@ static uint64_t grid_expand_limit(uint64_t totalSamples, const TempoEvent *tempo
  * (--gba-tempo-grid): a TEMPO the ROM plays reaches the engine as the
  * grid's tempoI from the next frame's add, the others not at all. */
 static void dispatch_event(M4AEngine *engine, const RenderEvent *ev,
-                            int useTrackIndex, uint32_t gridClocksPerBeat)
+                            int useTrackIndex, uint32_t gridClocksPerBeat, uint32_t costClocksPerBeat)
 {
     /* For Type 1 MIDIs, use the SMF track number as the engine track index
      * so that tracks sharing the same MIDI channel get separate engine tracks.
@@ -1633,13 +1640,14 @@ static void dispatch_event(M4AEngine *engine, const RenderEvent *ev,
     case RENDER_EVT_TRACK_END: /* mid2agb's FINE */
         m4a_engine_track_end(engine, trackIdx);
         break;
-    case RENDER_EVT_LOOP:      /* mid2agb's loop label / GOTO, for the cost estimate */
-        m4a_engine_cost_loop_point(engine, ev->data0 != 0);
+    case RENDER_EVT_LOOP:      /* mid2agb's loop label / GOTO, for the cost estimate (declared) */
+        if (costClocksPerBeat)
+            m4a_engine_cost_loop_point(engine, ev->data0 != 0);
         break;
-    case RENDER_EVT_TIMESIG:   /* mid2agb's bar marks (agb clocks), for the cost estimate; on the grid only */
-        if (gridClocksPerBeat && ev->data1 < 16)
+    case RENDER_EVT_TIMESIG:   /* mid2agb's bar marks (agb clocks), for the cost estimate (declared) */
+        if (costClocksPerBeat && ev->data1 < 16)
             m4a_engine_cost_time_signature(engine,
-                                           96u * ev->data0 * (gridClocksPerBeat / 24) / (1u << ev->data1));
+                                           96u * ev->data0 * (costClocksPerBeat / 24) / (1u << ev->data1));
         break;
     case 0xE: /* Pitch Bend — convert MIDI 14-bit unsigned to signed -8192..+8191 */
     {
@@ -1701,6 +1709,7 @@ int main(int argc, char *argv[])
     bool        pwm           = false;
     bool        quantize      = false;  /* --quantize: the MIDI event latch */
     bool        costEstimate  = false;  /* --cost-estimate: publish the MIDI-path sequencer estimate */
+    bool        costInferred  = false;  /* --cost-inferred: no song start / time signatures / loop points for it */
     int         gbaStartDelayOpt = -1;  /* --gba-start-delay 1 / --no-gba-start-delay 0 / -1: follow the grid */
     bool        gbaStartDelay = false;  /* MIDI time 0 at the first song tick (default under --gba-tempo-grid) */
     bool        gbaTempoGrid  = false;  /* --gba-tempo-grid: events on MPlayMain's tempoC / 150 ticks */
@@ -1800,6 +1809,8 @@ int main(int argc, char *argv[])
             quantize = true;
         } else if (strcmp(argv[i], "--cost-estimate") == 0) {
             costEstimate = true;
+        } else if (strcmp(argv[i], "--cost-inferred") == 0) {
+            costInferred = true;
         } else if (strcmp(argv[i], "--gba-start-delay") == 0) {
             gbaStartDelayOpt = 1;
         } else if (strcmp(argv[i], "--no-gba-start-delay") == 0) {
@@ -2453,7 +2464,8 @@ oom:
         if (ev->type == 0x9 && ev->data1 > 0 && t < MAX_TRACKS)
             costTrackMask |= 1u << t;
     }
-    bool costSongStarted = false;
+    bool costSongStarted = costInferred;
+    const uint32_t costClocksPerBeat = costInferred ? 0 : (extendedClocks ? 48 : 24);
 
 
     /* ---- Allocate output buffers ---- */
@@ -2500,7 +2512,8 @@ oom:
                 samplePos = midiOrigin;
             }
             m4a_engine_start_song_tempo(&engine);
-            m4a_engine_cost_song_start(&engine, costTrackMask, player);
+            if (!costInferred)
+                m4a_engine_cost_song_start(&engine, costTrackMask, player);
             costSongStarted = true;
             if (timingSong)
                 m4a_sequencer_start(&timingSeq, timingSong);   /* MPlayStart, as the ROM's frame 2 */
@@ -2527,7 +2540,7 @@ oom:
         }
         for (; boundariesSent < ev->gridTickInFrame; boundariesSent++)
             m4a_engine_tick_boundary(&engine);
-        dispatch_event(&engine, ev, useTrackIndex, gridClocksPerBeat);
+        dispatch_event(&engine, ev, useTrackIndex, gridClocksPerBeat, costClocksPerBeat);
     }
 
     /* Render remaining frames (tail / fadeout section) */
