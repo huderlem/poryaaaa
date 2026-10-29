@@ -130,7 +130,13 @@ static struct mCore* gCore;
 static FILE* gOut;
 static long gFrames;
 struct Sym { uint32_t addr; const char* name; };
-static struct Sym gSyms[256]; static int gNumSyms;
+#define MAX_SYMS 512
+static struct Sym gSyms[MAX_SYMS]; static int gNumSyms;
+/* The frame of the running m4aSoundMain and its line-160 cycle: SoundMain's,
+ * m4aSoundMain's and CgbSound's returns are charged to it even when they land
+ * past the frame window (a SoundMain longer than VBlank), so RET / EXIT / CR
+ * can exceed the window instead of falling into the next frame's record. */
+static int gSmFrame = -1; static int32_t gSmLine160;
 static int gHqMixer;   /* HQ mixer labels present: log sp at SoundMainRAM_Buffer, the registers at C_* / F_* */
 static uint32_t gDma1Sad, gDma2Sad;   /* REG_DMA1SAD / REG_DMA2SAD as SoundInit wrote them: B = A + PCM_DMA_BUF_SIZE */
 
@@ -368,12 +374,18 @@ static void entered(struct mDebugger* d, enum mDebuggerEntryReason reason, struc
 				if (fr->mplayMainCalls == 0) { fr->mplayMain = rel; fr->trackCount = n; fr->tracksExist = exist; fr->tracksStart = start; fr->tempoC = tempoC; }
 				fr->mplayMainCalls++;
 			}
-		} else if (!strcmp(name, "m4aSoundMain")) { if (fr) fr->m4aSoundMain = rel; }
+		} else if (!strcmp(name, "m4aSoundMain")) {
+			if (fr) {
+				fr->m4aSoundMain = rel;
+				gSmFrame = (int) (fr - gFrameRecs);
+				gSmLine160 = t - rel;
+			}
+		}
 		else if (!strcmp(name, "SoundMain")) { if (fr) fr->soundMain = rel; }
-		else if (!strcmp(name, "SoundMain_return")) { if (fr) fr->smReturn = rel; }
-		else if (!strcmp(name, "m4aSoundMain_return")) { if (fr) fr->smExit = rel; }
-		else if (!strcmp(name, "SoundMain_cgbret")) { if (fr) fr->cgbReturn = rel; }
-		else if (!strcmp(name, "CgbSound_next")) { if (fr) fr->cgbLastNext = rel; }
+		else if (!strcmp(name, "SoundMain_return")) { if (gSmFrame > 0) gFrameRecs[gSmFrame].smReturn = t - gSmLine160; }
+		else if (!strcmp(name, "m4aSoundMain_return")) { if (gSmFrame > 0) gFrameRecs[gSmFrame].smExit = t - gSmLine160; }
+		else if (!strcmp(name, "SoundMain_cgbret")) { if (gSmFrame > 0) gFrameRecs[gSmFrame].cgbReturn = t - gSmLine160; }
+		else if (!strcmp(name, "CgbSound_next")) { if (gSmFrame > 0) gFrameRecs[gSmFrame].cgbLastNext = t - gSmLine160; }
 		else if (!strcmp(name, "m4aSoundVSync")) { if (fr) fr->vsync = rel + LINE160 - LINE150; }
 		else if (!strncmp(name, "ply_", 4)) {
 			if (fr) { fr->plyAll++; if (si >= 0 && si < 256) fr->plyCount[si]++; if (!strcmp(name, "ply_note")) fr->plyNote++; }
@@ -422,7 +434,7 @@ static uint32_t blReturn(const uint8_t* rom, size_t size, uint32_t from, uint32_
 		uint16_t h = rom[o] | rom[o + 1] << 8, l = rom[o + 2] | rom[o + 3] << 8;
 		if ((h & 0xF800) != 0xF000 || (l & 0xF800) != 0xF800) continue;
 		int32_t hi = h & 0x7FF; if (hi & 0x400) hi -= 0x800;
-		uint32_t target = a + 4 + (uint32_t) (hi << 12) + ((uint32_t) (l & 0x7FF) << 1);
+		uint32_t target = a + 4 + ((uint32_t) hi << 12) + ((uint32_t) (l & 0x7FF) << 1);
 		if (!to || target == to) return a + 4;
 	}
 	return 0;
@@ -519,7 +531,8 @@ int main(int argc, char** argv) {
 				for (int i = 0; !take && want[i]; ++i) if (!strcmp(name, want[i])) take = 1;
 				if (!strcmp(name, "gSoundInfo")) ADDR_gSoundInfo = (uint32_t) a;
 				if (!strcmp(name, playerSym)) { ADDR_gMPlayInfo_BGM = (uint32_t) (a + playerIndex * 0x40); playerFound = 1; }
-				if (take && gNumSyms < 256) {
+				if (take && gNumSyms >= MAX_SYMS) { fprintf(stderr, "error: more than %d symbols to break on in %s\n", MAX_SYMS, argv[6]); return 1; }
+				if (take) {
 					int dup = 0;
 					for (int i = 0; i < gNumSyms; ++i) if (!strcmp(gSyms[i].name, name)) dup = 1;
 					if (!dup) { gSyms[gNumSyms].addr = a; gSyms[gNumSyms].name = strdup(name); gNumSyms++; }
@@ -561,11 +574,24 @@ int main(int argc, char** argv) {
 			struct { uint32_t addr; const char* name; } ex[3] = {
 				{ aM4a && aSM ? blReturn(romCopy, n, aM4a, 32, aSM) : 0, "SoundMain_return" },
 				{ aVBlank && aM4a ? blReturn(romCopy, n, aVBlank, 64, aM4a) : 0, "m4aSoundMain_return" },
-				{ aSM4 ? blReturn(romCopy, n, aSM4, 16, 0) : 0, "SoundMain_cgbret" },
+				/* the first `bl` after SoundMain_4 (nm listing), else SoundMain's second `bl`
+				 * (a map has no local labels): MPlayMain's call, then CgbSound's */
+				{ aSM4 ? blReturn(romCopy, n, aSM4, 16, 0)
+				       : aSM ? blReturn(romCopy, n, blReturn(romCopy, n, aSM, 0x80, 0), 0x40, 0) : 0, "SoundMain_cgbret" },
 			};
 			for (int i = 0; i < 3; ++i) {
-				if (!ex[i].addr) { fprintf(stderr, "note: no %s breakpoint (its `bl` was not found)\n", ex[i].name); continue; }
-				if (gNumSyms < 256) { gSyms[gNumSyms].addr = ex[i].addr; gSyms[gNumSyms].name = ex[i].name; gNumSyms++; }
+				if (!ex[i].addr || gNumSyms >= MAX_SYMS) {
+					/* without it the .frames costs are all -1: fail loudly, also in the .frames header */
+					char msg[256], fpath[1024];
+					snprintf(msg, sizeof msg, "error: no %s breakpoint (%s)", ex[i].name,
+					         ex[i].addr ? "symbol table full" : "its `bl` was not found in the ROM");
+					fprintf(stderr, "%s\n", msg);
+					snprintf(fpath, sizeof fpath, "%s.frames", argv[2]);
+					FILE* fe = fopen(fpath, "w");
+					if (fe) { fprintf(fe, "# %s\n", msg); fclose(fe); }
+					return 2;
+				}
+				gSyms[gNumSyms].addr = ex[i].addr; gSyms[gNumSyms].name = ex[i].name; gNumSyms++;
 			}
 		}
 		if (!playerFound && argc > 7) { fprintf(stderr, "player symbol %s not in %s\n", argv[7], argv[6]); return 1; }

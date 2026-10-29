@@ -609,7 +609,14 @@ mGBA 0.10.5, both ROMs at 13379 and 21024 Hz):
   derived `mix = EXIT − RAM`, `tot = EXIT − sm`, `tail = CR − ` channel 4's
   `CgbSound_next` breakpoint and `s2r = RAM − CR`.  A frame's terms for
   `tools/cost_diff.py`: seq = CGB − sm, cgb = RAM − CGB, mixer = EXIT − RAM;
-  they sum to `tot`.  The new breakpoints change nothing: with them, all 81
+  they sum to `tot`.  The returns (and channel 4's `CgbSound_next`) are
+  charged to the frame of the m4aSoundMain they return from, relative to
+  that frame's line 160, so a SoundMain longer than VBlank keeps its exit
+  (RET / EXIT past the frame window) instead of falling into the next
+  frame's record.  The frame counter is the one `--pcm-log` and the
+  engine's `--cost-log` use: frame k starts at cycle 124773 + (k − 1) ·
+  280896, the first SoundMain is frame 2, `--pcm-log`'s `f 3` is probe
+  frame 3.  The new breakpoints change nothing: with them, all 81
   vanilla logs are the earlier probe's line for line once their own lines
   are removed (raw log, `.events` and every older `.frames` column).
 - **Fixed segments.**  m4aSoundMain's epilogue (`RET` → `EXIT`) 10 (28
@@ -624,6 +631,9 @@ mGBA 0.10.5, both ROMs at 13379 and 21024 Hz):
   `pcmDmaCounter` is 1 (the `bls SoundMain_5` is taken and the multiply
   skipped; one frame in `pcmDmaPeriod`), 77 / 81 with the stall.  The HQ
   mixer's `C_downsampler_return` → `RET` is 39 (57 with the stall).
+- **Ownership.**  The engine's `mixer` term owns `RET` → `EXIT` (10; 28
+  with the stall) and, in HQ mode, `C_downsampler_return` → `RET` (39;
+  57), so that total = seq + cgb + mixer = `EXIT` − m4aSoundMain entry.
 - **Mixer floor** (no DirectSound channel; `mix`, so the 10-cycle epilogue
   is in it):
 
@@ -639,11 +649,20 @@ mGBA 0.10.5, both ROMs at 13379 and 21024 Hz):
   (to `C_downsampler_return`) plus 39 + 10, and does not move with reverb.
   A frame the FIFO stall misses reads 18 less (HQ 21024's minimum, 12020).
 - **Range over the corpus** (81 logs, 85 on HQ with the `synth_*` rows;
-  frame 2, the idle SoundMain before a test starts, is the minimum):
-  vanilla 13379 498 – 53841 (`cry_over_bgm` frame 87: five BGM channels
-  and a DPCM cry), HQ 13379 7732 – 39923 (`littleroot` frame 702),
-  vanilla 21024 658 – 72801 (`cry_over_bgm` frame 95), HQ 21024
-  12038 – 57133 (`littleroot` frame 702).
+  frame 2, the idle SoundMain before a test starts, is the minimum).
+  `mix`: vanilla 13379 498 – 53841 (`cry_over_bgm` frame 87: five BGM
+  channels and a DPCM cry), HQ 13379 7732 – 39923 (`littleroot` frame
+  702), vanilla 21024 658 – 72801 (`cry_over_bgm` frame 95), HQ 21024
+  12020 – 57133 (`littleroot` frame 702).  `tot` (the whole
+  m4aSoundMain): vanilla 13379 1626 – 64790, HQ 13379 8860 – 52657,
+  HQ 21024 13166 – 65146 (all three maxima `mt_chimney` frame 3, the song
+  start's sequencer), vanilla 21024 1786 – **87254**.
+- **Past the VBlank window** (83776, the CPU meter's 100 %): only
+  vanilla at 21024 Hz, only `rg_vs_trainer` (the FRLG drumset: up to five
+  DirectSound channels with reverb), 11 frames: 51, 72, 92, 98, 103, 113,
+  119, 134, 140, 145, 160, `tot` 83938 – 87254 (frame 92, 104 %; its mixer
+  71734).  Every other log stays inside VBlank; none comes near the frame
+  (280896).
 - **First look per channel** (`cost_diff.py --summarize`: a least-squares
   `mix = a + b · n` over frames 3.., n = the channels `--pcm-log` lists
   after the frame; b at the two rates split as b = per channel-frame +

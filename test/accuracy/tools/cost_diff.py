@@ -17,13 +17,19 @@ with n = 0 from frame 3 on: frame 2 is the idle SoundMain before the test
 starts, the reverb not yet set), and a least-squares fit mix = a + b * n over
 frames 3.. with its RMS and largest residual and b per output sample, and
 the histogram n:frames.  Then the
-corpus: mix min / max over all tests, the CgbSound tail (CR - the last
+corpus: mix min / max over all tests, tot (the whole m4aSoundMain) min / max
+and every frame over the VBlank window (83776), the CgbSound tail (CR - the last
 CgbSound_next) and SoundMain_4 -> SoundMainRAM (RAM - CR) histograms.
 --render runs poryaaaa_render for every test that has no .pcm.log yet (the
 test's song / cry arguments as claim_check.sh resolves them, --hq-mixer and
 --pcm-mix-rate from the probe dir: HQ when its syms.nm has the C_ labels, the
 rate from a -<hz> suffix; --hq / --pcm-rate override).  A test with no
 pcm log (cry_third_*: poryaaaa has no third cry) gets min / max / mean only.
+
+Frames: probe frame k starts at cycle 124773 + (k - 1) * 280896 (the first
+SoundMain is frame 2); `--pcm-log`'s `f k` and `--cost-log`'s frame column
+use the same counter (pcm-log `f 3` is probe frame 3).  A SoundMain longer
+than VBlank keeps its returns on its own frame (RET / EXIT past the window).
 
 Diff mode (step 2's acceptance): the cost log is poryaaaa_render --cost-log,
 one line per engine frame `frame seq cgb mixer total`.  The probe's terms
@@ -49,6 +55,7 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 FRAME_RE = re.compile(r"^frame\s+(\d+) \| (.*)$")
 FIELD_RE = re.compile(r"\b(sm|SM|MP|CGB|RAM|RET|EXIT|CR|mix|tot|tail|s2r)\s+(-?\d+)")
 MISSING = -999999
+VBLANK = 68 * 1232      # the VBlank window, 83776 cycles
 
 
 def read_frames(path):
@@ -65,7 +72,12 @@ def read_frames(path):
 def probe_terms(r):
     """seq, cgb, mixer, total of a probe frame, or None when an end is missing."""
     need = ("sm", "CGB", "RAM", "EXIT")
-    if any(r.get(k, MISSING) <= MISSING for k in need):
+    v = [r.get(k, MISSING) for k in need]
+    # only a missing value (-999999) rejects a frame; the probe charges the
+    # returns to their own SoundMain's frame, so an EXIT past the frame window
+    # (a SoundMain longer than VBlank) is a real value, and the order check
+    # only guards against a malformed line
+    if any(x <= MISSING for x in v) or not v[0] <= v[1] <= v[2] <= v[3]:
         return None
     return {"seq": r["CGB"] - r["sm"], "cgb": r["RAM"] - r["CGB"],
             "mixer": r["EXIT"] - r["RAM"], "total": r["EXIT"] - r["sm"]}
@@ -206,7 +218,6 @@ def summarize(argv):
     print("%-34s %5s %6s %6s %7s %6s | %8s %7s %6s %6s %6s  n" % (
         "test", "frm", "min", "max", "mean", "floor", "a", "b", "b/smp", "rms", "maxres"))
     allmix = []; tails = collections.Counter(); s2rs = collections.Counter()
-    floors = []
     for t in tests:
         rows = read_frames(os.path.join(d, t + ".txt.frames"))
         mix = {k: r["mix"] for k, r in rows.items() if r.get("mix", -1) >= 0}
@@ -230,9 +241,10 @@ def summarize(argv):
             pts = [(nch[k], v) for k, v in mix.items() if k in nch and k >= 3]
             fl = [v for n, v in pts if n == 0]
             floor = sum(fl) / len(fl) if fl else None
-            if fl:
-                floors += fl
             f = fit(pts)
+            if f is None:
+                print(line + " %6s |  (no frames in the pcm log)" % "-")
+                continue
             hist = collections.Counter(n for n, _ in pts)
             line += " %6s | %8.1f %7.1f %6.2f %6.1f %6.0f  %s" % (
                 "%.0f" % floor if floor is not None else "-", f[0], f[1], f[1] / spf, f[2], f[3],
@@ -243,8 +255,13 @@ def summarize(argv):
     if allmix:
         lo = min(allmix); hi = max(allmix)
         print("corpus: mix min %d (%s f%d) max %d (%s f%d)" % (lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]))
-    if floors:
-        print("no-channel floor: %d frames, min %d max %d mean %.1f" % (len(floors), min(floors), max(floors), sum(floors) / len(floors)))
+    tots = [(r["tot"], t, k) for t in tests for k, r in read_frames(os.path.join(d, t + ".txt.frames")).items()
+            if r.get("tot", -1) >= 0]
+    if tots:
+        over = sorted((t, k, v) for v, t, k in tots if v > VBLANK)
+        print("corpus: tot min %d max %d (%s f%d); %d frames over the VBlank window (%d)%s" % (
+            min(tots)[0], max(tots)[0], max(tots)[1], max(tots)[2], len(over), VBLANK,
+            ": " + ", ".join("%s f%d %d" % o for o in over) if over else ""))
     print("tail (CR - last CgbSound_next):", " ".join("%d:%d" % kv for kv in sorted(tails.items())))
     print("s2r  (RAM - CR):               ", " ".join("%d:%d" % kv for kv in sorted(s2rs.items())))
 
