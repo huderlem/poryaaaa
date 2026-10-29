@@ -779,11 +779,12 @@ The test ROM's `WAITCNT` is the game's (WS0 3/1, prefetch on).
 | `UNK2_CALL`, `UNK2_HIT`, `UNK2_DECODE` (+ m), `UNK2_UNMAPPED` | the `bl SoundMainRAM_Unk2`; SoundMainRAM_Unk2 → `_081DD594` → its `pop {…, pc}` with the block held; SoundMainRAM_Unk2 → `_081DD568`/`_081DD57C` (32 × 14 + 31 × 16 − 2) → `_081DD594` → the `pop`, 46 + 17 around the loop; a block before the sample's start (REV): its address wraps to region 0x8C, which mgba's `GBALoad8` serves from its `default:` case (no waitstate), so the 33 byte loads cost 3 instead of 6 | 3, 32, 1005, −99 |
 | `SYNTH_SETUP`, `SYNTH_SAMPLE` | poryaaaa's Golden Sun synths under the vanilla accumulate (no ROM routine): *est.* as the interpolating loop without its fetch | 20, 16 |
 
-Two values came from the probe rather than the first count, both
-mechanisms of mgba rather than fits: the stall placement at the final
-`bx r0` (18 cycles in 4 frames at 13379, 12 at 21024) and the unmapped
-decode (99 in `cry_bulbasaur_reverse` frame 49 and the two
-`cry_pidgey_echo_start` rows).
+Three values came from the probe rather than the first count (the table's
+"measured" and the unmapped row), all mechanisms of mgba rather than fits:
+`EPILOGUE`, m4aSoundMain's tail after `RET`; `EXIT_BX`, the stall placement
+at the final `bx r0` (18 cycles in 4 frames at 13379, 12 at 21024); and
+`UNK2_UNMAPPED`, the unmapped decode (99 in `cry_bulbasaur_reverse` frame
+49 and the two `cry_pidgey_echo_start` rows).
 
 **Gate** (`cost_diff.py --corpus`, every frame's total within 2 % or 300
 cycles; the cost log against the probe's `tot`):

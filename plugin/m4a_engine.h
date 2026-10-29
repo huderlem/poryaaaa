@@ -558,6 +558,12 @@ struct M4AEngine {
      * 2).  A property of the game's call depth at the interrupt; the test
      * ROM's measured value (0x03007DD0, a 1220-byte budget) is the default. */
     uint32_t hqStackSp;
+    /* The HQ pre-cached paths' decode buffer ([sp - r8, sp) on the GBA),
+     * per engine so engines on different threads never share it; its bytes
+     * persist across frames as the stack's do.  0x700 = 0x03008000 - the
+     * HQ mixer's stack boundary, the largest budget any sp in IWRAM allows. */
+#define M4A_HQ_PRECACHE_STACK_MAX 0x700
+    uint8_t hqPrecacheStack[M4A_HQ_PRECACHE_STACK_MAX];
     /* The HQ fast loop's previous_fast_code (counting only: which of the
      * three step blocks is pasted into C_fast_mixing_loop; 0 none, as after
      * m4aSoundInit's copy): a different block costs the paste

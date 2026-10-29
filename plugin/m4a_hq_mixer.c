@@ -410,9 +410,11 @@ static bool fix_path(M4AEngine *engine, M4APCMChannel *r4, uint32_t *r5, int32_t
 #define HQ_BLK          64                /* BDPCM_BLK_SIZE */
 #define HQ_BLK_STRIDE   0x21              /* BDPCM_BLK_STRIDE */
 #define HQ_STACK_BOUND  0x03007900u       /* stack_boundary_literal */
-#define HQ_STACK_MAX    0x700             /* 0x03008000 - HQ_STACK_BOUND: the largest budget
-                                           * any sp in IWRAM allows, so the host cap never
-                                           * skips a frame the ROM's check would mix */
+_Static_assert(0x03008000u - HQ_STACK_BOUND == M4A_HQ_PRECACHE_STACK_MAX,
+               "the decode buffer spans the stack boundary to the top of IWRAM");
+#define HQ_STACK_MAX    M4A_HQ_PRECACHE_STACK_MAX /* 0x03008000 - HQ_STACK_BOUND: the largest
+                                           * budget any sp in IWRAM allows, so the host cap
+                                           * never skips a frame the ROM's check would mix */
 
 /* delta_lookup_table as F_decode_compressed indexes it.  The first pair's
  * delta is `ldrb r1, [r12, r3]` with the WHOLE second byte of the block,
@@ -560,7 +562,7 @@ static bool precache_path(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf, i
                           uint32_t r11, int32_t r0, uint32_t type)
 {
     const WaveData *wav = r4->wav;
-    static uint8_t stack[HQ_STACK_MAX];
+    uint8_t *stack = engine->hqPrecacheStack; /* per engine: engines may run on other threads */
     uint32_t spCheck = engine->hqStackSp - 12;           /* after stmfd sp!, {r4, r9, r12} */
     int32_t lr, lo, r8b, srcOff, finalIdx;
     int32_t newCount = r2 - r0;                          /* subs r0, r2, r0 */
