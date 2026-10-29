@@ -710,8 +710,11 @@ struct M4AEngine {
      * (porydaw docs/cpu-meter D8). */
     M4AFrameCost frameCost;
     M4AFrameCost frameCostMax;
-    /* Set by m4a_engine_reset_frame_cost_max, consumed by the next frame. */
-    volatile bool frameCostMaxResetPending;
+    /* Set by m4a_engine_reset_frame_cost_max (any thread), consumed by the
+     * next frame (the m4a_engine_process thread).  Only ever accessed
+     * through m4a_engine.c's atomic flag helpers (compiler atomic builtins:
+     * the header stays plain C a C++ host can include). */
+    volatile int32_t frameCostMaxResetPending;
     /* Internal: CgbSound's cursor (real pool) after channel 4, where the
      * next loop head would be; and the vanilla mixer's cycles charged by
      * m4a_sound_main_ram this frame (M4A_MIX_* below, FIFO stall not yet
@@ -1467,8 +1470,30 @@ void m4a_engine_start_song_tempo(M4AEngine *engine);
  * Call them where the events go (the thread that drives the engine,
  * between m4a_engine_process calls). */
 void m4a_engine_cost_song_start(M4AEngine *engine, uint32_t trackMask, int player);
+/* m4a_engine_cost_song_continue: the song resumes at the next tempo tick
+ * part-way through (m4aMPlayContinue after a pause, or a host's seek within
+ * the song) with the tracks in trackMask: as song_start, but without the
+ * start-of-song work (the START init, KEYSH, mid2agb's implicit VOL) and
+ * with every track's compression state unknown.  Bars every 96 ticks from
+ * that tick until a time signature says otherwise; declare the meter in
+ * force with m4a_engine_cost_time_signature_phase. */
+void m4a_engine_cost_song_continue(M4AEngine *engine, uint32_t trackMask, int player);
 void m4a_engine_cost_song_stop(M4AEngine *engine);
 void m4a_engine_cost_time_signature(M4AEngine *engine, uint32_t clocksPerBar);
+/* m4a_engine_cost_time_signature_phase: the meter in force at the coming
+ * tick, which lies ticksIntoBar ticks past one of its bar lines (a start or
+ * a seek mid-bar): the bar marks fall every clocksPerBar ticks in the
+ * song's phase.  time_signature(n) is time_signature_phase(n, 0). */
+void m4a_engine_cost_time_signature_phase(M4AEngine *engine, uint32_t clocksPerBar,
+                                          uint32_t ticksIntoBar);
+/* m4a_engine_cost_loop_start_meter: the meter the song's loop start ('[')
+ * has -- clocksPerBar, with the loop start ticksIntoBar ticks past one of
+ * its bar lines -- for the GOTO to restore, without the label itself (no
+ * command, no compression reset): for a host whose playback starts after
+ * the loop start, so loop_point(false) never runs.  Call it after
+ * song_start / song_continue, which forget it. */
+void m4a_engine_cost_loop_start_meter(M4AEngine *engine, uint32_t clocksPerBar,
+                                      uint32_t ticksIntoBar);
 /* m4a_engine_cost_loop_point: the song's loop start ('[': mid2agb's label,
  * loopEnd false) or loop end (']': every track's GOTO back to the start,
  * loopEnd true) at the coming tick; call the end before the next pass's

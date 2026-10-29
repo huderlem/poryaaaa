@@ -8,6 +8,21 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* A cross-thread flag (frameCostMaxResetPending): raised by any thread,
+ * taken (read and cleared in one step) by the engine's thread.  Compiler
+ * builtins rather than <stdatomic.h>, whose _Atomic types a C++ host
+ * including m4a_engine.h could not compile. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+static inline void flag_raise(volatile int32_t *f) { _InterlockedExchange((volatile long *)f, 1); }
+static inline bool flag_take(volatile int32_t *f) { return _InterlockedExchange((volatile long *)f, 0) != 0; }
+static inline void flag_clear(volatile int32_t *f) { _InterlockedExchange((volatile long *)f, 0); }
+#else
+static inline void flag_raise(volatile int32_t *f) { __atomic_store_n(f, 1, __ATOMIC_RELEASE); }
+static inline bool flag_take(volatile int32_t *f) { return __atomic_exchange_n(f, 0, __ATOMIC_ACQ_REL) != 0; }
+static inline void flag_clear(volatile int32_t *f) { __atomic_store_n(f, 0, __ATOMIC_RELEASE); }
+#endif
+
 /* Duty cycle patterns for the pulse-width modulation effect (PWMC command).
  * They loop from start to end while the effect is running.  Hardware duty-cycle
  * values: 0 = 12.5%, 1 = 25%, 2 = 50%, 3 = 75%.  Matches gPulseWidthModPatterns
@@ -649,8 +664,7 @@ static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCount
     /* The MIDI-path estimate's frame ends here whether or not it is used. */
     bool estimated = !engine->externalSequencer && (!engine->frameHook || engine->costEstimateForced);
     int32_t estimate = engine->externalSequencer ? 0 : m4a_est_publish(engine, stamp);
-    if (engine->frameCostMaxResetPending) {
-        engine->frameCostMaxResetPending = false;
+    if (flag_take(&engine->frameCostMaxResetPending)) {
         memset(&engine->frameCostMax, 0, sizeof(engine->frameCostMax));
     }
     /* Live mode mixes in pieces (nothing to cost): invalid.  The vanilla
@@ -699,7 +713,7 @@ void m4a_engine_reset_frame_cost_max(M4AEngine *engine)
 {
     /* Consumed by the next publish_frame_cost, on the thread that runs
      * m4a_engine_process: a UI thread may call this while it runs. */
-    engine->frameCostMaxResetPending = true;
+    flag_raise(&engine->frameCostMaxResetPending);
 }
 
 /* A configuration change (live mode, mixer, sound-mode rate, voicegroup):
@@ -709,7 +723,7 @@ static void frame_cost_invalidate(M4AEngine *engine)
 {
     engine->frameCost.valid = false;
     memset(&engine->frameCostMax, 0, sizeof(engine->frameCostMax));
-    engine->frameCostMaxResetPending = false;
+    flag_clear(&engine->frameCostMaxResetPending);
 }
 
 static void sound_main(M4AEngine *engine)

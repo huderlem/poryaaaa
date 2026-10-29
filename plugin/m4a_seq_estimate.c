@@ -240,16 +240,85 @@ void m4a_engine_cost_song_start(M4AEngine *e, uint32_t trackMask, int player)
             start_track(s, i);
 }
 
+/* A track the song already had when playback resumes (m4aMPlayContinue,
+ * or a host's seek within the song): it exists, but its START init, KEYSH
+ * and implicit VOL ran long ago. */
+static void continue_track(M4ASeqEstimate *s, int i)
+{
+    uint16_t bit = (uint16_t)(1u << i);
+    s->declared |= bit;
+    s->exist |= bit;
+    s->firstNote |= bit;
+    reset_track_vars(s, i);           /* mid-song compression state is unknown */
+    s->lastEvClock[i] = EST_NONE;
+    s->lastWClock[i] = ev_clock(s);
+    s->lastDur[i] = 0;
+    s->keep[i] = true;
+    s->playing = true;
+}
+
+void m4a_engine_cost_song_continue(M4AEngine *e, uint32_t trackMask, int player)
+{
+    M4ASeqEstimate *s = &e->seqEst;
+    est_reset(s);
+    set_player(s, player);
+    s->songDeclared = true;
+    s->barLen = 96;
+    s->barStart = ev_clock(s);
+    for (int i = 0; i < MAX_TRACKS; i++)
+        if ((trackMask & (1u << i)) && popcount16(s->exist) < s->trackCount)
+            continue_track(s, i);
+}
+
 void m4a_engine_cost_song_stop(M4AEngine *e)
 {
     est_reset(&e->seqEst);
 }
 
+/* How far past its last bar line tick c lies (barStart may still lie
+ * ahead: a mid-bar declaration's first mark). */
+static uint16_t bar_phase(const M4ASeqEstimate *s, uint32_t c)
+{
+    if (!s->barLen)
+        return 0;
+    if (c >= s->barStart)
+        return (uint16_t)((c - s->barStart) % s->barLen);
+    uint32_t ahead = (s->barStart - c) % s->barLen;
+    return (uint16_t)(ahead ? s->barLen - ahead : 0);
+}
+
+/* The bar marks every barLen ticks with the coming tick ticksIntoBar ticks
+ * past one: the first mark at or after it. */
+static void set_bar_phase(M4ASeqEstimate *s, uint32_t clocksPerBar, uint32_t ticksIntoBar)
+{
+    s->barLen = (uint16_t)(clocksPerBar > 0xFFFF ? 0xFFFF : clocksPerBar);
+    uint32_t c = ev_clock(s);
+    if (s->barLen == 0) {
+        s->barStart = c;
+        return;
+    }
+    uint32_t phase = ticksIntoBar % s->barLen;
+    s->barStart = c + (phase ? s->barLen - phase : 0);
+}
+
 void m4a_engine_cost_time_signature(M4AEngine *e, uint32_t clocksPerBar)
 {
+    set_bar_phase(&e->seqEst, clocksPerBar, 0);
+}
+
+void m4a_engine_cost_time_signature_phase(M4AEngine *e, uint32_t clocksPerBar,
+                                          uint32_t ticksIntoBar)
+{
+    set_bar_phase(&e->seqEst, clocksPerBar, ticksIntoBar);
+}
+
+void m4a_engine_cost_loop_start_meter(M4AEngine *e, uint32_t clocksPerBar, uint32_t ticksIntoBar)
+{
     M4ASeqEstimate *s = &e->seqEst;
-    s->barLen = (uint16_t)(clocksPerBar > 0xFFFF ? 0xFFFF : clocksPerBar);
-    s->barStart = ev_clock(s);
+    uint16_t len = (uint16_t)(clocksPerBar > 0xFFFF ? 0xFFFF : clocksPerBar);
+    s->loopSaved = true;
+    s->loopBarLen = len;
+    s->loopBarPhase = (uint16_t)(len ? ticksIntoBar % len : 0);
 }
 
 /* Every event of a track (a command or not) ends the wait before it: the
@@ -279,10 +348,9 @@ void m4a_engine_cost_loop_point(M4AEngine *e, bool loopEnd)
     if (!loopEnd) {
         s->loopSaved = true;
         s->loopBarLen = s->barLen;
-        s->loopBarPhase = (uint16_t)(s->barLen && c >= s->barStart ? (c - s->barStart) % s->barLen : 0);
+        s->loopBarPhase = bar_phase(s, c);
     } else if (s->loopSaved) {
-        s->barLen = s->loopBarLen;
-        s->barStart = c - s->loopBarPhase;
+        set_bar_phase(s, s->loopBarLen, s->loopBarPhase);
     }
     for (int i = 0; i < MAX_TRACKS; i++) {
         if (!(s->exist & (1u << i)))

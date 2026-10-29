@@ -10287,6 +10287,106 @@ static void est_engine(M4AEngine *e, ToneData *voices)
     (void)est_frame(e);                       /* the next frame has a tick */
 }
 
+/* The host's phase-aware declarations (porydaw's starts mid-song): a meter
+ * declared part-way through a bar, the loop start's meter declared without
+ * passing it, and a song continued rather than started. */
+static void test_seq_estimate_phase(void)
+{
+    printf("Testing the sequencer estimate's meter phase and song continue...\n");
+    WaveData *wd = ramp_wave(1000, 1, 0);
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    m4a_engine_set_voicegroup(&e, voices);
+    for (int f = 0; f < 8; f++)
+        (void)est_frame(&e);                  /* the clock runs on, paused */
+    M4ASeqEstimate *s = &e.seqEst;
+#define EV_CLOCK (s->clock + s->tickInFrame)
+
+    /* time_signature_phase: the first mark barLen - ticksIntoBar ahead. */
+    m4a_engine_cost_song_start(&e, 1u << 1, M4A_PLAYER_BGM);
+    m4a_engine_cost_time_signature_phase(&e, 96, 30);
+    ASSERT_EQ(s->barLen, 96, "phase: the bar length");
+    ASSERT_EQ(s->barStart - EV_CLOCK, 66u, "phase: 30 ticks in, the next mark 66 ahead");
+    m4a_engine_cost_time_signature_phase(&e, 96, 0);
+    ASSERT_EQ(s->barStart, EV_CLOCK, "phase 0: a mark on the coming tick");
+    m4a_engine_cost_time_signature_phase(&e, 72, 72 + 10);
+    ASSERT_EQ(s->barStart - EV_CLOCK, 62u, "phase: taken modulo the bar");
+    m4a_engine_cost_time_signature(&e, 72);
+    ASSERT_EQ(s->barStart, EV_CLOCK, "time_signature is phase 0");
+    m4a_engine_cost_time_signature_phase(&e, 0, 5);
+    ASSERT_EQ(s->barLen, 0, "phase: 0 is no marks");
+
+    /* The label saves a mid-bar declaration's phase (its first mark still
+     * ahead), and the GOTO restores it wherever the clock is. */
+    m4a_engine_cost_time_signature_phase(&e, 96, 30);
+    m4a_engine_cost_loop_point(&e, false);
+    ASSERT(s->loopSaved && s->loopBarLen == 96 && s->loopBarPhase == 30,
+           "loop start: the declared phase, first mark ahead");
+    e.tempoI = 150;
+    for (int f = 0; f < 7; f++)
+        (void)est_frame(&e);                  /* 7 ticks later */
+    m4a_engine_cost_time_signature(&e, 0);    /* lost on the way */
+    m4a_engine_cost_loop_point(&e, true);
+    ASSERT_EQ(s->barLen, 96, "GOTO: the loop start's bar length");
+    ASSERT_EQ(s->barStart - EV_CLOCK, 66u, "GOTO: the loop start's phase");
+
+    /* loop_start_meter: a start after the loop start declares its meter. */
+    m4a_engine_cost_song_start(&e, 1u << 1, M4A_PLAYER_BGM);
+    ASSERT(!s->loopSaved, "song start forgets the loop start");
+    m4a_engine_cost_loop_start_meter(&e, 72, 100);
+    ASSERT(s->loopSaved && s->loopBarLen == 72 && s->loopBarPhase == 28,
+           "loop start meter: saved, phase modulo the bar");
+    ASSERT_EQ(s->barLen, 96, "loop start meter: the meter in force is untouched");
+    uint32_t cyc = s->cycles;
+    m4a_engine_cost_loop_start_meter(&e, 72, 100);
+    ASSERT_EQ(s->cycles, cyc, "loop start meter: no command charged");
+    m4a_engine_cost_loop_point(&e, true);
+    ASSERT_EQ(s->barLen, 72, "GOTO after a loop start meter: its bar length");
+    ASSERT_EQ(s->barStart - EV_CLOCK, 44u, "GOTO after a loop start meter: its phase");
+
+    /* song_continue: the tracks exist, without the start-of-song work. */
+    m4a_engine_cost_song_continue(&e, (1u << 1) | (1u << 3), M4A_PLAYER_BGM);
+    ASSERT(s->songDeclared && s->playing, "continue: the song plays");
+    ASSERT_EQ(s->exist, (1u << 1) | (1u << 3), "continue: its tracks exist");
+    ASSERT_EQ(s->startPending, 0, "continue: no START init");
+    ASSERT_EQ(s->firstNote & ((1u << 1) | (1u << 3)), (1u << 1) | (1u << 3),
+              "continue: no implicit VOL to come");
+    ASSERT_EQ(s->cycles, 0, "continue: no KEYSH charged");
+    ASSERT_EQ(s->barLen, 96, "continue: 4/4 marks until told otherwise");
+    m4a_engine_destroy(&e);
+
+    /* What a continue saves over a start: the same frames, the same note. */
+    int32_t total[2] = { 0, 0 };
+    for (int k = 0; k < 2; k++) {
+        M4AEngine c;
+        m4a_engine_init(&c, 44100.0f);
+        m4a_engine_set_voicegroup(&c, voices);
+        m4a_engine_program_change(&c, 1, 0);
+        (void)est_frame(&c);
+        c.tempoI = 150;
+        if (k == 0)
+            m4a_engine_cost_song_start(&c, 1u << 1, M4A_PLAYER_BGM);
+        else
+            m4a_engine_cost_song_continue(&c, 1u << 1, M4A_PLAYER_BGM);
+        m4a_engine_note_on(&c, 1, 60, 100);
+        for (int f = 0; f < 4; f++)
+            total[k] += est_frame(&c);
+        m4a_engine_destroy(&c);
+    }
+    ASSERT(total[1] < total[0], "continue costs less than a start");
+    ASSERT(total[0] - total[1] >= M4A_CYC_TICK_START - M4A_CYC_TICK_NO_START + M4A_CYC_CMD_TABLE + 89,
+           "continue: no START init, KEYSH or implicit VOL");
+#undef EV_CLOCK
+    free(wd);
+}
+
 static void test_seq_estimate(void)
 {
     printf("Testing the MIDI-path sequencer estimate...\n");
@@ -10618,6 +10718,7 @@ int main(void)
     test_frame_cost_hq_wiring();
     test_frame_cost_mixer_stall();
     test_seq_estimate();
+    test_seq_estimate_phase();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

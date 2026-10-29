@@ -1027,7 +1027,13 @@ that tick; `m4a_engine_cost_loop_point(false)` at the loop start and
 `(true)` at the wrap, before the next pass's events of that tick;
 `m4a_engine_set_tempo_bpm` with the song's tempo (it is also the tick
 rate); `m4a_engine_cost_song_stop` on stop.  Not calling them is the
-inferred form.
+inferred form.  A host that starts mid-song: `m4a_engine_cost_song_continue`
+in place of song_start for a resume or a seek within the song (the tracks
+exist, without the START init, KEYSH and the implicit VOL);
+`m4a_engine_cost_time_signature_phase(clocksPerBar, ticksIntoBar)` for the
+meter in force when the start lies mid-bar; and, when the start lies after
+the loop start, `m4a_engine_cost_loop_start_meter(clocksPerBar,
+ticksIntoBar)` with the loop start's meter so the GOTO restores it.
 
 **Assumptions.**  mid2agb with `-E` and compression on (the vanilla
 `midi.cfg`); one AGB track per engine track (a Type 1 MTrk with one note
