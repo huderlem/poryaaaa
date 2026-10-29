@@ -10026,6 +10026,84 @@ static void test_frame_cost_hq_wiring(void)
     m4a_engine_destroy(&e);
 }
 
+/* The mixer span's FIFO refill stalls (m4a_engine_mixer_stall): the exit
+ * bound and the refill inside / around an HQ DMA3 copy.  A synthetic
+ * clock: SoundMainRAM's entry at `ram`, one refill due at ram + due (the
+ * next one 20064 later, outside the span). */
+static int64_t stall_at(M4AEngine *e, int64_t due, int64_t mix, int32_t start, int n)
+{
+    const int64_t ram = 1000000;
+    e->gba.dmaEnabled = true;
+    e->gba.timerPeriodNum = 280896;
+    e->gba.timerPeriodDen = 224;
+    e->gba.fifoDmaCycle = ram + due;
+    e->hqDma3Count = n > 0 ? 1 : 0;
+    e->hqDma3Start[0] = start;
+    e->hqDma3Len[0] = M4A_HQMIX_DMA3 + M4A_HQMIX_DMA3_WORD * n;
+    return m4a_engine_mixer_stall(e, ram, mix);
+}
+
+static void test_frame_cost_mixer_stall(void)
+{
+    printf("Testing the cost model: the mixer span's FIFO stalls...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    /* The exit bound: a refill due in m4aSoundMain's last 8 cycles (RET + 3
+     * on) lands after the return; at RET + 2 (EXIT - 8) it is counted. */
+    ASSERT_EQ(stall_at(&e, 5000 - 8, 5000, 0, 0), M4A_CYC_FIFO_DMA_STALL, "stall: due at RET + 2, counted");
+    ASSERT_EQ(stall_at(&e, 5000 - 7, 5000, 0, 0), 0, "stall: due at RET + 3, not counted");
+    ASSERT_EQ(stall_at(&e, 0, 5000, 0, 0), 0, "stall: due at RAM itself belongs to the span before");
+    ASSERT_EQ(stall_at(&e, 1, 5000, 0, 0), M4A_CYC_FIFO_DMA_STALL, "stall: due right after RAM");
+
+    /* Around a DMA3 copy of 20 words (L 104) at 2000, HQ mode: the costs a
+     * simulation of mgba's dma.c gives (docs/ACCURACY.md). */
+    e.hqMixer = true;
+    static const struct { int p, cost; } c20[] = {
+        { -4, 18 }, { -3, 16 }, { -1, 16 }, { 0, 9 }, { 1, 10 }, { 7, 16 }, { 8, 12 }, { 9, 13 },
+        { 12, 16 }, { 13, 12 }, { 102, 16 }, { 103, 17 }, { 104, 18 }, { 105, 18 },
+    };
+    int ok = 1;
+    for (size_t i = 0; i < sizeof(c20) / sizeof(c20[0]); i++)
+        if (stall_at(&e, 2000 + c20[i].p, 8000, 2000, 20) != c20[i].cost) {
+            printf("  p %d: %lld, expected %d\n", c20[i].p, (long long)stall_at(&e, 2000 + c20[i].p, 8000, 2000, 20),
+                   c20[i].cost);
+            ok = 0;
+        }
+    ASSERT(ok, "stall: every boundary of a 20-word copy");
+    /* A one-word copy (L 9): its first word is its last. */
+    static const struct { int p, cost; } c1[] = {
+        { -4, 18 }, { -3, 16 }, { 0, 9 }, { 7, 16 }, { 8, 17 }, { 9, 18 },
+    };
+    ok = 1;
+    for (size_t i = 0; i < sizeof(c1) / sizeof(c1[0]); i++)
+        if (stall_at(&e, 2000 + c1[i].p, 8000, 2000, 1) != c1[i].cost)
+            ok = 0;
+    ASSERT(ok, "stall: every boundary of a one-word copy");
+    /* An earlier stall moves the copy on: refills at 100 (18) and 20164; a
+     * copy recorded at 20164 - 18 starts with the second refill (p 0). */
+    ASSERT_EQ(stall_at(&e, 100, 30000, 20164 - 18, 20), 18 + 9, "stall: the copy moved on by the stall before it");
+    /* Vanilla mode ignores the HQ record. */
+    e.hqMixer = false;
+    ASSERT_EQ(stall_at(&e, 2000, 8000, 2000, 20), 18, "stall: vanilla, a plain stall");
+    m4a_engine_destroy(&e);
+
+    /* The branchless m against mgba's mask chain (ARM_WAIT_SMUL). */
+    static const int64_t vals[] = { 0, 1, -1, 255, -255, 256, -256, 257, -257, 65535, -65535, 65536, -65536,
+                                    65537, -65537, 1 << 23, -(1 << 23), 0xFFFFFF, -0xFFFFFF, 0x1000000, -0x1000000,
+                                    0x1000001, -0x1000001, INT32_MAX, INT32_MIN, 510, -510, 128, -128 };
+    ok = 1;
+    for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++)
+        if (m4a_arm_mul_m((uint32_t)(int32_t)vals[i]) != test_mul_m((uint32_t)(int32_t)vals[i])) {
+            printf("  m(%lld): %d vs %d\n", (long long)vals[i], m4a_arm_mul_m((uint32_t)(int32_t)vals[i]),
+                   test_mul_m((uint32_t)(int32_t)vals[i]));
+            ok = 0;
+        }
+    for (int64_t v = -70000; v <= 70000; v += 7)
+        if (m4a_arm_mul_m((uint32_t)(int32_t)v) != test_mul_m((uint32_t)(int32_t)v))
+            ok = 0;
+    ASSERT(ok, "mul m: the branchless form is mgba's");
+}
+
 /* The wiring of the branches the probe corpus never takes (their
  * constants are counted from m4a_1.s; this checks each is charged where
  * the translation takes it, with the iteration / decode counts the model
@@ -10268,6 +10346,7 @@ int main(void)
     test_frame_cost_hq_linear();
     test_frame_cost_hq_paths();
     test_frame_cost_hq_wiring();
+    test_frame_cost_mixer_stall();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

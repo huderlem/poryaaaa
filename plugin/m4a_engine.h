@@ -1080,16 +1080,21 @@ struct M4AEngine {
 #define M4A_HQMIX_COPY             25    /* count > advance, the copy: -> C_select_highspeed_codepath_vla_r3_and3 (the stmia that starts DMA3 included) */
 #define M4A_HQMIX_DMA3             4     /* the DMA3 copy onto the stack: 4 + ... */
 #define M4A_HQMIX_DMA3_WORD        5     /* ... 5 per word, (advance + 7) >> 2 words */
-/* A FIFO refill (both DMAs, M4A_CYC_FIFO_DMA_STALL elsewhere) due inside
- * the DMA3 copy interleaves with it at its word boundaries (mgba's
- * GBADMAService / GBADMAUpdate: the refill preempts the copy between two
- * words, the timer event winning a tie): the CPU loses less.  By p, the
- * refill's due cycle less the copy's start (the stmia's end, with the
- * span's earlier stalls), L its length: */
-#define M4A_HQMIX_FIFO_PRE         16    /* p -1 .. 1: due as the copy starts */
-#define M4A_HQMIX_FIFO_FIRST       7     /* p 2 .. 9: 7 + p (the first word, 7 cycles) */
-#define M4A_HQMIX_FIFO_WORD        12    /* p 10 .. L: 12 + p mod 5 (the 5-cycle words) */
-#define M4A_HQMIX_FIFO_LAST        17    /* p L + 1 (the copy's 2-cycle end; from the simulation, not in the corpus) */
+/* A FIFO refill (both DMAs, M4A_CYC_FIFO_DMA_STALL elsewhere) due in or
+ * around the DMA3 copy costs the CPU less.  By p, the refill's due cycle
+ * less the copy's start (the stmia's end on mixCycles' clock, moved on by
+ * the span's earlier stalls), L = M4A_HQMIX_DMA3 + 5n the copy's halt.
+ * Derived from mgba 0.10.5's dma.c / timing.c (a simulation of
+ * GBADMAService / GBADMAUpdate / _dmaEvent and the timer event: the stmia's
+ * IO store schedules DMA3 at its own start + 3 = p -1, the events due
+ * inside the stmia run at its end in (when, priority) order -- DMA3's
+ * before a timer at p 0, a timer at p -3..-1 first -- _dmaEvent re-anchors
+ * the first word to now, DMA1 / DMA2 preempt the copy between words);
+ * every value but L - 1 also seen in the corpus.  p <= -4 or >= L: 18. */
+#define M4A_HQMIX_FIFO_PRE         16    /* p -3 .. -1: the refill runs first, then the whole copy (corpus: p -3, -2, -1) */
+#define M4A_HQMIX_FIFO_FIRST       9     /* p 0 .. 7: 9 + p, inside the first word's 7 cycles (corpus: p 0, 2, 4, 7) */
+#define M4A_HQMIX_FIFO_WORD        12    /* p 8 .. L - 2: 12 + (p - 8) mod 5, the 5-cycle words (corpus: every residue) */
+#define M4A_HQMIX_FIFO_LAST        17    /* p L - 1: the copy's last cycle (the simulation only; no corpus frame) */
 #define M4A_HQMIX_VLA              2     /* C_select_highspeed_codepath_vla_r3_and3 -> _vla_r3 -> C_select_highspeed_codepath (and, add) */
 #define M4A_HQMIX_DIRECT           16    /* count > advance, advance >= 0x400 or no stack: -> C_select_highspeed_codepath (samples from ROM) */
 #define M4A_HQMIX_SELECT           16    /* C_select_highspeed_codepath -> C_skip_fast_mixing_creation, the block in place ... */
@@ -1157,6 +1162,17 @@ struct M4AEngine {
 
 /* Engine lifecycle */
 void m4a_engine_init(M4AEngine *engine, float sampleRate);
+/* Internal (exposed for the unit tests): the FIFO refill stalls the
+ * mixer's span adds, SoundMainRAM's entry at `ram` and `mix` cycles of
+ * charges (docs/ACCURACY.md, "SoundMain cost model"). */
+int64_t m4a_engine_mixer_stall(const M4AEngine *engine, int64_t ram, int64_t mix);
+/* mul / mla's extra cycles (mgba's ARM_WAIT_SMUL): 1..4 by the significant
+ * bytes of the Rs operand, the sign bits not counted; branchless. */
+static inline int m4a_arm_mul_m(uint32_t rs)
+{
+    uint32_t x = rs ^ (uint32_t)((int32_t)rs >> 31);
+    return 1 + (x > 0xFFu) + (x > 0xFFFFu) + (x > 0xFFFFFFu);
+}
 void m4a_engine_destroy(M4AEngine *engine);
 
 /* Replay the sound hardware's boot as Pokemon Emerald (and the accuracy test

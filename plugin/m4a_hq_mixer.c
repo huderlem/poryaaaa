@@ -48,32 +48,14 @@
  * operand is known.  Counting only: no charge changes what is mixed.
  */
 
-/* mul / mla's extra cycles, mgba's ARM_WAIT_SMUL: 1..4 by the significant
- * bytes of the Rs operand. */
-static inline int mul_m(uint32_t rs)
-{
-    uint32_t h = rs & 0xFFFFFF00u;
-    if (h == 0 || h == 0xFFFFFF00u)
-        return 1;
-    h = rs & 0xFFFF0000u;
-    if (h == 0 || h == 0xFFFF0000u)
-        return 2;
-    h = rs & 0xFF000000u;
-    if (h == 0 || h == 0xFF000000u)
-        return 3;
-    return 4;
-}
+/* mul / mla's extra cycles, mgba's ARM_WAIT_SMUL (m4a_engine.h, branchless:
+ * it runs per sample). */
+#define mul_m m4a_arm_mul_m
 
 /* umlal's, ARM_WAIT_UMUL: the unsigned operand's significant bytes. */
 static inline int umul_m(uint32_t rs)
 {
-    if (!(rs & 0xFFFFFF00u))
-        return 1;
-    if (!(rs & 0xFFFF0000u))
-        return 2;
-    if (!(rs & 0xFF000000u))
-        return 3;
-    return 4;
+    return 1 + (rs > 0xFFu) + (rs > 0xFFFFu) + (rs > 0xFFFFFFu);
 }
 
 /* F_clear_mem over r1 bytes (from the bl to its return): the computed
@@ -833,8 +815,10 @@ bool m4a_hq_mix_channel(M4AEngine *engine, M4APCMChannel *r4, uint32_t *buf)
          * words, the loads then from the stack; otherwise from ROM. */
         bool copy = HQ_STACK_BOUND + advance < engine->hqStackSp - 12 && advance < 0x400;
         if (copy) {
-            /* the DMA3 block, from the stmia that starts it: the span's
-             * FIFO refills that fall in it cost less (m4a_engine.c) */
+            /* the DMA3 block, from the end of the stmia that starts it, on
+             * mixCycles' true clock (nothing charged ahead of its place:
+             * the FIFO rule's p is measured from here, m4a_engine.c): the
+             * span's FIFO refills that fall in it cost less */
             int32_t words = (int32_t)((advance + 7) >> 2);
             int64_t len = M4A_HQMIX_DMA3 + M4A_HQMIX_DMA3_WORD * (int64_t)words;
             if (engine->hqDma3Count < M4A_HQ_DMA3_MAX) {
@@ -1066,7 +1050,10 @@ void m4a_hq_sound_main_ram(M4AEngine *engine, int frameOffset, int pcmDmaCounter
      * maxChans slots of the real pool (the shadow pool, debug only, costs
      * nothing and leaves previous_fast_code alone), the downsampler. */
     int slots = engine->maxPcmChannels < MAX_PCM_CHANNELS ? engine->maxPcmChannels : MAX_PCM_CHANNELS;
-    engine->mixCycles = M4A_HQMIX_ENTRY + M4A_HQMIX_LOOP_LAST;
+    /* (LOOP_LAST, the last slot's shorter exit, is charged after the walk:
+     * mixCycles is the true clock inside it, which the DMA3 copies'
+     * recorded starts and the FIFO rule of m4a_engine.c rely on) */
+    engine->mixCycles = M4A_HQMIX_ENTRY;
     engine->hqDma3Count = 0;
     for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
         M4APCMChannel *r4 = &engine->pcmChannels[i];
@@ -1117,6 +1104,7 @@ void m4a_hq_sound_main_ram(M4AEngine *engine, int frameOffset, int pcmDmaCounter
         for (int k = 0; k < n; k++) fprintf(stderr, " %08X", engine->hqBuffer[k]);
         fputc('\n', stderr);
     }
+    engine->mixCycles += M4A_HQMIX_LOOP_LAST;
     m4a_hq_downsample(engine, frameOffset, pcmDmaCounter);
     if (getenv("HQ_DEBUG")) {
         int n = engine->pcmSamplesPerVBlank;

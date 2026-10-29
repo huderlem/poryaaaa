@@ -606,7 +606,7 @@ static void sound_vsync(M4AEngine *engine)
  * less when it falls in one of the HQ fast path's DMA3 copies (the
  * copies' positions are in mixCycles' clock; the stalls before them move
  * them on). */
-static int64_t mixer_stall(const M4AEngine *engine, int64_t ram, int64_t mix)
+int64_t m4a_engine_mixer_stall(const M4AEngine *engine, int64_t ram, int64_t mix)
 {
     const M4AGbaAudio *g = &engine->gba;
     int64_t stall = 0;
@@ -616,16 +616,16 @@ static int64_t mixer_stall(const M4AEngine *engine, int64_t ram, int64_t mix)
         int64_t c = M4A_CYC_FIFO_DMA_STALL;
         for (; k < n; k++) {
             int64_t p = t - (ram + engine->hqDma3Start[k] + stall), len = engine->hqDma3Len[k];
-            if (p < -1)
+            if (p < -3)
                 break;                       /* this copy is later */
-            if (p > len + 1)
+            if (p >= len)
                 continue;                    /* this copy is over */
-            if (p <= 1)
+            if (p < 0)
                 c = M4A_HQMIX_FIFO_PRE;
-            else if (p <= 9)
+            else if (p <= 7)
                 c = M4A_HQMIX_FIFO_FIRST + p;
-            else if (p <= len)
-                c = M4A_HQMIX_FIFO_WORD + p % 5;
+            else if (p < len - 1)
+                c = M4A_HQMIX_FIFO_WORD + (p - 8) % 5;
             else
                 c = M4A_HQMIX_FIFO_LAST;
             break;
@@ -670,7 +670,7 @@ static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCount
     int64_t ram = cr + s2r;
     ram += m4a_gba_fifo_dma_stall(g, cr, ram);
     int64_t mix = engine->mixCycles;
-    int64_t stall = mixer_stall(engine, ram, mix);
+    int64_t stall = m4a_engine_mixer_stall(engine, ram, mix);
     int64_t exit = ram + mix + stall;
     c.sequencer = (int32_t)(cgb - sm);
     c.cgb = (int32_t)(ram - cgb);

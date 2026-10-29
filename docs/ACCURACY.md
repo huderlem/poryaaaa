@@ -716,7 +716,7 @@ on the CPU clock from the SoundMain stamp:
 - **mixer** = EXIT − RAM: the `M4A_MIX_*` charges `m4a_mixer.c` sums into
   `engine->mixCycles` (the epilogue's `RET` → `EXIT` 10 included; in HQ
   mode the `M4A_HQMIX_*` charges of `m4a_hq_mixer.c`, below), plus every
-  FIFO stall due in [RAM, EXIT − 8], in order (`mixer_stall`,
+  FIFO stall due in [RAM, EXIT − 8], in order (`m4a_engine_mixer_stall`,
   `m4a_engine.c`): a stall due in m4aSoundMain's last 8 cycles
   (`M4A_MIX_EXIT_BX`, the final `bx r0` and the cycle before) is serviced
   after the return and not counted (over the four probed rates, a stall
@@ -819,11 +819,17 @@ store, the pops and the `bx r3` into ROM) → `EXIT` (10), the FIFO
 stalls in [RAM, EXIT − 8] on top.  `m4a_hq_mixer.c` charges
 `M4A_HQMIX_*` (`plugin/m4a_engine.h`) into `engine->mixCycles` at the
 ported labels, in program order (the walk too, unlike the vanilla
-model's separate sum: the DMA3 copies' positions matter, below).  The
+model's separate sum, and the last slot's shorter exit, `LOOP_LAST`,
+after the walk rather than up front: inside the walk `mixCycles` is the
+true clock, which the DMA3 copies' recorded starts and the FIFO rule
+below are measured on; moving a charge ahead of its place would shift
+that rule).  The
 floor is 16 + 5 × (16 + 9) − 2 + 23 + 17 + 112 × 67 + 39 + 10 = **7732**
 (224 samples), 12020 at 352 (12038 with the stall the probe saw).
 
-The constants are **derived**, none fitted: every label pair counted from
+The instruction-count constants (the table, the FIFO row aside) are
+**derived**, none fitted:
+every label pair counted from
 `test/accuracy/rom/hq/m4a_1.s` at mgba's timing (the rules above; the
 mixer runs from its IWRAM copy, Thumb for the walk and the envelope, ARM
 for the rest; SoundInfo, the channels, `hq_buffer` and the stack are
@@ -863,26 +869,44 @@ unsigned) and the step `mul` (by divFreq: 2 at 13379 and 21024).
 | `DECODE_SETUP` (+ m, + 1), `BLOCK`, `BLOCK_OPENBUS`, `DECODE_DONE` | → `C_data_load_comp_loop` (+ the block `mla`'s m, + the `streqb` of the end frame); one block: `bl`, `F_decode_compressed` 748 (33 ROM byte loads), `subs`, `bgt`; a block read from open bus (33 loads of `GBALoad8`'s default case, 3 instead of 6); → `C_select_highspeed_codepath` | 11, 755, −99, 4 |
 | `UREV` (`_END`), `UREV_WORD`, `UREV_DONE` | `C_data_load_uncomp_rev` → its loop (through `F_clear_mem` and the status store); a word (`ldmia` of one ROM word 4, the byte swap); → `C_select_highspeed_codepath` | 22 (32), 14, 6 |
 | `CLEAR`, `CLEAR_STORE`, `CLEAR_RET`, `CLEAR_WORD` | `F_clear_mem` to its computed jump; one 4-word `stmia` ((r1 >> 4) & 3 of them first, then passes of 4 + `subs`, `bpl`); `ands`, the `ldmeqfd` with pc; a remainder word | 16, 5, 11, 6 |
+| `FIFO_PRE`, `FIFO_FIRST` (+ p), `FIFO_WORD` (+ (p − 8) mod 5), `FIFO_LAST` | a FIFO refill due p cycles from the end of the `stmia` that starts a DMA3 copy (halt L): p −3 … −1; 0 … 7; 8 … L − 2; L − 1 (18 outside −3 … L − 1) | 16, 9, 12, 17 (mgba's scheduler, below) |
 | `SYNTH`, `PULSE_SETUP`, `PULSE_ITER`, `PULSE_EXIT`, `SAW`, `SAW_ITER` + 4 × `SAW_SAMPLE`, `TRI`, `TRI_ITER` + 4 × `TRI_SAMPLE`, `SYNTH_EXIT` | `C_setup_synth`, pulse; → `C_synth_pulse_loop`; a pass (8 samples); → `C_end_mixing`; → `C_synth_saw_loop`; a pass (4 samples, + `MLA` + m per executed `mlane`); → `C_synth_triangle_loop`; a pass (+ m per `mla`); the `b C_end_mixing` | 8, 37, 55, 9, 16, 15 + 24, 16, 15 + 20, 3 |
 
 **The FIFO refill inside a DMA3 copy.**  A refill due while the fast
-path's DMA3 copy runs does not cost 18: mgba (`dma.c`) services DMA3 a
-word at a time (the first 7 cycles, then 5, 2 more at the end), the
-refill's DMA1 / DMA2 preempt it between two words (the timer event
-winning a tie), and the CPU, already halted, loses only what the copy is
-pushed back.  The engine records each copy (`hqDma3Start`, `hqDma3Len`
-on `mixCycles`' clock) and `mixer_stall` charges a refill due at p
-cycles after the copy's start (the `stmia`'s end, moved on by the span's
-earlier stalls) of length L: 16 at p −1 … 1, 7 + p at 2 … 9 (the first
-word), 12 + p mod 5 at 10 … L (the 5-cycle words), 17 at L + 1
-(`M4A_HQMIX_FIFO_*`).  The shape is mgba's scheduler (a small
-simulation of `GBADMAService` / `GBADMAUpdate` / the timer event
-reproduces it); its one alignment, where the copy's first word falls
-against the model's due cycle, is the corpus's (`p − 2` in the
-simulation's clock): 255 frames at 13379 Hz and 263 at 21024 have a
-refill inside a copy, every one matched (before the rule: up to 6 cycles
-high, the p mod 5 pattern exact).  The L + 1 case is the simulation's
-only (no corpus frame).
+path's DMA3 copy runs does not cost 18.  The engine records each copy
+(`hqDma3Start`, `hqDma3Len` on `mixCycles`' true clock) and
+`m4a_engine_mixer_stall` charges a refill due p cycles after the copy's
+start (the `stmia`'s end, moved on by the span's earlier stalls), the
+copy halting the CPU for L = 4 + 5n: 16 at p −3 … −1, 9 + p at 0 … 7, 12
++ (p − 8) mod 5 at 8 … L − 2, 17 at L − 1, 18 otherwise
+(`M4A_HQMIX_FIFO_*`).
+
+- **Derived from mgba's code**: the whole rule, from a simulation of
+  0.10.5's `dma.c` / `timing.c` (`GBADMAService`, `GBADMAUpdate`,
+  `_dmaEvent`, the timer-0 event at priority 0x20 before the DMA event's
+  0x40): the `stmia`'s store to DMA3CNT schedules DMA3 at the
+  instruction's start + 3 (the CPU's cycle count is not yet advanced),
+  i.e. p −1; events due inside the `stmia` are dispatched at its end in
+  (when, priority) order, so a refill due at p 0 comes after DMA3's
+  first word (9) and one due at p −3 … −1 before the whole copy (16);
+  `_dmaEvent` re-anchors the first word at `now`; DMA3 runs a word at a
+  time (7 cycles, then 5, 2 more after the last), DMA1 / DMA2 preempt it
+  between words.  The same simulation gives the copy's halt 5n + 4 from
+  the `stmia`'s end, the measured `DMA3` + `DMA3_WORD` × n.  No offset
+  is taken from the corpus.
+- **Measured** (the corpus, 255 frames at 13379 Hz and 263 at 21024 with
+  a refill inside or just before a copy, each matched): p −3, −2, −1 (16),
+  0, 2, 4, 7 (9 + p), every residue of the word region, and the
+  boundaries on both sides (p ≤ −4 and ≥ L: 18).  Charging p 0 as 16 or
+  p −3 as 15 (an earlier, simpler simulation without the in-`stmia`
+  dispatch) breaks `vs_trainer` 21024 f353 by 7 and two frames by 1.
+  Before the rule: up to 6 cycles high, the p mod 5 pattern exact.
+- **Unverified**: p L − 1 (17), the simulation's only (no corpus frame).
+
+Unit-tested (`test_frame_cost_mixer_stall`): every boundary of a 20-word
+and a one-word copy, an earlier stall moving a copy on, vanilla mode
+ignoring the record, and the exit bound (due at `RET` + 2 counted, `RET`
++ 3 not).
 
 **Gate** (`cost_diff.py --corpus`, every frame's total within 2 % or 300
 cycles of the probe's `tot`):
@@ -901,8 +925,11 @@ release into the echo, an attack step after the first frame, a looping
 compressed sample's loop setup, the stack check of the reversed paths
 (the forward DPCM one is: `pcm_cmp_hi`), a FIX voice with REV, a DPCM
 block index past 255 (the `mla`'s m 2), the FIX count-0 host guard and
-`M4A_HQMIX_FIFO_LAST`.  The 15768 / 42048 scratch checks of step 2 were
-not rerun.
+`M4A_HQMIX_FIFO_LAST`.  The 15768 / 42048 scratch checks of step 2,
+rerun with `EXIT_BX` 8 (review of step 3): 15768 13/13 PASS, max |Δ|
+still 18 (`rg_vs_trainer` f595, engine mixer 41233 vs the probe's 41215:
+the known `RET` + 2 frame mgba does not count, now on the counted side of
+the bound); 42048 13/13 at 0.
 
 **Residual sources (HQ).**  The vanilla ones (mgba's servicing order at
 the exit boundary: the one `RET` + 2 frame in 4 that mgba does not
