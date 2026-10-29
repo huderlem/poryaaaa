@@ -444,7 +444,7 @@ typedef struct {
     bool songDeclared;       /* m4a_engine_cost_song_start ran: the existing tracks are the host's */
     bool playing;            /* MusicPlayerInfo.status without PAUSE */
     bool allDone;            /* this frame's tick found no track (TICK_ALL_DONE, then PAUSE) */
-    uint8_t slots;           /* the player's track count (MusicPlayerInfo.trackCount) */
+    uint8_t trackCount;      /* the player's track count (MusicPlayerInfo.trackCount) */
     int16_t mpEntry, mpHead, mpPaused, mpExit;
     uint16_t declared;       /* the song's tracks (declared, or joined by a note) */
     uint16_t exist;          /* MPT_FLG_EXIST per engine track */

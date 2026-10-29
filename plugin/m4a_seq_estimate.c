@@ -125,7 +125,7 @@ static void set_player(M4ASeqEstimate *s, int player)
     static const uint8_t trackCounts[M4A_PLAYER_COUNT] = { 10, 3, 9, 1, 2, 2 };
     if (player < 0 || player >= M4A_PLAYER_COUNT)
         player = M4A_PLAYER_BGM;
-    s->slots = trackCounts[player];
+    s->trackCount = trackCounts[player];
     if (player == M4A_PLAYER_BGM) {
         s->mpEntry = M4A_CYC_MP_BGM_ENTRY;
         s->mpHead = M4A_CYC_MP_HEAD;
@@ -236,7 +236,7 @@ void m4a_engine_cost_song_start(M4AEngine *e, uint32_t trackMask, int player)
     s->barLen = 96;
     s->barStart = ev_clock(s);
     for (int i = 0; i < MAX_TRACKS; i++)
-        if ((trackMask & (1u << i)) && popcount16(s->exist) < s->slots)
+        if ((trackMask & (1u << i)) && popcount16(s->exist) < s->trackCount)
             start_track(s, i);
 }
 
@@ -508,7 +508,7 @@ void m4a_est_note_on(M4AEngine *e, int i, uint8_t key, uint8_t velocity, const T
     uint16_t bit = (uint16_t)(1u << i);
     /* A track exists from its first note when nothing declared it (or the
      * host's song gained a track). */
-    if (!(s->declared & bit) && popcount16(s->exist) < s->slots)
+    if (!(s->declared & bit) && popcount16(s->exist) < s->trackCount)
         start_track(s, i);
     touch(s, i);
     int cyc = 0;
@@ -934,7 +934,7 @@ void m4a_est_frame(M4AEngine *e, int nTicks)
         int jj = j < M4A_EST_TICKS ? j : M4A_EST_TICKS - 1;
         int n = 0;
         cyc += M4A_CYC_TICK_ENTER;
-        for (int i = 0; i < MAX_TRACKS && n < s->slots; i++) {
+        for (int i = 0; i < MAX_TRACKS && n < s->trackCount; i++) {
             uint16_t bit = (uint16_t)(1u << i);
             bool endedNow = (s->ended & bit) && jj <= s->endTick[i];
             if (!(s->exist & bit) && !endedNow)
@@ -951,7 +951,7 @@ void m4a_est_frame(M4AEngine *e, int nTicks)
                 s->lastWClock[i] = clock;
             }
         }
-        cyc += (s->slots - n) * M4A_CYC_TICK_NO_TRACK + (s->slots - 1) * M4A_CYC_TICK_NEXT + M4A_CYC_TICK_LAST;
+        cyc += (s->trackCount - n) * M4A_CYC_TICK_NO_TRACK + (s->trackCount - 1) * M4A_CYC_TICK_NEXT + M4A_CYC_TICK_LAST;
         if (n == 0) {
             cyc += M4A_CYC_TICK_ALL_DONE;
             s->playing = false;
@@ -964,14 +964,14 @@ void m4a_est_frame(M4AEngine *e, int nTicks)
         s->startPending = 0;
     if (!s->allDone) {
         int n = 0;
-        cyc += M4A_CYC_APPLY_ENTER + (s->slots - 1) * M4A_CYC_APPLY_NEXT + M4A_CYC_APPLY_LAST;
-        for (int i = 0; i < MAX_TRACKS && n < s->slots; i++) {
+        cyc += M4A_CYC_APPLY_ENTER + (s->trackCount - 1) * M4A_CYC_APPLY_NEXT + M4A_CYC_APPLY_LAST;
+        for (int i = 0; i < MAX_TRACKS && n < s->trackCount; i++) {
             if (!(s->exist & (1u << i)))
                 continue;
             n++;
             cyc += apply_cost(e, i);
         }
-        cyc += (s->slots - n) * M4A_CYC_APPLY_NO_TRACK;
+        cyc += (s->trackCount - n) * M4A_CYC_APPLY_NO_TRACK;
     }
     s->cycles += cyc;
     s->clock += (uint32_t)nTicks;
