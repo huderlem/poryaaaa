@@ -187,6 +187,19 @@ typedef struct {
  * (a looping song's GOTO comes before its FINE).
  */
 #define RENDER_EVT_TRACK_END 0x2
+/*
+ * Synthetic RenderEvent type for a time signature of the first MTrk (where
+ * mid2agb reads it): data0 the numerator, data1 the denominator's exponent.
+ * Only the cost model's MIDI-path sequencer estimate uses it (mid2agb's bar
+ * marks, m4a_engine_cost_time_signature); it never lengthens a render.
+ */
+#define RENDER_EVT_TIMESIG 0x3
+/*
+ * Synthetic RenderEvent type for the loop markers (data0 0: '[', 1: ']'),
+ * on track 0 at the marker's tick: the cost estimate's loop label and
+ * GOTO (m4a_engine_cost_loop_point).  Never lengthens a render.
+ */
+#define RENDER_EVT_LOOP 0x4
 
 /* A rendered event with its absolute sample position */
 typedef struct {
@@ -296,6 +309,13 @@ static void parse_track(MidiReader *r, uint32_t trackLen, uint8_t trackIndex,
                                  ((uint32_t)t1 <<  8) | t2;
                 TempoEvent te = { tick, tempo, trackIndex };
                 tempo_push(tempos, te);
+            } else if (metaType == 0x58 && metaLen == 4 && trackIndex == 0) {
+                /* Time signature (mid2agb's bar marks: the cost estimate). */
+                uint8_t ts[4];
+                for (int j = 0; j < 4; j++)
+                    if (mr_read_byte(r, &ts[j]) < 0) goto track_done;
+                RawMidiEvent ev = { tick, 0, trackIndex, RENDER_EVT_TIMESIG, ts[0], ts[1], 0 };
+                raw_push(rawEvents, ev);
             } else if (metaType >= 0x01 && metaType <= 0x07) {
                 /* Text-type meta event: check for loop markers.
                  * Meta types 0x01 (Text) and 0x06 (Marker) are most common. */
@@ -596,6 +616,12 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
 
     free(buf);
 
+    /* The loop markers for the cost estimate (RENDER_EVT_LOOP), when both are there. */
+    if (loopStartTick != UINT64_MAX && loopEndTick != UINT64_MAX && loopEndTick > loopStartTick) {
+        raw_push(&rawEvents, (RawMidiEvent){ loopStartTick, 0, 0, RENDER_EVT_LOOP, 0, 0, 0 });
+        raw_push(&rawEvents, (RawMidiEvent){ loopEndTick, 0, 0, RENDER_EVT_LOOP, 1, 0, 0 });
+    }
+
     /* ---- Sort ---- */
     if (rawEvents.count > 0)
         qsort(rawEvents.events, (size_t)rawEvents.count,
@@ -607,7 +633,8 @@ static RenderEventArray *parse_midi(const char *path, double sampleRate,
     /* ---- Compute last tick's sample position ---- */
     uint64_t lastTick = 0;
     for (int i = 0; i < rawEvents.count; i++)
-        if (rawEvents.events[i].tick > lastTick)
+        if (rawEvents.events[i].tick > lastTick && rawEvents.events[i].type != RENDER_EVT_TIMESIG
+            && rawEvents.events[i].type != RENDER_EVT_LOOP)
             lastTick = rawEvents.events[i].tick;
     *totalMidiSamples = tick_to_sample(lastTick,
                                         tempos.events, tempos.count,
@@ -907,7 +934,11 @@ static void print_usage(const char *prog)
         "                              frame seq cgb mixer total (cycles from m4aSoundMain's entry;\n"
         "                              the frame counter of --pcm-log and mgba_probe's .frames;\n"
         "                              vanilla or --hq-mixer; also with --midi, where seq is\n"
-        "                              the fixed one-track value unless --gba-tempo-grid)\n"
+        "                              the MIDI-path estimate unless --gba-tempo-grid gives\n"
+        "                              the exact term)\n"
+        "  --cost-estimate             --midi only: publish the MIDI-path sequencer estimate\n"
+        "                              even under --gba-tempo-grid (whose timing-only sequencer\n"
+        "                              still places the PSG writes), to compare the two\n"
         "  --seq-log <file>            log each frame's modeled CgbSound entry cycle\n"
         "\n"
         "Loop options (when MIDI contains '[' / ']' text events):\n"
@@ -1602,6 +1633,14 @@ static void dispatch_event(M4AEngine *engine, const RenderEvent *ev,
     case RENDER_EVT_TRACK_END: /* mid2agb's FINE */
         m4a_engine_track_end(engine, trackIdx);
         break;
+    case RENDER_EVT_LOOP:      /* mid2agb's loop label / GOTO, for the cost estimate */
+        m4a_engine_cost_loop_point(engine, ev->data0 != 0);
+        break;
+    case RENDER_EVT_TIMESIG:   /* mid2agb's bar marks (agb clocks), for the cost estimate; on the grid only */
+        if (gridClocksPerBeat && ev->data1 < 16)
+            m4a_engine_cost_time_signature(engine,
+                                           96u * ev->data0 * (gridClocksPerBeat / 24) / (1u << ev->data1));
+        break;
     case 0xE: /* Pitch Bend — convert MIDI 14-bit unsigned to signed -8192..+8191 */
     {
         int16_t bend = (int16_t)(((int)(ev->data1 << 7) | ev->data0) - 8192);
@@ -1661,6 +1700,7 @@ int main(int argc, char *argv[])
     bool        portamento    = false;
     bool        pwm           = false;
     bool        quantize      = false;  /* --quantize: the MIDI event latch */
+    bool        costEstimate  = false;  /* --cost-estimate: publish the MIDI-path sequencer estimate */
     int         gbaStartDelayOpt = -1;  /* --gba-start-delay 1 / --no-gba-start-delay 0 / -1: follow the grid */
     bool        gbaStartDelay = false;  /* MIDI time 0 at the first song tick (default under --gba-tempo-grid) */
     bool        gbaTempoGrid  = false;  /* --gba-tempo-grid: events on MPlayMain's tempoC / 150 ticks */
@@ -1758,6 +1798,8 @@ int main(int argc, char *argv[])
             respectBaseMidiKey = true;
         } else if (strcmp(argv[i], "--quantize") == 0) {
             quantize = true;
+        } else if (strcmp(argv[i], "--cost-estimate") == 0) {
+            costEstimate = true;
         } else if (strcmp(argv[i], "--gba-start-delay") == 0) {
             gbaStartDelayOpt = 1;
         } else if (strcmp(argv[i], "--no-gba-start-delay") == 0) {
@@ -1872,6 +1914,8 @@ int main(int argc, char *argv[])
     if (midiPath && !gbaTempoGrid && seqLogPath)
         fprintf(stderr, "Note: --seq-log only applies to --song / --cry, and to --midi with --gba-tempo-grid\n");
 
+    if ((songPath || cryId >= 0) && costEstimate)
+        fprintf(stderr, "Note: --cost-estimate only applies to --midi (a sequencer gives the exact term)\n");
     if (songPath || cryId >= 0) {
         if (quantize)
             fprintf(stderr, "Note: --quantize only applies to --midi (the sequencer already runs on the tick)\n");
@@ -2279,6 +2323,8 @@ int main(int argc, char *argv[])
             for (int i = 0; i < renderEvtCount; i++)
                 if (evs[i].type != RENDER_EVT_TEMPO   /* the last channel event, as totalMidiSamples */
                     && evs[i].type != RENDER_EVT_TRACK_END
+                    && evs[i].type != RENDER_EVT_TIMESIG
+                    && evs[i].type != RENDER_EVT_LOOP
                     && evs[i].samplePos < never - gba_tempo_grid_sample(0, sampleRate))
                     last = evs[i].samplePos;   /* the ticks a TEMPO of 0 never reaches are no part of it */
             totalSamples = last + tailSamps;
@@ -2395,6 +2441,19 @@ oom:
     m4a_engine_set_quantize_events(&engine, quantize);
     if (quantize)
         printf("MIDI events latched to the VBlank tick (--quantize)\n");
+    /* The cost model's MIDI-path sequencer estimate (docs/ACCURACY.md):
+     * the tracks mid2agb would write (those with notes), declared when the
+     * song starts; --cost-estimate publishes it over the timing-only
+     * sequencer's exact term. */
+    m4a_engine_set_cost_estimate_forced(&engine, costEstimate);
+    uint32_t costTrackMask = 0;
+    for (int i = 0; i < events->count; i++) {   /* the whole file: a track may start after the render ends */
+        const RenderEvent *ev = &events->events[i];
+        int t = useTrackIndex ? ev->track : ev->channel;
+        if (ev->type == 0x9 && ev->data1 > 0 && t < MAX_TRACKS)
+            costTrackMask |= 1u << t;
+    }
+    bool costSongStarted = false;
 
 
     /* ---- Allocate output buffers ---- */
@@ -2441,9 +2500,18 @@ oom:
                 samplePos = midiOrigin;
             }
             m4a_engine_start_song_tempo(&engine);
+            m4a_engine_cost_song_start(&engine, costTrackMask, player);
+            costSongStarted = true;
             if (timingSong)
                 m4a_sequencer_start(&timingSeq, timingSong);   /* MPlayStart, as the ROM's frame 2 */
             songTempoStarted = true;
+        }
+
+        /* Without the grid the cost estimate's song starts with the render
+         * (no tick grid to place it on). */
+        if (!costSongStarted) {
+            m4a_engine_cost_song_start(&engine, costTrackMask, player);
+            costSongStarted = true;
         }
 
         /* Render audio up to this event */

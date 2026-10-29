@@ -1,4 +1,5 @@
 #include "m4a_engine.h"
+#include "m4a_seq_estimate.h"
 #include "m4a_channel.h"
 #include "m4a_mixer.h"
 #include "m4a_hq_mixer.h"
@@ -644,7 +645,10 @@ int64_t m4a_engine_mixer_stall(const M4AEngine *engine, int64_t ram, int64_t mix
  * on every span it falls in, as the sequencer and CgbSound charge it. */
 static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCounter)
 {
-    M4AFrameCost c = { 0, 0, 0, 0, false };
+    M4AFrameCost c = { 0, 0, 0, 0, false, false };
+    /* The MIDI-path estimate's frame ends here whether or not it is used. */
+    bool estimated = !engine->externalSequencer && (!engine->frameHook || engine->costEstimateForced);
+    int32_t estimate = engine->externalSequencer ? 0 : m4a_est_publish(engine, stamp);
     if (engine->frameCostMaxResetPending) {
         engine->frameCostMaxResetPending = false;
         memset(&engine->frameCostMax, 0, sizeof(engine->frameCostMax));
@@ -660,12 +664,20 @@ static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCount
     int64_t sm = stamp - (M4A_CYC_SOUNDMAIN_ENTRY - M4A_CYC_M4A_SOUNDMAIN);
     /* The sequencer term.  With an M4ASequencer (or a timing-only one),
      * cgbEntryCycles is MPlayMain's charged work, exact on the corpus.
-     * Without one it is the fixed one-track value (m4a_engine_init).
-     * TODO(cpu-meter step 4): the MIDI-path estimate of MPlayMain from the
-     * events the tick applied replaces that fixed value here. */
+     * Without one, the MIDI-path estimate (m4a_seq_estimate.c): CgbSound's
+     * work is the same, shifted from where the engine ran it (the fixed
+     * entry, which places the PSG writes) to the estimated entry, the FIFO
+     * stalls moving with it. */
     int64_t cgb = stamp + engine->cgbEntryCycles;
-    int64_t cr = engine->cgbCursorEnd + M4A_CYC_CGB_TAIL;
-    cr += m4a_gba_fifo_dma_stall(g, engine->cgbCursorEnd, cr);
+    int64_t cursorEnd = engine->cgbCursorEnd;
+    if (estimated) {
+        int64_t work = cursorEnd - cgb - m4a_gba_fifo_dma_stall(g, cgb, cursorEnd);
+        cgb = sm + estimate;
+        cursorEnd = cgb + work;
+        cursorEnd += m4a_gba_fifo_dma_stall(g, cgb, cursorEnd);
+    }
+    int64_t cr = cursorEnd + M4A_CYC_CGB_TAIL;
+    cr += m4a_gba_fifo_dma_stall(g, cursorEnd, cr);
     int s2r = pcmDmaCounter <= 1 ? M4A_CYC_SM_TO_RAM_FIRST : M4A_CYC_SM_TO_RAM;
     int64_t ram = cr + s2r;
     ram += m4a_gba_fifo_dma_stall(g, cr, ram);
@@ -677,6 +689,7 @@ static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCount
     c.mixer = (int32_t)(exit - ram);
     c.total = (int32_t)(exit - sm);
     c.valid = true;
+    c.sequencerEstimated = estimated;
     engine->frameCost = c;
     if (!engine->frameCostMax.valid || c.total > engine->frameCostMax.total)
         engine->frameCostMax = c;
@@ -890,6 +903,7 @@ void m4a_engine_init(M4AEngine *engine, float sampleRate)
     m4a_psg_reset(&engine->psg[1]);
     scheduler_reset(engine);
     engine->reverb.amount = 0;
+    m4a_est_init(engine);
 }
 
 void m4a_engine_destroy(M4AEngine *engine)
@@ -1005,6 +1019,7 @@ void m4a_engine_set_tick_tempo(M4AEngine *engine, uint16_t tempoI)
         return;
     engine->tempoINext = tempoI;
     engine->tempoINextSet = true;
+    m4a_est_tempo(engine);    /* the TEMPO command of the coming tick */
 }
 
 void m4a_engine_set_voicegroup(M4AEngine *engine, ToneData *voiceGroup)
@@ -1177,6 +1192,8 @@ void m4a_engine_program_change(M4AEngine *engine, int trackIndex, uint8_t progra
     if (trackIndex >= 0 && trackIndex < MAX_TRACKS
         && queue_event(engine, (M4AQueuedEvent){ M4A_EV_PROGRAM, (uint8_t)trackIndex, program, 0, 0 }))
         return;
+    if (trackIndex >= 0 && trackIndex < MAX_TRACKS && m4a_est_active(engine))
+        m4a_est_program(engine, trackIndex);
     m4a_engine_program_change_from(engine, trackIndex, NULL, program);
 }
 
@@ -1457,7 +1474,11 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
 
     M4ATrack *track = &engine->tracks[trackIndex];
     ToneData *voice = resolve_voice(&track->currentVoice, key);
-    if (!voice) return M4A_CHANNEL_NONE;
+    if (!voice) {
+        if (m4a_est_active(engine))
+            m4a_est_note_on(engine, trackIndex, key, velocity, NULL);
+        return M4A_CHANNEL_NONE;
+    }
 
     uint8_t voiceType = voice->type & VOICE_TYPE_CGB_MASK;
     int8_t rhythmPan = 0;
@@ -1485,6 +1506,10 @@ int m4a_engine_note_on(M4AEngine *engine, int trackIndex, uint8_t key, uint8_t v
 
     /* Calculate track volumes */
     m4a_track_vol_pit_set(track);
+    /* MPlayMain's cost for this note (no sequencer): before the channel is
+     * taken, from the channels as ply_note finds them. */
+    if (m4a_est_active(engine))
+        m4a_est_note_on(engine, trackIndex, key, velocity, voice);
 
     /* Calculate final key with transposition.  pcmBaseAdjust (non-zero only when
      * the base-MIDI-key opt-in is on) is folded into the PCM key/clamp; with the
@@ -1744,6 +1769,8 @@ void m4a_engine_note_off(M4AEngine *engine, int trackIndex, uint8_t key)
         return;
     if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_NOTE_OFF, (uint8_t)trackIndex, key, 0, 0 }))
         return;
+    if (m4a_est_active(engine))
+        m4a_est_note_off(engine, trackIndex, key);
 
     /* With the latch on, a note-off reaching a channel that is still START
      * was latched into the same tick as its note-on: a note shorter than a
@@ -1897,6 +1924,8 @@ void m4a_engine_cc(M4AEngine *engine, int trackIndex, uint8_t cc, uint8_t value)
         return;
     if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_CC, (uint8_t)trackIndex, cc, value, 0 }))
         return;
+    if (m4a_est_active(engine))
+        m4a_est_cc(engine, trackIndex, cc, value);
 
     M4ATrack *track = &engine->tracks[trackIndex];
 
@@ -2044,6 +2073,8 @@ void m4a_engine_xcmd(M4AEngine *engine, int trackIndex, uint8_t command, uint8_t
         return;
     if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_XCMD, (uint8_t)trackIndex, command, value, 0 }))
         return;
+    if (m4a_est_active(engine))
+        m4a_est_xcmd(engine, trackIndex, command);
 
     M4ATrack *track = &engine->tracks[trackIndex];
 
@@ -2068,6 +2099,8 @@ void m4a_engine_pitch_bend(M4AEngine *engine, int trackIndex, int16_t bend)
         return;
     if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_BEND, (uint8_t)trackIndex, 0, 0, bend }))
         return;
+    if (m4a_est_active(engine))
+        m4a_est_bend(engine, trackIndex);
 
     M4ATrack *track = &engine->tracks[trackIndex];
 
@@ -2084,6 +2117,8 @@ void m4a_engine_track_end(M4AEngine *engine, int trackIndex)
         return;
     if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_TRACK_END, (uint8_t)trackIndex, 0, 0, 0 }))
         return;
+    if (m4a_est_active(engine))
+        m4a_est_track_end(engine, trackIndex);
 
     /* ply_fine_loop: SF_STOP on each chained channel that is on, then
      * RealClearChain (channel->track = 0): it releases owned by no track,
@@ -2266,13 +2301,23 @@ void m4a_engine_set_song_volume(M4AEngine *engine, uint8_t volume)
  */
 static void m4a_lfo_tick(M4AEngine *engine)
 {
+    /* The MIDI-path estimate charges each existing track's wait / LFO path
+     * (_081DD938 -> _081DD994, m4a_sequencer.c lfo_step) by the branch the
+     * step takes. */
+    uint16_t costMask = m4a_est_lfo_mask(engine);
     for (int i = 0; i < MAX_TRACKS; i++) {
         M4ATrack *track = &engine->tracks[i];
-        if (track->lfoSpeed == 0 || track->mod == 0 || track->finished)
+        bool cost = (costMask >> i) & 1;
+        if (track->lfoSpeed == 0 || track->mod == 0 || track->finished) {
+            if (cost && !track->finished)
+                m4a_est_charge(engine, track->lfoSpeed == 0 ? M4A_CYC_WAIT_LFOS0 : M4A_CYC_WAIT_NO_LFO);
             continue;
+        }
 
         if (track->lfoDelayC > 0) {
             track->lfoDelayC--;
+            if (cost)
+                m4a_est_charge(engine, M4A_CYC_WAIT_LFO_DELAY);
             continue;
         }
 
@@ -2291,6 +2336,11 @@ static void m4a_lfo_tick(M4AEngine *engine)
         }
 
         int8_t newModM = (int8_t)((track->mod * lfoVal) >> 6);
+        if (cost)
+            m4a_est_charge(engine, M4A_CYC_LFO_STEP
+                           + ((int8_t)(lfoPos - 0x40) < 0 ? M4A_CYC_LFO_NEG : M4A_CYC_LFO_POS)
+                           + (newModM == track->modM ? M4A_CYC_LFO_SAME
+                              : track->modT == 0 ? M4A_CYC_LFO_PIT : M4A_CYC_LFO_VOL));
         if (newModM != track->modM) {
             /* MPlayMain's LFO half only flags the track: PITCHG for
              * vibrato, VOLCHG for tremolo / autopan, for the frame's pass. */
@@ -2310,6 +2360,7 @@ void m4a_engine_tick_boundary(M4AEngine *engine)
     if (queue_event(engine, (M4AQueuedEvent){ M4A_EV_TICK_BOUNDARY, 0, 0, 0, 0 }))
         return;
     m4a_lfo_tick(engine);
+    m4a_est_tick_boundary(engine);
     if (engine->lfoTicksAhead < UINT8_MAX)
         engine->lfoTicksAhead++;
 }
@@ -2424,8 +2475,10 @@ static void mplay_main_tail(M4AEngine *engine)
         engine->tempoI = engine->tempoINext;
         engine->tempoINextSet = false;
     }
+    int ticks = 0;
     while (engine->tempoC >= 150) {
         engine->tempoC -= 150;
+        ticks++;
         /* A tick whose step m4a_engine_tick_boundary already ran. */
         if (engine->lfoTicksAhead > 0)
             engine->lfoTicksAhead--;
@@ -2433,6 +2486,9 @@ static void mplay_main_tail(M4AEngine *engine)
             m4a_lfo_tick(engine);
     }
     engine->lfoTicksAhead = 0;
+    /* The MIDI-path estimate's tick passes and VOLCHG / PITCHG pass, from
+     * the flags the engine's pass is about to consume. */
+    m4a_est_frame(engine, ticks);
     /* The VOLCHG / PITCHG pass after the ticks. */
     track_change_pass(engine);
 

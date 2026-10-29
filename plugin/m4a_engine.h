@@ -424,7 +424,59 @@ typedef void (*M4AFrameHook)(M4AEngine *engine, void *user);
 typedef struct {
     int32_t sequencer, cgb, mixer, total;
     bool valid;
+    /* sequencer is the MIDI-path estimate (no M4ASequencer drives the
+     * engine and no timing-only one publishes the exact term; docs/ACCURACY.md,
+     * "MIDI-path sequencer estimate"), not MPlayMain's exact cost. */
+    bool sequencerEstimated;
 } M4AFrameCost;
+
+/* The MIDI-path sequencer estimate (docs/ACCURACY.md, "MIDI-path sequencer
+ * estimate"; m4a_seq_estimate.c): what MPlayMain would have cost for the
+ * events the engine applied, charged with the M4A_CYC_* constants.  Engine
+ * state; a host only calls the m4a_engine_cost_* functions below. */
+#define M4A_EST_CHANNELS (TOTAL_PCM_CHANNELS + TOTAL_CGB_CHANNELS)
+typedef struct {
+    int32_t cycles;          /* MPlayMain's body since the last SoundMain (head / exit at publication) */
+    uint32_t clock;          /* tempo ticks completed (the engine's tempoC / 150 accumulator) */
+    uint8_t tickInFrame;     /* m4a_engine_tick_boundary calls since the last SoundMain */
+    bool songDeclared;       /* m4a_engine_cost_song_start ran: the existing tracks are the host's */
+    bool playing;            /* MusicPlayerInfo.status without PAUSE */
+    bool allDone;            /* this frame's tick found no track (TICK_ALL_DONE, then PAUSE) */
+    uint8_t slots;           /* the player's track count (MusicPlayerInfo.trackCount) */
+    int16_t mpEntry, mpHead, mpPaused, mpExit;
+    uint16_t exist;          /* MPT_FLG_EXIST per engine track */
+    uint16_t startPending;   /* MPT_FLG_START: the START init at the next tick */
+    uint16_t ended;          /* FINE ran this frame (EXIST for this frame's tick pass only) */
+    uint16_t firstNote;      /* a note has been seen since the start (mid2agb's implicit VOL) */
+    uint16_t volSeen;        /* a VOL came before it */
+    uint16_t barLen;         /* mid2agb's WholeNoteMark period in ticks (0: none) */
+    uint32_t barStart;       /* the clock of the last time signature's mark */
+    /* per track: mid2agb's compression state and the W## bookkeeping */
+    uint8_t lastOp[MAX_TRACKS];      /* s_lastOpName as the command byte (0: none) */
+    uint8_t lastKey[MAX_TRACKS];     /* s_lastNote (0xFF: none) */
+    uint8_t lastVel[MAX_TRACKS];     /* s_lastVelocity (0xFF: none) */
+    uint8_t extraChg[MAX_TRACKS];    /* VOLCHG / PITCHG from commands the engine never sees (KEYSH, the implicit VOL) */
+    uint8_t cmdTicks[MAX_TRACKS];    /* the frame's ticks (bit = tick index) the track had an event on */
+    bool keep[MAX_TRACKS];           /* s_keepLastOpName: a wait since the last note */
+    uint32_t lastEvClock[MAX_TRACKS];
+    uint32_t lastWClock[MAX_TRACKS];
+    uint16_t lastDur[MAX_TRACKS];    /* the last finished note's length in ticks (0: none) */
+    uint8_t lastOpKey[MAX_TRACKS];   /* key + 1 of the note whose (predicted) command is lastOp, 0: none */
+    uint32_t keyOn[MAX_TRACKS][128]; /* the clock of each key's note-on (UINT32_MAX: none): its length at the note-off */
+    uint16_t loopBarLen;             /* the bar marks at the loop start ('['), restored by the GOTO */
+    uint16_t loopBarPhase;
+    bool loopSaved;
+    /* channels a note of this frame's first tick took from the track's chain
+     * after the walk had met them (charged with that walk) */
+    uint8_t ghostWalked[MAX_TRACKS];
+    int16_t ghostCycles[MAX_TRACKS];
+    /* per channel handle (m4a_engine_note_on's): the track chains */
+    uint8_t owner[M4A_EST_CHANNELS]; /* track + 1 while chained */
+    uint8_t chFlags[M4A_EST_CHANNELS];
+    uint32_t chSeq[M4A_EST_CHANNELS];
+    uint32_t chStart[M4A_EST_CHANNELS];
+    uint32_t seqCounter;
+} M4ASeqEstimate;
 /* The budgets a host shows the cost against: the VBlank window (68 lines
  * of 1232 cycles) and the whole frame (a SoundMain running past it makes
  * the next one skip). */
@@ -660,6 +712,13 @@ struct M4AEngine {
      * added). */
     int64_t cgbCursorEnd;
     int64_t mixCycles;
+    /* The MIDI-path sequencer estimate (M4ASeqEstimate above), and
+     * costEstimateForced: publish it even while a timing-only sequencer
+     * (m4a_sequencer_init_timing) supplies the exact term (poryaaaa_render
+     * --cost-estimate, to measure the estimate against it).  Never used
+     * while an M4ASequencer drives the engine. */
+    M4ASeqEstimate seqEst;
+    bool costEstimateForced;
     };
 
 /*
@@ -1370,6 +1429,38 @@ void m4a_engine_set_tempo_bpm(M4AEngine *engine, double bpm);
  * add, so it first counts on the frame after.  Both are no-ops while a
  * sequencer drives the engine; the plugin uses set_tempo_bpm. */
 void m4a_engine_start_song_tempo(M4AEngine *engine);
+
+/* The MIDI-path sequencer estimate (docs/ACCURACY.md, "MIDI-path sequencer
+ * estimate").  Without an M4ASequencer the published frameCost.sequencer is
+ * an estimate of MPlayMain's cost from the events the engine applies
+ * (frameCost.sequencerEstimated).  What the host can tell it:
+ *
+ * m4a_engine_cost_song_start: the song starts at the next tempo tick
+ * (MPlayStart) with the tracks in trackMask (bit = engine track index: the
+ * tracks mid2agb would emit, i.e. those with notes; at most the player's
+ * track count are counted) on music player `player` (M4A_PLAYER_*, BGM for
+ * a song); bars every 96 ticks from that tick until
+ * m4a_engine_cost_time_signature says otherwise.  Without it the estimate
+ * infers: a track exists from its first note, the player is BGM, no bar
+ * marks.  m4a_engine_cost_song_stop: the player is paused (nothing
+ * playing; also the state before any note).
+ *
+ * m4a_engine_cost_time_signature: a time signature at the coming tick:
+ * mid2agb's bar marks restart there, every clocksPerBar ticks
+ * (96 * numerator * clocksPerBeat / 2^denominator; 0 = no marks).
+ *
+ * Call them where the events go (the thread that drives the engine). */
+void m4a_engine_cost_song_start(M4AEngine *engine, uint32_t trackMask, int player);
+void m4a_engine_cost_song_stop(M4AEngine *engine);
+void m4a_engine_cost_time_signature(M4AEngine *engine, uint32_t clocksPerBar);
+/* m4a_engine_cost_loop_point: the song's loop start ('[': mid2agb's label,
+ * loopEnd false) or loop end (']': every track's GOTO back to the start,
+ * loopEnd true) at the coming tick; call the end before the next pass's
+ * events of that tick. */
+void m4a_engine_cost_loop_point(M4AEngine *engine, bool loopEnd);
+/* Publish the estimate even while a timing-only sequencer supplies the exact
+ * term (measurement only: poryaaaa_render --cost-estimate). */
+void m4a_engine_set_cost_estimate_forced(M4AEngine *engine, bool forced);
 void m4a_engine_set_tick_tempo(M4AEngine *engine, uint16_t tempoI);
 /* poryaaaa_render --gba-tempo-grid (docs/ACCURACY.md, the renderer's "as the game" mode): the frame's
  * next song tick starts here.  In a frame with two ticks MPlayMain runs tick

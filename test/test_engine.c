@@ -12,6 +12,7 @@
 #include "m4a_sequencer.h"
 #include "gba_tempo_grid.h"
 #include "m4a_cry.h"
+#include "m4a_seq_estimate.h"
 #include "voicegroup_loader.h"
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -9263,10 +9264,11 @@ static void test_frame_cost_floor(void)
     ASSERT_EQ(e.mixCycles, 658 + M4A_MIX_SLOT_OFF, "floor: a sixth slot costs its walk");
     m4a_engine_destroy(&e);
 
-    /* Published: a booted engine's idle frame, no sequencer: the fixed
-     * one-track sequencer term, CgbSound with four idle channels and its
-     * tail (249 or 247 on the c15 reload) + SoundMain_4/5 (63 or 59), the
-     * floor; total is their sum, m4aSoundMain entry to its return. */
+    /* Published: a booted engine's idle frame, no sequencer: the MIDI-path
+     * estimate of a paused player (822, the probe's frame 2; 840 with the
+     * FIFO stall), CgbSound with four idle channels and its tail (249 or
+     * 247 on the c15 reload) + SoundMain_4/5 (63 or 59), the floor; total
+     * is their sum, m4aSoundMain entry to its return. */
     M4AEngine b;
     engine_init_booted(&b, 44100.0f);
     float outL[256], outR[256];
@@ -9275,9 +9277,9 @@ static void test_frame_cost_floor(void)
         advance_frames(&b, 1, outL, outR);
         M4AFrameCost c = b.frameCost;
         ASSERT(c.valid, "published: valid");
-        ASSERT_EQ(c.sequencer, b.cgbEntryCycles + M4A_CYC_SOUNDMAIN_ENTRY - M4A_CYC_M4A_SOUNDMAIN,
-                  "published: sequencer = CgbSound entry - m4aSoundMain entry");
-        ASSERT_EQ(c.sequencer, 1217, "published: the fixed one-track value (1402 - 185)");
+        ASSERT(c.sequencerEstimated, "published: no sequencer, the MIDI-path estimate");
+        ASSERT(c.sequencer == 822 || c.sequencer == 822 + M4A_CYC_FIFO_DMA_STALL,
+               "published: a paused player (1007 - 185)");
         ASSERT(c.cgb == 312 || c.cgb == 310 || c.cgb == 308, "published: idle CgbSound + tail + SoundMain_4/5");
         ASSERT_EQ(c.mixer, 498, "published: the floor");
         ASSERT_EQ(c.total, c.sequencer + c.cgb + c.mixer, "published: total = sequencer + cgb + mixer");
@@ -10253,6 +10255,169 @@ static void test_frame_cost_wiring(void)
     free(wd);
 }
 
+/* ---- The MIDI-path sequencer estimate (m4a_seq_estimate.c) ---- */
+
+/* One SoundMain's MPlayMain without the rest: the engine's tick, then the
+ * estimate's publication.  An engine that never booted has no FIFO DMA,
+ * so no stall enters the numbers. */
+static int32_t est_frame(M4AEngine *e)
+{
+    m4a_engine_tick(e);
+    return m4a_est_publish(e, 0);
+}
+
+/* A BGM song with one track (engine track 1, a plain DirectSound voice),
+ * a tick every other frame (tempoI 75), no bar marks, past its first tick
+ * and with its VOL given: frames from here are steady. */
+static void est_engine(M4AEngine *e, ToneData *voices)
+{
+    m4a_engine_init(e, 44100.0f);
+    m4a_engine_set_voicegroup(e, voices);
+    m4a_engine_program_change(e, 1, 0);
+    (void)est_frame(e);                       /* paused: the program change is no song command */
+    e->tempoI = 75;
+    e->tempoC = 0;
+    m4a_engine_cost_song_start(e, 1u << 1, M4A_PLAYER_BGM);
+    m4a_engine_cost_time_signature(e, 0);
+    for (int f = 0; f < 4; f++)               /* no tick, the START tick, no tick, a tick */
+        (void)est_frame(e);
+    m4a_engine_cc(e, 1, 7, 100);              /* VOL before the first note: no implicit VOL */
+    (void)est_frame(e);                       /* (no tick: its VOLCHG pass) */
+    (void)est_frame(e);
+    (void)est_frame(e);                       /* the next frame has a tick */
+}
+
+static void test_seq_estimate(void)
+{
+    printf("Testing the MIDI-path sequencer estimate...\n");
+    WaveData *wd = ramp_wave(1000, 1, 0);
+    ToneData voices[128];
+    memset(voices, 0, sizeof(voices));
+    voices[0].type = VOICE_DIRECTSOUND;
+    voices[0].key = 60;
+    voices[0].wav = wd;
+    voices[0].attack = 0xFF;
+    voices[0].sustain = 0xFF;
+
+    M4AEngine a, b;
+    /* Paused (no song yet): the BGM player's paused entry, 1007 - 185. */
+    m4a_engine_init(&a, 44100.0f);
+    int32_t v = est_frame(&a);
+    ASSERT_EQ(v, M4A_CYC_CGB_ENTRY_PAUSED - M4A_CYC_M4A_SOUNDMAIN, "paused: 822");
+    m4a_engine_destroy(&a);
+
+    /* No events: the skeleton only.  A frame without a tick: the player's
+     * head, the VOLCHG / PITCHG pass over ten slots (one existing track
+     * without flags), its exit -- 1217, the no-tick one-track value. */
+    est_engine(&a, voices);
+    est_engine(&b, voices);
+    const int sk0 = M4A_CYC_MP_BGM_ENTRY + M4A_CYC_MP_HEAD + M4A_CYC_APPLY_ENTER + M4A_CYC_APPLY_NO_FLAGS
+                  + 9 * M4A_CYC_APPLY_NO_TRACK + 9 * M4A_CYC_APPLY_NEXT + M4A_CYC_APPLY_LAST + M4A_CYC_MP_EXIT
+                  - M4A_CYC_M4A_SOUNDMAIN;
+    ASSERT_EQ(sk0, 1217, "skeleton: no tick, one track = 1217");
+    const int sk1 = sk0 + M4A_CYC_TICK_ENTER + M4A_CYC_TICK_TRACK + M4A_CYC_TICK_NO_CHAIN + M4A_CYC_TICK_NO_START
+                  + M4A_CYC_WAIT_NO_LFO + M4A_CYC_TICK_TRACK_END + 9 * M4A_CYC_TICK_NO_TRACK
+                  + 9 * M4A_CYC_TICK_NEXT + M4A_CYC_TICK_LAST + M4A_CYC_TICK_EXIT;
+    v = est_frame(&a);
+    ASSERT_EQ(v, sk1, "skeleton: a tick, no event (no chain, the wait path, no W##)");
+    v = est_frame(&a);
+    ASSERT_EQ(v, sk0, "skeleton: no tick, no event");
+    (void)est_frame(&b);
+    (void)est_frame(&b);
+
+    /* One note-on (the track's first: its length unknown, so an explicit
+     * command byte; key and velocity bytes), a plain voice, a free
+     * DirectSound channel, no pending flags, no LFO delay: ply_note's
+     * segments, plus the tick's W##. */
+    const int w = M4A_CYC_CMD_FETCH + M4A_CYC_CMD_BYTE + M4A_CYC_CMD_BYTE_LOW + M4A_CYC_CMD_WAIT;
+    ASSERT_EQ(w, 93, "W## = 93");
+    const int note = M4A_CYC_CMD_FETCH + M4A_CYC_CMD_BYTE + M4A_CYC_CMD_BYTE_RS + M4A_CYC_CMD_NOTE
+                   + M4A_CYC_NOTE_ENTRY + M4A_CYC_NOTE_KEY_BYTE + M4A_CYC_NOTE_VEL_BYTE
+                   + M4A_CYC_NOTE_VOICE_PLAIN + M4A_CYC_NOTE_PCM_PATH + M4A_CYC_NOTE_SCAN_ENTER + M4A_CYC_SCAN_FREE
+                   + M4A_CYC_NOTE_TAKE + M4A_CYC_NOTE_UNLINK_NONE + M4A_CYC_NOTE_CHAIN_EMPTY + M4A_CYC_NOTE_LFODL0
+                   + M4A_CYC_NOTE_TVPS + M4A_CYC_NOTE_CHNVOL + M4A_CYC_NOTE_PCM_FREQ
+                   + M4A_CYC_NOTE_STORE + M4A_CYC_NOTE_EXIT;
+    m4a_engine_note_on(&a, 1, 60, 100);
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v, note + w, "note-on: ply_note's sum + W##");
+    /* The channel is chained now: the next tick walks it (a running N## gate). */
+    (void)est_frame(&a);
+    (void)est_frame(&b);
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v,
+              M4A_CYC_TICK_CHAIN + M4A_CYC_WALK_GATE_DEC + M4A_CYC_WALK_END - M4A_CYC_TICK_NO_CHAIN,
+              "walk: one chained channel, gate decremented");
+    /* Its note-off on the next tick: no command (mid2agb's N## gate), the
+     * gate expires in the walk. */
+    (void)est_frame(&a);
+    (void)est_frame(&b);
+    m4a_engine_note_off(&a, 1, 60);
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v,
+              M4A_CYC_TICK_CHAIN + M4A_CYC_WALK_GATE_EXPIRE + M4A_CYC_WALK_END - M4A_CYC_TICK_NO_CHAIN,
+              "note-off: the gate expiry, no command, no W##");
+    m4a_engine_all_sound_off(&a);
+    for (int f = 0; f < 5; f++) {            /* the walk drops the dead channel */
+        (void)est_frame(&a);
+        (void)est_frame(&b);
+    }
+
+    /* A controller: the command byte, the table dispatch and the handler
+     * (LFODL 81: it flags nothing), plus the tick's W##.  The same command
+     * again on a later tick: running status (a data byte, 25, instead of
+     * the explicit byte and its store, 21 + 10). */
+    const int lfodl = M4A_CYC_CMD_TABLE + 81;
+    m4a_engine_cc(&a, 1, 0x1A, 4);
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v,
+              w + M4A_CYC_CMD_FETCH + M4A_CYC_CMD_BYTE + M4A_CYC_CMD_BYTE_RS + lfodl, "CC: explicit + table + handler");
+    (void)est_frame(&a);
+    (void)est_frame(&b);
+    m4a_engine_cc(&a, 1, 0x1A, 5);
+    v = est_frame(&a) - est_frame(&b);
+    ASSERT_EQ(v, w + M4A_CYC_CMD_FETCH + M4A_CYC_CMD_RUNNING + lfodl,
+              "CC: running status on the second LFODL");
+    ASSERT_EQ((M4A_CYC_CMD_BYTE + M4A_CYC_CMD_BYTE_RS) - M4A_CYC_CMD_RUNNING, 6,
+              "running status saves 6 of the explicit byte's 31");
+    m4a_engine_destroy(&a);
+    m4a_engine_destroy(&b);
+
+    /* Publication: the flag and when the estimate is used. */
+    float outL[256], outR[256];
+    M4AEngine p;
+    engine_init_booted(&p, 44100.0f);
+    advance_frames(&p, 2, outL, outR);
+    ASSERT(p.frameCost.valid && p.frameCost.sequencerEstimated, "flag: no sequencer, estimated");
+    m4a_engine_destroy(&p);
+
+    static M4ASequencer seq;
+    engine_init_booted(&p, 44100.0f);
+    m4a_sequencer_init(&seq, &p);
+    m4a_engine_set_cost_estimate_forced(&p, true);   /* never with an M4ASequencer */
+    advance_frames(&p, 2, outL, outR);
+    ASSERT(p.frameCost.valid && !p.frameCost.sequencerEstimated, "sequencer: exact, never the estimate");
+    ASSERT_EQ(p.frameCost.sequencer, p.cgbEntryCycles + M4A_CYC_SOUNDMAIN_ENTRY - M4A_CYC_M4A_SOUNDMAIN,
+              "sequencer: its own term");
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&p);
+
+    m4a_engine_init(&p, 44100.0f);
+    m4a_sequencer_init_timing(&seq, &p);
+    m4a_engine_boot(&p, false);
+    advance_frames(&p, 2, outL, outR);
+    ASSERT(p.frameCost.valid && !p.frameCost.sequencerEstimated, "timing-only sequencer: its exact term");
+    ASSERT_EQ(p.frameCost.sequencer, p.cgbEntryCycles + M4A_CYC_SOUNDMAIN_ENTRY - M4A_CYC_M4A_SOUNDMAIN,
+              "timing-only sequencer: the CgbSound entry it publishes");
+    m4a_engine_set_cost_estimate_forced(&p, true);
+    advance_frames(&p, 2, outL, outR);
+    ASSERT(p.frameCost.valid && p.frameCost.sequencerEstimated, "timing-only, forced: the estimate");
+    ASSERT_EQ(p.frameCost.total, p.frameCost.sequencer + p.frameCost.cgb + p.frameCost.mixer,
+              "forced: total = sequencer + cgb + mixer");
+    m4a_sequencer_detach(&seq);
+    m4a_engine_destroy(&p);
+    free(wd);
+}
+
 int main(void)
 {
     printf("=== M4A Engine Unit Tests ===\n\n");
@@ -10347,6 +10512,7 @@ int main(void)
     test_frame_cost_hq_paths();
     test_frame_cost_hq_wiring();
     test_frame_cost_mixer_stall();
+    test_seq_estimate();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
