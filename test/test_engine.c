@@ -6,6 +6,7 @@
 #include "m4a_channel.h"
 #include "m4a_mixer.h"
 #include "m4a_hq_mixer.h"
+#include "m4a_synth.h"
 #include "m4a_tables.h"
 #include "m4a_song.h"
 #include "m4a_sequencer.h"
@@ -9453,8 +9454,8 @@ static void test_frame_cost_paths(void)
     m4a_engine_destroy(&e);
 }
 
-/* frameCostMax holds the largest total and resets; live mode and the HQ
- * mixer publish invalid. */
+/* frameCostMax holds the largest total and resets; live mode publishes
+ * invalid, the HQ mixer its own model. */
 static void test_frame_cost_publication(void)
 {
     printf("Testing the cost model: publication, max, live and HQ...\n");
@@ -9525,12 +9526,504 @@ static void test_frame_cost_publication(void)
     m4a_engine_set_hq_mixer(&hq, true);
     m4a_engine_boot(&hq, false);
     advance_frames(&hq, 2, outL, outR);
-    ASSERT(!hq.frameCost.valid, "HQ: invalid until its model (step 3)");
+    ASSERT(hq.frameCost.valid, "HQ: costed (M4A_HQMIX_*)");
+    ASSERT_EQ(hq.frameCost.total, hq.frameCost.sequencer + hq.frameCost.cgb + hq.frameCost.mixer,
+              "HQ: total = sequencer + cgb + mixer");
+    ASSERT(hq.frameCostMax.valid, "HQ: the peak too");
+    m4a_engine_set_hq_mixer(&hq, false);
+    ASSERT(!hq.frameCost.valid && !hq.frameCostMax.valid, "HQ: toggling the mixer drops the last cost and the peak");
+    advance_frames(&hq, 1, outL, outR);
+    ASSERT(hq.frameCost.valid, "HQ: costed again by the vanilla model");
     m4a_engine_destroy(&hq);
 
     free(looped);
     free(oneShot);
     free((void *)voices[3].wav);
+}
+
+/* ---- The HQ mixer's cost (M4A_HQMIX_*, m4a_hq_mixer.c) ---- */
+
+/* mul's m as mgba's ARM_WAIT_SMUL counts it, for the data-dependent
+ * expectations below. */
+static int test_mul_m(uint32_t rs)
+{
+    uint32_t h = rs & 0xFFFFFF00u;
+    if (h == 0 || h == 0xFFFFFF00u) return 1;
+    h = rs & 0xFFFF0000u;
+    if (h == 0 || h == 0xFFFF0000u) return 2;
+    h = rs & 0xFF000000u;
+    if (h == 0 || h == 0xFF000000u) return 3;
+    return 4;
+}
+
+/* A silent sample (every byte 0, the look-ahead too): no mla ever runs,
+ * every mul is by 0 (m 1), so each path's charge is its instruction
+ * count.  `cmp` makes it DPCM-compressed (WaveData.type 1, 0x21-byte
+ * blocks of zeros decode to zeros). */
+static WaveData *zero_wave(uint32_t size, int looped, int cmp)
+{
+    uint32_t bytes = cmp ? (size / 64 + 2) * 0x21 : size + 1;
+    WaveData *wd = calloc(1, sizeof(WaveData) + bytes);
+    wd->type = cmp ? 1 : 0;
+    wd->status = looped ? 0x4000 : 0;
+    wd->freq = 13379 << 10;
+    wd->size = size;
+    wd->data = (int8_t *)((uint8_t *)wd + sizeof(WaveData));
+    return wd;
+}
+
+/* A channel set up as SoundMainRAM leaves it before the mix (the HQ init
+ * done), at step `freq` (pcmDivFreq 1), volume 2 / 2. */
+static void hq_channel(M4APCMChannel *ch, WaveData *wd, uint8_t voiceType, uint32_t freq)
+{
+    memset(ch, 0, sizeof(*ch));
+    m4a_pcm_channel_start(ch, wd, voiceType);
+    m4a_hq_channel_init(ch);
+    ch->status = CHN_ENV_SUSTAIN;
+    ch->frequency = freq;
+    ch->envelopeVolumeLeft = ch->envelopeVolumeRight = 2;
+}
+
+/* The HQ mixer's charge for one channel's frame (C_mixing_setup to
+ * C_end_channel_state_loop), the fast-loop block pasted afresh. */
+static int64_t hq_cost(M4AEngine *e, M4APCMChannel *ch)
+{
+    static uint32_t buf[M4A_HQ_BUFFER_WORDS];
+    memset(buf, 0, sizeof(buf));
+    e->mixCycles = 0;
+    e->hqFastCode = 0;
+    e->hqDma3Count = 0;
+    m4a_hq_mix_channel(e, ch, buf);
+    return e->mixCycles;
+}
+
+/* No channel: the probe's floor (mix = EXIT - RAM: 7732 at 224 samples,
+ * 12038 at 352 with a FIFO stall in it, which the mixer's own charge
+ * leaves to m4a_engine.c), reverb or not. */
+static void test_frame_cost_hq_floor(void)
+{
+    printf("Testing the cost model: the HQ mixer's fixed cost...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    m4a_engine_set_hq_mixer(&e, true);
+    ASSERT_EQ(e.pcmSamplesPerVBlank, 224, "hq floor: 13379 Hz frame");
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 7732, "hq floor: 224 samples (probe 7732)");
+    e.reverb.amount = 127;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 7732, "hq floor: reverb costs nothing more (taps of silence, m 1)");
+    m4a_engine_set_pcm_freq_mode(&e, m4a_pcm_freq_mode_from_hz(21024));
+    ASSERT_EQ(e.pcmSamplesPerVBlank, 352, "hq floor: 21024 Hz frame");
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 12038 - M4A_CYC_FIFO_DMA_STALL, "hq floor: 352 samples (probe 12038 with a stall)");
+    e.maxPcmChannels = 6;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 12020 + M4A_HQMIX_SKIP + M4A_HQMIX_LOOP_NEXT, "hq floor: a sixth slot costs its walk");
+    m4a_engine_destroy(&e);
+
+    /* Published: a booted HQ engine's idle frames. */
+    M4AEngine b;
+    m4a_engine_init(&b, 44100.0f);
+    m4a_engine_set_hq_mixer(&b, true);
+    m4a_engine_boot(&b, false);
+    float outL[256], outR[256];
+    int ok = 1;
+    for (int f = 0; f < 20; f++) {
+        advance_frames(&b, 1, outL, outR);
+        M4AFrameCost c = b.frameCost;
+        if (!c.valid || c.total != c.sequencer + c.cgb + c.mixer
+            || (c.mixer != 7732 && c.mixer != 7732 + M4A_CYC_FIFO_DMA_STALL))
+            ok = 0;
+    }
+    ASSERT(ok, "hq published: the floor (with or without a FIFO stall), total the sum of the terms");
+    m4a_engine_destroy(&b);
+}
+
+/* N identical channels cost N times one (each replacing an idle slot's
+ * walk); the fast loop's block stays pasted. */
+static void test_frame_cost_hq_linear(void)
+{
+    printf("Testing the cost model: HQ, identical channels scale linearly...\n");
+    WaveData *wd = ramp_wave(1000, 1, 0);
+    int64_t cost[6];
+    for (int n = 0; n <= 5; n++) {
+        M4AEngine e;
+        m4a_engine_init(&e, 44100.0f);
+        m4a_engine_set_hq_mixer(&e, true);
+        e.hqFastCode = 1;   /* the < 1.0 block already in place */
+        for (int i = 0; i < n; i++) {
+            M4APCMChannel *ch = &e.pcmChannels[i];
+            m4a_pcm_channel_start(ch, wd, VOICE_DIRECTSOUND);
+            m4a_hq_channel_init(ch);
+            ch->status = CHN_ENV_SUSTAIN | CHN_LOOP;
+            ch->envelopeVolume = 200;
+            ch->rightVolume = ch->leftVolume = 100;
+            ch->frequency = 0x1000;   /* x pcmDivFreq: about 0.7 source samples per output */
+        }
+        m4a_hq_sound_main_ram(&e, 0, 5);
+        cost[n] = e.mixCycles;
+        ASSERT_EQ(e.hqDma3Count, n, "hq linear: one DMA3 copy per channel");
+        m4a_engine_destroy(&e);
+    }
+    int64_t per = cost[1] - cost[0];
+    ASSERT(per > 224 * 9, "hq linear: a channel costs at least its 224 samples");
+    int ok = 1;
+    for (int n = 1; n <= 5; n++)
+        if (cost[n] - cost[n - 1] != per) ok = 0;
+    ASSERT(ok, "hq linear: every added channel costs the same");
+    ASSERT_EQ(cost[0], 7732, "hq linear: no channel, the floor");
+    free(wd);
+}
+
+/* Each HQ path's charge for one synthetic channel-frame (224 samples,
+ * pcmDivFreq 1: `frequency` is the step), from the constants.  Silent
+ * samples keep the data-dependent terms (mla, m) out of the sums. */
+static void test_frame_cost_hq_paths(void)
+{
+    printf("Testing the cost model: each HQ mixer path's charge...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    m4a_engine_set_hq_mixer(&e, true);
+    e.pcmDivFreq = 1;
+    M4APCMChannel ch;
+    /* to C_data_load_uncomp_for: the step mul by divFreq 1 (m 1), umlal by 224 (m 1) */
+    const int64_t setup = M4A_HQMIX_TO_COMP_REV + M4A_HQMIX_SETUP + 1 + 1;
+    const int64_t fastIn = M4A_HQMIX_SELECT + M4A_HQMIX_PASTE + M4A_HQMIX_FAST_ENTRY + M4A_HQMIX_LOAD_STACK;
+    const int64_t fastOut = M4A_HQMIX_LOOP_LAST + M4A_HQMIX_FAST_EXIT + M4A_HQMIX_END;
+#define COPY(adv) (M4A_HQMIX_COPY + M4A_HQMIX_DMA3 + M4A_HQMIX_DMA3_WORD * (((adv) + 7) >> 2) + M4A_HQMIX_VLA)
+    WaveData *z = zero_wave(2000, 0, 0);
+
+    /* The < 1.0 block at 0.5: advance 112, a DMA3 copy of 29 words.  Per
+     * 8-sample pass the multiply runs at samples 0 (the pass's subs), 1, 3,
+     * 5, 7 (after a step that did not advance) and the ldrplsb at 1, 3, 5, 7. */
+    hq_channel(&ch, z, VOICE_DIRECTSOUND, 0x400000);
+    int64_t lt1 = setup + COPY(112) + fastIn
+                + 28 * (M4A_HQMIX_FAST_ITER + 8 * M4A_HQMIX_FAST_SAMPLE + 5 + 4 * M4A_HQMIX_LOAD_STACK) + fastOut;
+    ASSERT_EQ(hq_cost(&e, &ch), lt1, "hq paths: fast loop < 1.0");
+    ASSERT_EQ(e.hqDma3Count, 1, "hq paths: ... one DMA3 copy recorded");
+    ASSERT_EQ(e.hqDma3Start[0], setup + M4A_HQMIX_COPY, "hq paths: ... starting after the stmia");
+    ASSERT_EQ(e.hqDma3Len[0], M4A_HQMIX_DMA3 + 29 * M4A_HQMIX_DMA3_WORD, "hq paths: ... 29 words");
+    /* The same block again: previous_fast_code holds it, no paste. */
+    {
+        static uint32_t buf[M4A_HQ_BUFFER_WORDS];
+        hq_channel(&ch, z, VOICE_DIRECTSOUND, 0x400000);
+        e.mixCycles = 0;
+        m4a_hq_mix_channel(&e, &ch, buf);
+        e.mixCycles = 0;
+        hq_channel(&ch, z, VOICE_DIRECTSOUND, 0x400000);
+        m4a_hq_mix_channel(&e, &ch, buf);
+        ASSERT_EQ(e.mixCycles, lt1 - M4A_HQMIX_PASTE, "hq paths: the block in place is not pasted again");
+    }
+
+    /* The 1.0 .. 2.0 block at 1.5: advance 336 (85 words); a multiply only
+     * at each pass's first sample (every diff is 0); the second ldrsb on
+     * every other sample. */
+    hq_channel(&ch, z, VOICE_DIRECTSOUND, 0xC00000);
+    ASSERT_EQ(hq_cost(&e, &ch),
+              setup + COPY(336) + fastIn
+              + 28 * (M4A_HQMIX_FAST_ITER + 8 * (M4A_HQMIX_FAST_SAMPLE + M4A_HQMIX_LOAD_STACK) + 1
+                      + 4 * M4A_HQMIX_LOAD_STACK) + fastOut,
+              "hq paths: fast loop 1.0 .. 2.0");
+
+    /* The > 2.0 block at 2.5: advance 560 (141 words), two loads a sample. */
+    hq_channel(&ch, z, VOICE_DIRECTSOUND, 0x1400000);
+    ASSERT_EQ(hq_cost(&e, &ch),
+              setup + COPY(560) + fastIn
+              + 28 * (M4A_HQMIX_FAST_ITER + 8 * (M4A_HQMIX_FAST_SAMPLE + 2 * M4A_HQMIX_LOAD_STACK) + 1) + fastOut,
+              "hq paths: fast loop > 2.0");
+
+    /* At 5.0 the advance (1120) is past 0x400: no copy, the loads from ROM. */
+    hq_channel(&ch, z, VOICE_DIRECTSOUND, 0x2800000);
+    ASSERT_EQ(hq_cost(&e, &ch),
+              setup + M4A_HQMIX_DIRECT + M4A_HQMIX_SELECT + M4A_HQMIX_PASTE + M4A_HQMIX_FAST_ENTRY
+              + M4A_HQMIX_LOAD_ROM
+              + 28 * (M4A_HQMIX_FAST_ITER + 8 * (M4A_HQMIX_FAST_SAMPLE + 2 * M4A_HQMIX_LOAD_ROM) + 1) + fastOut,
+              "hq paths: fast loop from ROM (advance >= 0x400)");
+    ASSERT_EQ(e.hqDma3Count, 0, "hq paths: ... no DMA3 copy");
+
+    /* FIX, the frame inside the sample: 55 blocks of 4, then the 4-sample
+     * rest; a ramp adds a nonzero sample's mlane per block sample (219 of
+     * the 220: 10 * 128 wraps to 0). */
+    hq_channel(&ch, z, VOICE_DIRECTSOUND_NO_RESAMPLE, 0);
+    const int64_t fix = M4A_HQMIX_TO_FIX + M4A_HQMIX_FIX_SETUP + M4A_HQMIX_FIX_CHECK + 55 * M4A_HQMIX_FIX_BLOCK
+                      + M4A_HQMIX_LOOP_LAST + M4A_HQMIX_FIX_REWIND + M4A_HQMIX_FIX_REST + 4 * M4A_HQMIX_FIX_SAMPLE
+                      + M4A_HQMIX_LOOP_LAST + M4A_HQMIX_FIX_DONE + M4A_HQMIX_END_STORE;
+    ASSERT_EQ(hq_cost(&e, &ch), fix, "hq paths: FIX");
+    WaveData *ramp = ramp_wave(1000, 0, 0);
+    hq_channel(&ch, ramp, VOICE_DIRECTSOUND_NO_RESAMPLE, 0);
+    ASSERT_EQ(hq_cost(&e, &ch), fix + 219 * M4A_HQMIX_FIX_NONZERO, "hq paths: FIX, nonzero samples");
+
+    /* DPCM forward at 1.0 (the 1.0 .. 2.0 block, r4 = -1.0: never a
+     * second load): blocks 0..3 of the first frame decoded onto the stack. */
+    WaveData *zc = zero_wave(2000, 0, 1);
+    hq_channel(&ch, zc, VOICE_DIRECTSOUND, 0x800000);
+    ASSERT(ch.type & VOICE_TYPE_CMP, "hq paths: the zero DPCM sample is compressed");
+    const int64_t cmpFast = M4A_HQMIX_SELECT + M4A_HQMIX_PASTE + M4A_HQMIX_FAST_ENTRY + M4A_HQMIX_LOAD_STACK
+                          + 28 * (M4A_HQMIX_FAST_ITER + 8 * (M4A_HQMIX_FAST_SAMPLE + M4A_HQMIX_LOAD_STACK) + 1)
+                          + fastOut;
+    ASSERT_EQ(hq_cost(&e, &ch),
+              setup + M4A_HQMIX_SETUP_CMP + M4A_HQMIX_COMP + M4A_HQMIX_COMP_FOR + M4A_HQMIX_DECODE_SETUP + 1
+              + 4 * M4A_HQMIX_BLOCK + M4A_HQMIX_LOOP_LAST + M4A_HQMIX_DECODE_DONE + cmpFast,
+              "hq paths: CMP forward (4 blocks)");
+
+    /* DPCM reverse from the end (index 2000): blocks (2000 - 225) >> 6 =
+     * 27 .. 31, 5 of them. */
+    hq_channel(&ch, zc, VOICE_DIRECTSOUND | VOICE_TYPE_REV, 0x800000);
+    ASSERT_EQ(hq_cost(&e, &ch),
+              setup + M4A_HQMIX_SETUP_CMP + M4A_HQMIX_COMP_REV + M4A_HQMIX_COMP_REV_SETUP + M4A_HQMIX_DECODE_SETUP + 1
+              + 5 * M4A_HQMIX_BLOCK + M4A_HQMIX_LOOP_LAST + M4A_HQMIX_DECODE_DONE + cmpFast,
+              "hq paths: CMP reverse (5 blocks)");
+
+    /* Uncompressed reverse from the end: bytes (2000 - 225) & ~3 = 1772 ..
+     * 2000, 57 words byte-swapped onto the stack. */
+    hq_channel(&ch, z, VOICE_DIRECTSOUND | VOICE_TYPE_REV, 0x800000);
+    ASSERT_EQ(hq_cost(&e, &ch),
+              setup + M4A_HQMIX_SETUP_UREV + M4A_HQMIX_UREV + 57 * M4A_HQMIX_UREV_WORD + M4A_HQMIX_LOOP_LAST
+              + M4A_HQMIX_UREV_DONE + cmpFast,
+              "hq paths: uncompressed reverse (57 words)");
+
+    /* The stack check: sp too low for the 256 decoded bytes, the channel
+     * skipped (bhs C_end_mixing). */
+    e.hqStackSp = 0x03007900 + 200;
+    hq_channel(&ch, zc, VOICE_DIRECTSOUND, 0x800000);
+    ASSERT_EQ(hq_cost(&e, &ch),
+              setup + M4A_HQMIX_SETUP_CMP + M4A_HQMIX_COMP + M4A_HQMIX_STACK_SKIP + M4A_HQMIX_END,
+              "hq paths: the stack check skips the channel");
+    e.hqStackSp = M4A_HQ_STACK_SP_DEFAULT;
+
+    /* The synths: pulse (data-independent), saw and triangle (their mla's
+     * m by the wave value, as the oscillators produce it). */
+    static const uint8_t descPulse[] = { 0x80, 0x00, 0x40, 0x20, 0x80, 0x10 };
+    static const uint8_t descSaw[] = { 0x80, 0x01, 0x00, 0x00 };
+    static const uint8_t descTri[] = { 0x80, 0x02, 0x00, 0x00 };
+    const int64_t synthIn = M4A_HQMIX_TO_COMP_REV + M4A_HQMIX_SETUP_SYNTH + 1;
+    WaveData *sp = make_synth_wave(descPulse, sizeof(descPulse));
+    hq_channel(&ch, sp, VOICE_DIRECTSOUND, 0x400000);
+    ASSERT_EQ(ch.type, VOICE_TYPE_SPL, "hq paths: a zero-size sample is a synth");
+    ASSERT_EQ(hq_cost(&e, &ch),
+              synthIn + M4A_HQMIX_SYNTH + M4A_HQMIX_PULSE_SETUP + 28 * M4A_HQMIX_PULSE_ITER + M4A_HQMIX_LOOP_LAST
+              + M4A_HQMIX_PULSE_EXIT + M4A_HQMIX_END,
+              "hq paths: synth pulse");
+    WaveData *ss = make_synth_wave(descSaw, sizeof(descSaw));
+    hq_channel(&ch, ss, VOICE_DIRECTSOUND, 0x400000);
+    {
+        uint32_t r7 = ch.fw;
+        int32_t r2 = ch.count;
+        int64_t mlas = 0;
+        for (int i = 0; i < 224; i++) {
+            int32_t v = m4a_synth_saw_sample(&r7, &r2, 0x400000u << 3);
+            if (v != 0)
+                mlas += M4A_HQMIX_MLA + test_mul_m((uint32_t)v);
+        }
+        ASSERT(mlas > 0, "hq paths: the saw mixes");
+        ASSERT_EQ(hq_cost(&e, &ch),
+                  synthIn + M4A_HQMIX_SAW + 56 * (M4A_HQMIX_SAW_ITER + 4 * M4A_HQMIX_SAW_SAMPLE) + M4A_HQMIX_LOOP_LAST
+                  + mlas + M4A_HQMIX_SYNTH_EXIT + M4A_HQMIX_END,
+                  "hq paths: synth saw");
+    }
+    WaveData *st = make_synth_wave(descTri, sizeof(descTri));
+    hq_channel(&ch, st, VOICE_DIRECTSOUND, 0x400000);
+    {
+        uint32_t r7 = ch.fw;
+        int64_t ms = 0;
+        for (int i = 0; i < 224; i++)
+            ms += test_mul_m((uint32_t)m4a_synth_triangle_sample(&r7, 0x400000u << 3));
+        ASSERT_EQ(hq_cost(&e, &ch),
+                  synthIn + M4A_HQMIX_TRI + 56 * (M4A_HQMIX_TRI_ITER + 4 * M4A_HQMIX_TRI_SAMPLE) + ms
+                  + M4A_HQMIX_LOOP_LAST + M4A_HQMIX_SYNTH_EXIT + M4A_HQMIX_END,
+                  "hq paths: synth triangle");
+    }
+
+    /* Volume 0: skipped at C_mixing_setup. */
+    hq_channel(&ch, z, VOICE_DIRECTSOUND, 0x400000);
+    ch.envelopeVolumeLeft = ch.envelopeVolumeRight = 0;
+    ASSERT_EQ(hq_cost(&e, &ch), M4A_HQMIX_VOL_ZERO, "hq paths: volume 0");
+
+    /* A channel ending inside the frame: a 10-sample one-shot at 1.0 takes
+     * the unbuffered loop (count 10 <= advance 224), advances on each
+     * sample (one ROM ldrsb), and ends on the 10th; the rest of the frame
+     * is not run. */
+    WaveData *short10 = zero_wave(10, 0, 0);
+    hq_channel(&ch, short10, VOICE_DIRECTSOUND, 0x800000);
+    int64_t partial = hq_cost(&e, &ch);
+    ASSERT_EQ(partial,
+              setup + M4A_HQMIX_UNBUF + 10 * (M4A_HQMIX_UNBUF_SAMPLE + 1) + 9 * M4A_HQMIX_UNBUF_ADVANCE
+              + M4A_HQMIX_UNBUF_END + M4A_HQMIX_END_STOP,
+              "hq paths: a channel ending mid-frame charges its partial frame");
+    ASSERT_EQ(ch.status, 0, "hq paths: ... and ended");
+    /* ... looping instead: the wrap (relative) on every 10th sample, the
+     * whole frame. */
+    WaveData *loop10 = zero_wave(10, 1, 0);
+    hq_channel(&ch, loop10, VOICE_DIRECTSOUND, 0x800000);
+    ch.status |= CHN_LOOP;
+    ASSERT_EQ(hq_cost(&e, &ch),
+              setup + M4A_HQMIX_UNBUF + 224 * (M4A_HQMIX_UNBUF_SAMPLE + 1 + M4A_HQMIX_UNBUF_ADVANCE)
+              + 22 * M4A_HQMIX_UNBUF_WRAP + M4A_HQMIX_LOOP_LAST + M4A_HQMIX_END,
+              "hq paths: unbuffered, a loop wrapping 22 times");
+
+    /* The same partial frame through SoundMainRAM: the slot walk, the
+     * envelope (sustain) and the volumes, then the mix; volumes from env
+     * 255, sides 100, master 15. */
+    e.masterVolume = 15;
+    e.pcmDivFreq = 1;
+    m4a_pcm_channel_start(&e.pcmChannels[0], short10, VOICE_DIRECTSOUND);
+    m4a_hq_channel_init(&e.pcmChannels[0]);
+    e.pcmChannels[0].status = CHN_ENV_SUSTAIN;
+    e.pcmChannels[0].envelopeVolume = 255;
+    e.pcmChannels[0].leftVolume = e.pcmChannels[0].rightVolume = 100;
+    e.pcmChannels[0].frequency = 0x800000;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 7732 - M4A_HQMIX_SKIP + M4A_HQMIX_ENV_HEAD + M4A_HQMIX_ENV_NOT_IEC + M4A_HQMIX_ENV_NOT_STOP
+                           + M4A_HQMIX_ENV_NOT_DECAY + M4A_HQMIX_ENV_SUSTAIN + M4A_HQMIX_VOL + partial,
+              "hq paths: the partial frame inside SoundMainRAM");
+    /* A release reaching 0 ends the channel in the envelope step. */
+    m4a_pcm_channel_start(&e.pcmChannels[0], short10, VOICE_DIRECTSOUND);
+    m4a_hq_channel_init(&e.pcmChannels[0]);
+    e.pcmChannels[0].status = CHN_STOP | CHN_ENV_SUSTAIN;
+    e.pcmChannels[0].envelopeVolume = 1;
+    e.pcmChannels[0].release = 0;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 7732 - M4A_HQMIX_SKIP + M4A_HQMIX_ENV_HEAD + M4A_HQMIX_ENV_NOT_IEC
+                           + M4A_HQMIX_ENV_RELEASE_ZERO + M4A_HQMIX_ENV_ECHO_NONE + M4A_HQMIX_STOP,
+              "hq paths: a release reaching 0 ends the channel at C_stop_channel");
+    ASSERT_EQ(e.pcmChannels[0].status, 0, "hq paths: ... and ended");
+#undef COPY
+    free(z); free(ramp); free(zc); free(sp); free(ss); free(st); free(short10); free(loop10);
+    m4a_engine_destroy(&e);
+}
+
+/* The wiring of the HQ branches the probe corpus never takes (counted from
+ * hq/m4a_1.s like the rest): each is charged where the port takes it. */
+static void test_frame_cost_hq_wiring(void)
+{
+    printf("Testing the cost model: the wiring of the unprobed HQ branches...\n");
+    M4AEngine e;
+    m4a_engine_init(&e, 44100.0f);
+    m4a_engine_set_hq_mixer(&e, true);
+    e.pcmDivFreq = 1;
+    e.masterVolume = 15;
+    WaveData *z = zero_wave(2000, 0, 0);
+    const int64_t floor1 = 7732 - M4A_HQMIX_SKIP;   /* the frame with slot 0 taken by the channel */
+    const int64_t head = M4A_HQMIX_ENV_HEAD;
+    /* One channel through SoundMainRAM at side volumes 0 (a surviving
+     * channel's mix is then C_mixing_setup's volume-0 skip). */
+    M4APCMChannel *c0 = &e.pcmChannels[0];
+#define SETUP_CH(st) do { m4a_pcm_channel_start(c0, z, VOICE_DIRECTSOUND); m4a_hq_channel_init(c0); \
+                          c0->status = (st); c0->leftVolume = c0->rightVolume = 0; } while (0)
+
+    SETUP_CH(CHN_START | CHN_STOP);
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, floor1 + M4A_HQMIX_START_STOP + M4A_HQMIX_STOP, "hq wiring: SF_START | SF_STOP");
+
+    SETUP_CH(CHN_IEC | CHN_ENV_SUSTAIN);
+    c0->pseudoEchoLength = 5;
+    c0->envelopeVolume = 40;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, floor1 + head + M4A_HQMIX_ENV_IEC + M4A_HQMIX_VOL + M4A_HQMIX_VOL_ZERO,
+              "hq wiring: pseudo-echo continuing");
+
+    SETUP_CH(CHN_IEC | CHN_ENV_SUSTAIN);
+    c0->pseudoEchoLength = 1;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, floor1 + head + M4A_HQMIX_ENV_IEC_END + M4A_HQMIX_STOP, "hq wiring: pseudo-echo running out");
+
+    SETUP_CH(CHN_STOP | CHN_ENV_SUSTAIN);
+    c0->envelopeVolume = 100;
+    c0->release = 128;               /* 100 -> 50, at or below the echo volume */
+    c0->pseudoEchoVolume = 60;
+    c0->pseudoEchoLength = 10;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, floor1 + head + M4A_HQMIX_ENV_NOT_IEC + M4A_HQMIX_ENV_RELEASE_LOW + M4A_HQMIX_ENV_ECHO_START
+                           + M4A_HQMIX_VOL + M4A_HQMIX_VOL_ZERO,
+              "hq wiring: release into the pseudo-echo");
+    ASSERT(c0->status & CHN_IEC, "hq wiring: ... the echo started");
+
+    SETUP_CH(CHN_STOP | CHN_ENV_SUSTAIN);
+    c0->envelopeVolume = 1;
+    c0->release = 0;                 /* -> 0, with an echo to go to */
+    c0->pseudoEchoVolume = 30;
+    c0->pseudoEchoLength = 10;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, floor1 + head + M4A_HQMIX_ENV_NOT_IEC + M4A_HQMIX_ENV_RELEASE_ZERO + M4A_HQMIX_ENV_ECHO_START
+                           + M4A_HQMIX_VOL + M4A_HQMIX_VOL_ZERO,
+              "hq wiring: release to 0 into the pseudo-echo");
+
+    SETUP_CH(CHN_ENV_ATTACK);
+    c0->envelopeVolume = 10;
+    c0->attack = 20;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    const int64_t toAttack = head + M4A_HQMIX_ENV_NOT_IEC + M4A_HQMIX_ENV_NOT_STOP + M4A_HQMIX_ENV_NOT_DECAY
+                           + M4A_HQMIX_ENV_TO_ATTACK;
+    ASSERT_EQ(e.mixCycles, floor1 + toAttack + M4A_HQMIX_ENV_ATTACK + M4A_HQMIX_VOL + M4A_HQMIX_VOL_ZERO,
+              "hq wiring: an attack step below the peak");
+    SETUP_CH(CHN_ENV_ATTACK);
+    c0->envelopeVolume = 250;
+    c0->attack = 20;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, floor1 + toAttack + M4A_HQMIX_ENV_ATTACK_PEAK + M4A_HQMIX_VOL + M4A_HQMIX_VOL_ZERO,
+              "hq wiring: an attack step reaching 0xFF");
+
+    /* The loop setup of a looping compressed sample (bcs taken). */
+    WaveData *zcl = zero_wave(2000, 1, 1);
+    m4a_pcm_channel_start(c0, zcl, VOICE_DIRECTSOUND);
+    m4a_hq_channel_init(c0);
+    c0->status = CHN_ENV_SUSTAIN | CHN_LOOP;
+    c0->leftVolume = c0->rightVolume = 0;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, floor1 + head + M4A_HQMIX_ENV_NOT_IEC + M4A_HQMIX_ENV_NOT_STOP + M4A_HQMIX_ENV_NOT_DECAY
+                           + M4A_HQMIX_ENV_SUSTAIN + M4A_HQMIX_VOL + M4A_HQMIX_VOL_LOOP_CMP + M4A_HQMIX_VOL_ZERO,
+              "hq wiring: a looping compressed sample's loop setup");
+    c0->status = 0;
+#undef SETUP_CH
+
+    /* The stack check of the reversed pre-cached paths. */
+    M4APCMChannel ch;
+    const int64_t setup = M4A_HQMIX_TO_COMP_REV + M4A_HQMIX_SETUP + 1 + 1;
+    WaveData *zc = zero_wave(2000, 0, 1);
+    e.hqStackSp = 0x03007900 + 200;
+    hq_channel(&ch, zc, VOICE_DIRECTSOUND | VOICE_TYPE_REV, 0x800000);
+    ASSERT_EQ(hq_cost(&e, &ch), setup + M4A_HQMIX_SETUP_CMP + M4A_HQMIX_COMP_REV + M4A_HQMIX_STACK_SKIP_REV + M4A_HQMIX_END,
+              "hq wiring: CMP reverse skipped by the stack check");
+    hq_channel(&ch, z, VOICE_DIRECTSOUND | VOICE_TYPE_REV, 0x800000);
+    ASSERT_EQ(hq_cost(&e, &ch), setup + M4A_HQMIX_SETUP_UREV + M4A_HQMIX_STACK_SKIP_REV + M4A_HQMIX_END,
+              "hq wiring: uncompressed reverse skipped by the stack check");
+    e.hqStackSp = M4A_HQ_STACK_SP_DEFAULT;
+
+    /* A DPCM position past block 255: the block-address mla's m is 2. */
+    WaveData *big = zero_wave(20000, 0, 1);
+    hq_channel(&ch, big, VOICE_DIRECTSOUND, 0x800000);
+    ch.currentPointer = big->data + 17000;        /* sample index 17000: block 265 */
+    ch.count = 3000;
+    ASSERT_EQ(hq_cost(&e, &ch),
+              setup + M4A_HQMIX_SETUP_CMP + M4A_HQMIX_COMP + M4A_HQMIX_COMP_FOR + M4A_HQMIX_DECODE_SETUP + 2
+              + 5 * M4A_HQMIX_BLOCK + M4A_HQMIX_LOOP_LAST + M4A_HQMIX_DECODE_DONE
+              + M4A_HQMIX_SELECT + M4A_HQMIX_PASTE + M4A_HQMIX_FAST_ENTRY + M4A_HQMIX_LOAD_STACK
+              + 28 * (M4A_HQMIX_FAST_ITER + 8 * (M4A_HQMIX_FAST_SAMPLE + M4A_HQMIX_LOAD_STACK) + 1)
+              + M4A_HQMIX_LOOP_LAST + M4A_HQMIX_FAST_EXIT + M4A_HQMIX_END,
+              "hq wiring: CMP forward past block 255 (5 blocks: 17000 & 63 = 40)");
+
+    /* FIX entered with count 0 (a start offset at the sample's end): the
+     * port stops it (a host guard; the ROM would read on). */
+    hq_channel(&ch, z, VOICE_DIRECTSOUND_NO_RESAMPLE, 0);
+    ch.count = 0;
+    ASSERT_EQ(hq_cost(&e, &ch), M4A_HQMIX_TO_FIX + M4A_HQMIX_FIX_SETUP + M4A_HQMIX_END_STOP, "hq wiring: FIX at count 0");
+
+    /* The shadow pool (polyphony debug) is not charged and leaves
+     * previous_fast_code alone. */
+    e.maxPcmChannels = 5;
+    e.hqFastCode = 2;
+    m4a_pcm_channel_start(&e.pcmChannels[MAX_PCM_CHANNELS], z, VOICE_DIRECTSOUND);
+    m4a_hq_channel_init(&e.pcmChannels[MAX_PCM_CHANNELS]);
+    e.pcmChannels[MAX_PCM_CHANNELS].status = CHN_ENV_SUSTAIN;
+    e.pcmChannels[MAX_PCM_CHANNELS].envelopeVolume = 255;
+    e.pcmChannels[MAX_PCM_CHANNELS].leftVolume = e.pcmChannels[MAX_PCM_CHANNELS].rightVolume = 100;
+    e.pcmChannels[MAX_PCM_CHANNELS].frequency = 0x400000;
+    m4a_hq_sound_main_ram(&e, 0, 5);
+    ASSERT_EQ(e.mixCycles, 7732, "hq wiring: the shadow pool costs nothing");
+    ASSERT_EQ(e.hqFastCode, 2, "hq wiring: ... and leaves the pasted block");
+    ASSERT_EQ(e.hqDma3Count, 0, "hq wiring: ... and records no copy");
+    free(z); free(zcl); free(zc); free(big);
+    m4a_engine_destroy(&e);
 }
 
 /* The wiring of the branches the probe corpus never takes (their
@@ -9771,6 +10264,10 @@ int main(void)
     test_frame_cost_paths();
     test_frame_cost_publication();
     test_frame_cost_wiring();
+    test_frame_cost_hq_floor();
+    test_frame_cost_hq_linear();
+    test_frame_cost_hq_paths();
+    test_frame_cost_hq_wiring();
 
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

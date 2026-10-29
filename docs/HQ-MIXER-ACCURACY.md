@@ -694,6 +694,12 @@ every failure the floor at the 798-cycle timer's crossing rate (step 11).
   `m4a_mixer.c`) runs the same ones under vanilla's accumulate (its LFO
   and saw arithmetic re-derived from the measured code, its own unit
   tests kept).
+- **CPU cost** (cpu-meter step 3): the mixer charges `M4A_HQMIX_*` into
+  `engine->mixCycles` at the ported labels and `frameCost` is published
+  in HQ mode as in vanilla (`docs/ACCURACY.md`, "SoundMain cost model":
+  the HQ table, the DMA3 / FIFO interleave, both HQ corpora at max |Δ| 0).
+  Counting-only state: `hqFastCode` (`previous_fast_code`, reset with the
+  mode) and the frame's DMA3 copies (`hqDma3Start` / `hqDma3Len`).
 - **Shadow pool / polyphony debug**: the HQ pass mixes the shadow channels
   into `hqMutedBuffer` as the vanilla pass mixes into `mutedFrame`; the
   invert mode's downsampler output is the audible one.

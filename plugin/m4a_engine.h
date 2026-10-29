@@ -417,7 +417,10 @@ typedef void (*M4AFrameHook)(M4AEngine *engine, void *user);
  * return and SoundMain_4/5); mixer: SoundMainRAM entry -> m4aSoundMain's
  * return (the mix and the 10-cycle epilogue after SoundMain returns).
  * total = sequencer + cgb + mixer.  valid is false until a complete
- * frame has been costed, in live mode, and (for now) with the HQ mixer. */
+ * frame has been costed and in live mode. */
+/* At most one DMA3 copy per real channel and frame (the HQ fast path). */
+#define M4A_HQ_DMA3_MAX 16
+
 typedef struct {
     int32_t sequencer, cgb, mixer, total;
     bool valid;
@@ -497,6 +500,16 @@ struct M4AEngine {
      * 2).  A property of the game's call depth at the interrupt; the test
      * ROM's measured value (0x03007DD0, a 1220-byte budget) is the default. */
     uint32_t hqStackSp;
+    /* The HQ fast loop's previous_fast_code (counting only: which of the
+     * three step blocks is pasted into C_fast_mixing_loop; 0 none, as after
+     * m4aSoundInit's copy): a different block costs the paste
+     * (M4A_HQMIX_PASTE). */
+    uint8_t hqFastCode;
+    /* The HQ fast path's DMA3 copies this frame (counting only): each one's
+     * start, cycles after SoundMainRAM's entry, and length. */
+    int hqDma3Count;
+    int32_t hqDma3Start[M4A_HQ_DMA3_MAX];
+    int32_t hqDma3Len[M4A_HQ_DMA3_MAX];
     int64_t nextVSync;           /* next m4aSoundVSync (VCOUNT 150 interrupt) */
     int64_t nextSoundMain;       /* next m4aSoundMain (VBLANK interrupt) */
     int bootStep;                /* progress through the boot-time register writes */
@@ -899,7 +912,7 @@ struct M4AEngine {
 #define M4A_MIX_SLOT_LAST          (-2)  /* the last slot's _081DD240: ble taken, no adds / b */
 #define M4A_MIX_EXIT               33    /* _081DD24A -> RET (pops; the bx r3 refills from ROM, 4 more than from IWRAM) */
 #define M4A_MIX_EPILOGUE           10    /* RET -> EXIT, m4aSoundMain's tail (measured) */
-#define M4A_MIX_EXIT_BX            7     /* ... its last instruction (bx r0, refilling from ROM): a FIFO stall due inside it lands after the return */
+#define M4A_MIX_EXIT_BX            8     /* ... a FIFO stall due in its last 8 cycles (the bx r0 refilling from ROM, and the cycle before) lands after the return (measured: RET + 3 never counted, RET + 2 in 3 frames of 4) */
 /* a channel with SF_ON: the envelope (_081DCF6A .. _081DD006) */
 #define M4A_MIX_CHAN_ON            20    /* ChanLoop -> _081DCF6A */
 #define M4A_MIX_CHAN_NEXT          9     /* _081DD240 -> ChanLoop */
@@ -988,6 +1001,159 @@ struct M4AEngine {
  * with no source fetch). */
 #define M4A_MIX_SYNTH_SETUP        20    /* est. */
 #define M4A_MIX_SYNTH_SAMPLE       16    /* est. */
+
+/*
+ * The HQ mixer's cost (ipatix's HQ-Mixer rev 4.0, test/accuracy/rom/hq/m4a_1.s;
+ * charged in m4a_hq_mixer.c at the ported labels).  The same rules as
+ * M4A_MIX_*: the whole mixer runs from its IWRAM copy (SoundMainRAM_Buffer),
+ * Thumb (the channel walk, the envelope) and ARM (the mixing, the
+ * downsampler); SoundInfo, the channels, hq_buffer and the stack (the
+ * DMA3 / pre-cache copies of the sample bytes) are IWRAM; the samples, the
+ * WaveData headers and the synth descriptors are ROM.  An instruction 1, a
+ * taken branch / bx / write to pc 3, ldr/ldrb/ldrsb/ldrsh from IWRAM 3, str
+ * 2, ldm n regs n + 2 (+2 loading pc), stm n + 1, mul 1 + m and mla 2 + m
+ * (m 1..4 from Rs, mgba's ARM_WAIT_MUL, charged where the operand is
+ * known: the mixing loops' mul / mla, the downsampler's reverb products),
+ * umlal 3 + m, a ROM byte load 6, a ROM word load 8, an ldm of ROM words
+ * 4n (mgba's GBALoadMultiple: S32 - N32 + n (S32 + 1) + 1, WS0 3/1), a
+ * failed condition 1, the DMA3 copy 5 per word + 4 (mgba's GBADMAService:
+ * 2 + N32 ROM 5 for the first word, 2 + S32 3 for the others, 2 more at
+ * the end into IWRAM).  Every value is a label pair counted from the
+ * source and checked against the probe (each pair's delta over a probe
+ * run breaking on every C_ / F_ label); "est." marks the one with no ROM
+ * code.  The FIFO DMA stall is added across the span in m4a_engine.c.
+ */
+/* frame */
+#define M4A_HQMIX_ENTRY            16    /* SoundMainRAM -> C_channel_state_loop (stores, SoundInfo loads) */
+#define M4A_HQMIX_SKIP             16    /* C_channel_state_loop -> C_skip_channel (13) -> C_end_channel_state_loop (3): status & 0xC7 clear */
+#define M4A_HQMIX_LOOP_NEXT        9     /* C_end_channel_state_loop -> C_channel_state_loop (ldr, sub, ble, add, b) */
+#define M4A_HQMIX_LOOP_LAST        (-2)  /* ... the last slot: ble taken -> C_main_mixer_return (7) */
+#define M4A_HQMIX_MAIN_RETURN      23    /* C_main_mixer_return -> C_downsampler (noise-shape bytes, reverb, the hint, bx) */
+#define M4A_HQMIX_DOWNSAMPLE       17    /* C_downsampler -> C_downsampler_loop (8 + the literal) and the exit (adr, bx; the loop's last bgt included) */
+#define M4A_HQMIX_DOWNSAMPLE_PAIR  67    /* one C_downsampler_loop pass (two output samples: 22 noise shaping, ldm/stm, the four ring taps, two mul at m 1) */
+#define M4A_HQMIX_RETURN           39    /* C_downsampler_return -> RET (noise-shape stores, ident, the pops, bx r3 to ROM; measured) */
+/* the channel walk and the envelope, C_channel_state_loop -> C_channel_vol_calc (Thumb) */
+#define M4A_HQMIX_ENV_HEAD         15    /* not SF_START: -> C_adsr_echo_check */
+#define M4A_HQMIX_ENV_IEC          14    /* SF_IEC, echo continues: -> C_channel_vol_calc */
+#define M4A_HQMIX_ENV_IEC_END      12    /* SF_IEC, echo length out: -> C_stop_channel */
+#define M4A_HQMIX_ENV_NOT_IEC      7     /* -> C_adsr_release_check */
+#define M4A_HQMIX_ENV_RELEASE      16    /* SF_STOP, above the echo volume: -> C_channel_vol_calc */
+#define M4A_HQMIX_ENV_RELEASE_ZERO 11    /* SF_STOP, released to 0 (ble): -> C_adsr_released */
+#define M4A_HQMIX_ENV_RELEASE_LOW  14    /* SF_STOP, at or below the echo volume: -> C_adsr_released */
+#define M4A_HQMIX_ENV_ECHO_NONE    7     /* C_adsr_released, no echo: -> C_stop_channel */
+#define M4A_HQMIX_ENV_ECHO_START   12    /* C_adsr_released, echo: SF_IEC -> C_adsr_save_and_finalize -> C_channel_vol_calc */
+#define M4A_HQMIX_ENV_NOT_STOP     4     /* -> C_adsr_decay_check */
+#define M4A_HQMIX_ENV_DECAY        17    /* decay, above sustain: -> C_channel_vol_calc */
+#define M4A_HQMIX_ENV_DECAY_SUSTAIN 23   /* decay reaching sustain (nonzero): -> C_adsr_next_state -> C_channel_vol_calc */
+#define M4A_HQMIX_ENV_DECAY_ZERO   19    /* decay reaching sustain 0: -> C_adsr_released */
+#define M4A_HQMIX_ENV_NOT_DECAY    6     /* -> C_adsr_attack_check */
+#define M4A_HQMIX_ENV_SUSTAIN      4     /* sustain (or release state without SF_STOP): -> C_channel_vol_calc */
+#define M4A_HQMIX_ENV_TO_ATTACK    2     /* attack: -> C_adsr_attack */
+#define M4A_HQMIX_ENV_ATTACK       10    /* C_adsr_attack -> C_adsr_save_and_finalize -> C_channel_vol_calc, below 0xFF */
+#define M4A_HQMIX_ENV_ATTACK_PEAK  10    /* ... reaching 0xFF: through C_adsr_next_state */
+#define M4A_HQMIX_STOP             6     /* C_stop_channel -> C_skip_channel -> C_end_channel_state_loop */
+#define M4A_HQMIX_START_STOP       16    /* SF_START | SF_STOP: C_channel_state_loop -> C_stop_channel */
+#define M4A_HQMIX_INIT_FWD         48    /* SF_START, uncompressed forward: -> C_channel_init_noncomp_forward (WaveData size and type from ROM) -> C_channel_init_check_loop */
+#define M4A_HQMIX_INIT_REV         51    /* ... uncompressed reverse: via C_channel_init_noncomp_reverse */
+#define M4A_HQMIX_INIT_CMP_FWD     53    /* ... compressed forward: C_channel_init_comp -> _comp_forward */
+#define M4A_HQMIX_INIT_CMP_REV     53    /* ... compressed reverse: C_channel_init_comp -> _comp_reverse */
+#define M4A_HQMIX_INIT_SYNTH       42    /* ... size 0: C_channel_init_synth (the type byte from ROM) -> C_channel_init_check_loop */
+#define M4A_HQMIX_INIT_SYNTH_TRI   48    /* ... the triangle (type 2): -> C_channel_init_check_loop_no_fine_pos directly (fw = 0x40000000) */
+#define M4A_HQMIX_INIT_CHECK       3     /* C_channel_init_check_loop -> _no_fine_pos (fw = 0) */
+#define M4A_HQMIX_INIT_FLAGS       19    /* _no_fine_pos -> C_adsr_attack: the stores, WaveData.flags from ROM, no loop ... */
+#define M4A_HQMIX_INIT_FLAGS_LOOP  2     /* ... + the loop flag (add, b instead of the beq) */
+#define M4A_HQMIX_VOL              48    /* C_channel_vol_calc -> C_mixing_setup: the volume products (mul m 1: env, side <= 0xFF), no loop, the bx to ARM ... */
+#define M4A_HQMIX_VOL_LOOP         19    /* ... + SF_LOOP: loop start / end from ROM (ldmia of two ROM words 8), uncompressed */
+#define M4A_HQMIX_VOL_LOOP_CMP     18    /* ... + SF_LOOP, compressed (bcs taken, mov) */
+/* C_mixing_setup (ARM) */
+#define M4A_HQMIX_VOL_ZERO         14    /* both volumes 0: C_mixing_setup -> C_mixing_epilogue (10) -> C_end_channel_state_loop (4) */
+#define M4A_HQMIX_TO_COMP_REV      12    /* -> C_mixing_setup_comp_rev (any path but FIX) */
+#define M4A_HQMIX_TO_FIX           14    /* -> C_setup_fixed_freq_mixing */
+#define M4A_HQMIX_SETUP            30    /* C_mixing_setup_comp_rev -> C_data_load_uncomp_for (+ the step mul's m by divFreq, + umlal's m by the frame length) ... */
+#define M4A_HQMIX_SETUP_CMP        (-2)  /* ... -> C_data_load_comp (bcs taken, no b) */
+#define M4A_HQMIX_SETUP_UREV       (-1)  /* ... -> C_data_load_uncomp_rev (bmi taken) */
+#define M4A_HQMIX_SETUP_SYNTH      14    /* C_mixing_setup_comp_rev -> C_setup_synth (+ the step mul's m) */
+#define M4A_HQMIX_END              20    /* C_end_mixing -> C_mixing_end_store (12) -> C_mixing_epilogue (4) -> C_end_channel_state_loop (4) */
+#define M4A_HQMIX_END_STORE        8     /* C_mixing_end_store -> C_end_channel_state_loop (FIX) */
+#define M4A_HQMIX_END_STOP         9     /* C_mixing_end_and_stop_channel -> C_mixing_epilogue (5) -> C_end_channel_state_loop (4) */
+/* the interpolating path, uncompressed forward (C_data_load_uncomp_for) */
+#define M4A_HQMIX_COPY             25    /* count > advance, the copy: -> C_select_highspeed_codepath_vla_r3_and3 (the stmia that starts DMA3 included) */
+#define M4A_HQMIX_DMA3             4     /* the DMA3 copy onto the stack: 4 + ... */
+#define M4A_HQMIX_DMA3_WORD        5     /* ... 5 per word, (advance + 7) >> 2 words */
+/* A FIFO refill (both DMAs, M4A_CYC_FIFO_DMA_STALL elsewhere) due inside
+ * the DMA3 copy interleaves with it at its word boundaries (mgba's
+ * GBADMAService / GBADMAUpdate: the refill preempts the copy between two
+ * words, the timer event winning a tie): the CPU loses less.  By p, the
+ * refill's due cycle less the copy's start (the stmia's end, with the
+ * span's earlier stalls), L its length: */
+#define M4A_HQMIX_FIFO_PRE         16    /* p -1 .. 1: due as the copy starts */
+#define M4A_HQMIX_FIFO_FIRST       7     /* p 2 .. 9: 7 + p (the first word, 7 cycles) */
+#define M4A_HQMIX_FIFO_WORD        12    /* p 10 .. L: 12 + p mod 5 (the 5-cycle words) */
+#define M4A_HQMIX_FIFO_LAST        17    /* p L + 1 (the copy's 2-cycle end; from the simulation, not in the corpus) */
+#define M4A_HQMIX_VLA              2     /* C_select_highspeed_codepath_vla_r3_and3 -> _vla_r3 -> C_select_highspeed_codepath (and, add) */
+#define M4A_HQMIX_DIRECT           16    /* count > advance, advance >= 0x400 or no stack: -> C_select_highspeed_codepath (samples from ROM) */
+#define M4A_HQMIX_SELECT           16    /* C_select_highspeed_codepath -> C_skip_fast_mixing_creation, the block in place ... */
+#define M4A_HQMIX_PASTE            103   /* ... + the block pasted (previous_fast_code differs): 14 + 4 C_fast_mixing_creation_loop passes of 24 - 2 + 3 */
+#define M4A_HQMIX_FAST_ENTRY       9     /* C_skip_fast_mixing_creation -> C_fast_mixing_loop (+ the first ldrsb's LOAD_*) */
+#define M4A_HQMIX_FAST_ITER        26    /* one C_fast_mixing_loop pass outside its samples: two ldm / stm of 4 words, subs, bgt */
+#define M4A_HQMIX_FAST_SAMPLE      9     /* a sample's nine instructions, mulne / mlane / the conditional load not executed ... */
+#define M4A_HQMIX_LOAD_STACK       2     /* ... + an executed ldrsb from the stack (IWRAM, 3) */
+#define M4A_HQMIX_LOAD_ROM         5     /* ... + an executed ldrsb from ROM (6) */
+#define M4A_HQMIX_MLA              1     /* ... + an executed mlane (2 + m in place of 1; + m by the output) */
+#define M4A_HQMIX_FAST_EXIT        10    /* after the last bgt: -> C_skip_fast_mixing -> C_end_mixing (ldmfd sp, ldmfd, b) */
+#define M4A_HQMIX_UNBUF            12    /* count <= advance: -> C_unbuffered_mixing -> C_unbuffered_mixing_loop (ldrsb from ROM) */
+#define M4A_HQMIX_UNBUF_SAMPLE     15    /* one C_unbuffered_mixing_loop pass, no advance, output 0 (+ mul's m by the diff) ... */
+#define M4A_HQMIX_UNBUF_MIX        4     /* ... + the output not 0: ldrne, mlane, strne executed (+ the mla's m) */
+#define M4A_HQMIX_UNBUF_ADVANCE    11    /* ... + a source advance by one (ldrsb from ROM) */
+#define M4A_HQMIX_UNBUF_ADVANCE_N  5     /* ... + by more (ldrnesb from ROM) */
+#define M4A_HQMIX_UNBUF_WRAP       11    /* ... + past the end, looping: C_unbuffered_mixing_loop_or_end -> _continue */
+#define M4A_HQMIX_UNBUF_END        13    /* ... past the end, no loop (in place of _ADVANCE): -> _loop_or_end -> C_mixing_end_and_stop_channel, the pass's tail not run */
+/* the fixed-frequency path (C_setup_fixed_freq_mixing) */
+#define M4A_HQMIX_FIX_SETUP        3     /* stmfd {r4, r9} */
+#define M4A_HQMIX_FIX_CHECK        42    /* C_fixed_mixing_length_check -> C_fixed_mixing_loop: blocks to mix (the code paste, the first word from ROM) */
+#define M4A_HQMIX_FIX_NOBLOCK      7     /* ... -> C_fixed_mixing_process_rest: none (beq taken) */
+#define M4A_HQMIX_FIX_BLOCK        30    /* one C_fixed_mixing_loop pass (4 samples: ldm, seven movs, ldmia of one ROM word, four mlane not executed, stm, subs, bne) ... */
+#define M4A_HQMIX_FIX_NONZERO      2     /* ... + a nonzero sample's mlane (2 + m 1) */
+#define M4A_HQMIX_FIX_REWIND       1     /* after the blocks: sub r3 */
+#define M4A_HQMIX_FIX_REST         1     /* C_fixed_mixing_process_rest: mov r1, #4 */
+#define M4A_HQMIX_FIX_SAMPLE       20    /* one C_fixed_mixing_unaligned_loop pass (ldr, ldrsb from ROM, mla, str, subs, beq, subs, bgt) */
+#define M4A_HQMIX_FIX_WRAP         12    /* ... count out, looping: C_fixed_mixing_loop_or_end -> _continue */
+#define M4A_HQMIX_FIX_END          8     /* ... count out, no loop: _loop_or_end (10) -> C_mixing_end_and_stop_channel, the pass's tail not run */
+#define M4A_HQMIX_FIX_NEXT         4     /* subs r8, bgt -> C_fixed_mixing_length_check */
+#define M4A_HQMIX_FIX_DONE         6     /* subs r8, bgt not taken, ldmfd -> C_mixing_end_store */
+/* the pre-cached paths (C_data_load_comp / C_data_load_uncomp_rev) */
+#define M4A_HQMIX_COMP             12    /* C_data_load_comp -> C_data_load_comp_for (the store code pasted) */
+#define M4A_HQMIX_COMP_REV         14    /* ... -> C_data_load_comp_rev */
+#define M4A_HQMIX_COMP_FOR         22    /* C_data_load_comp_for -> _calc_pos (20) -> C_data_load_comp_decode (2) */
+#define M4A_HQMIX_COMP_FOR_END     29    /* ... the sample ends in the frame: -> F_clear_mem (27; it returns to _calc_pos) and _calc_pos -> _decode (2) */
+#define M4A_HQMIX_COMP_REV_SETUP   27    /* C_data_load_comp_rev -> _rev_calc_pos (22) -> C_data_load_comp_decode (5) */
+#define M4A_HQMIX_COMP_REV_END     32    /* ... the sample ends in the frame: -> F_clear_mem (27; it returns to _rev_calc_pos) and _rev_calc_pos -> _decode (5) */
+#define M4A_HQMIX_STACK_SKIP       13    /* the stack check fails: C_data_load_comp_for -> C_end_mixing (bhs) ... */
+#define M4A_HQMIX_STACK_SKIP_REV   14    /* ... C_data_load_comp_rev / C_data_load_uncomp_rev -> C_end_mixing */
+#define M4A_HQMIX_DECODE_SETUP     11    /* C_data_load_comp_decode -> C_data_load_comp_loop (+ the block-address mla's m by the block index; + 1 when the streqb stores: the end frame) */
+#define M4A_HQMIX_BLOCK            755   /* one C_data_load_comp_loop pass: bl, F_decode_compressed (19 + 32 x 12 + 31 x 11 + bgt not taken - 2 + ldmfd with pc 6; 33 ROM byte loads), subs, bgt */
+#define M4A_HQMIX_BLOCK_OPENBUS    (-99) /* ... a block read from open bus (the reversed end frame's wrapped address): 33 byte loads of mgba's GBALoad8 default case, 3 instead of 6 */
+#define M4A_HQMIX_DECODE_DONE      4     /* b C_select_highspeed_codepath_vla_r3 -> C_select_highspeed_codepath (add) */
+#define M4A_HQMIX_UREV             22    /* C_data_load_uncomp_rev -> C_data_load_uncomp_rev_loop */
+#define M4A_HQMIX_UREV_END         32    /* ... the sample ends in the frame: -> F_clear_mem (27), then ldr, strb (5) */
+#define M4A_HQMIX_UREV_WORD        14    /* one C_data_load_uncomp_rev_loop pass (ldmia of one ROM word 4, the byte swap, stmdb, subs, bgt) */
+#define M4A_HQMIX_UREV_DONE        6     /* rsb, b -> C_select_highspeed_codepath_vla_r3_and3 -> C_select_highspeed_codepath (and, add) */
+#define M4A_HQMIX_CLEAR            16    /* F_clear_mem -> the computed jump into C_clear_loop (stmfd, movs, add pc) */
+#define M4A_HQMIX_CLEAR_STORE      5     /* one stmia of 4 words */
+#define M4A_HQMIX_CLEAR_RET        11    /* ands, ldmeqfd with pc (no remainder) */
+#define M4A_HQMIX_CLEAR_WORD       6     /* C_clear_loop_rest: one word (stmia 2, subs, bgt) */
+/* the synth paths (C_setup_synth) */
+#define M4A_HQMIX_SYNTH            8     /* C_setup_synth: the type byte from ROM, pulse (bne not taken) */
+#define M4A_HQMIX_PULSE_SETUP      37    /* the duty from the descriptor (four ROM bytes, mla m 1), stmfd -> C_synth_pulse_loop */
+#define M4A_HQMIX_PULSE_ITER       55    /* one C_synth_pulse_loop pass (8 samples: ldm / stm of 8 words, 4 instructions a sample, subs, bgt) */
+#define M4A_HQMIX_PULSE_EXIT       9     /* ldmfd, b C_end_mixing */
+#define M4A_HQMIX_SAW              16    /* C_setup_synth -> C_check_synth_saw (10) -> C_synth_saw_loop (subs, bne, four instructions) */
+#define M4A_HQMIX_SAW_ITER         15    /* one C_synth_saw_loop pass outside its samples (ldm, stm, subs, bgt) ... */
+#define M4A_HQMIX_SAW_SAMPLE       6     /* ... + 6 a sample (mlane not executed: the state 0; + M4A_HQMIX_MLA + m executed) */
+#define M4A_HQMIX_TRI              16    /* C_setup_synth -> C_check_synth_saw -> C_synth_triangle -> C_synth_triangle_loop */
+#define M4A_HQMIX_TRI_ITER         15    /* one C_synth_triangle_loop pass outside its samples ... */
+#define M4A_HQMIX_TRI_SAMPLE       5     /* ... + 5 + m a sample (adds, rsbpl, submi, mla by the wave value) */
+#define M4A_HQMIX_SYNTH_EXIT       3     /* the saw / triangle loop's b C_end_mixing */
 
 /* Engine lifecycle */
 void m4a_engine_init(M4AEngine *engine, float sampleRate);

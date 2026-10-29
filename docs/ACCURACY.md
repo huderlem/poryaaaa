@@ -714,15 +714,22 @@ on the CPU clock from the SoundMain stamp:
   charged on each span.  The probe's `tail` and `s2r` columns live here, as
   in `cost_diff.py`'s cgb = RAM − CGB.
 - **mixer** = EXIT − RAM: the `M4A_MIX_*` charges `m4a_mixer.c` sums into
-  `engine->mixCycles` (the epilogue's `RET` → `EXIT` 10 included), plus
-  every FIFO stall due in [RAM, EXIT − 7]: a stall due during
-  m4aSoundMain's final `bx r0` (`M4A_MIX_EXIT_BX`, 7) is serviced after
-  the return and not counted (over the four probed rates, a stall due at
-  `RET` + 3 or later never was; one due at `RET` + 2 was in 3 frames of 4).
+  `engine->mixCycles` (the epilogue's `RET` → `EXIT` 10 included; in HQ
+  mode the `M4A_HQMIX_*` charges of `m4a_hq_mixer.c`, below), plus every
+  FIFO stall due in [RAM, EXIT − 8], in order (`mixer_stall`,
+  `m4a_engine.c`): a stall due in m4aSoundMain's last 8 cycles
+  (`M4A_MIX_EXIT_BX`, the final `bx r0` and the cycle before) is serviced
+  after the return and not counted (over the four probed rates, a stall
+  due at `RET` + 3 or later never was; one due at `RET` + 2 was in 3 frames
+  of 4).  Step 2 had the bound at EXIT − 7, which counts `RET` + 3: no
+  vanilla frame of the corpora is due there, six HQ 21024 Hz frames are
+  (`lfo_pan` 25, 53, 62, 63, `littleroot` 230, `vs_trainer` 296), none
+  counted by mgba; with 8 every vanilla and HQ frame matches.
 - **total** = sequencer + cgb + mixer = EXIT − m4aSoundMain entry (`tot`).
-- **valid** is false in live mode (the piecewise mix charges nothing) and,
-  until the HQ model (step 3), with the HQ mixer; `frameCostMax` ignores
-  invalid frames.  The polyphony-debug shadow pool costs nothing.
+- **valid** is false in live mode (the piecewise mix charges nothing);
+  `frameCostMax` ignores invalid frames.  The polyphony-debug shadow pool
+  costs nothing (in HQ mode it also leaves `previous_fast_code` and the
+  DMA3 record alone).
 - **Threading.**  Both fields are written by plain struct assignment on
   the thread that calls `m4a_engine_process`; a host snapshots them there
   (atomics, total last) and never reads them concurrently.  One process
@@ -750,7 +757,7 @@ The test ROM's `WAITCNT` is the game's (WS0 3/1, prefetch on).
 | `ENTRY`, `NOREVERB` (+`_4`, `_8`), `NOREVERB_LOOP` | SoundMainRAM → `_NoReverb` → `_Loop` (16 samples a pass) | 7, 11 (+2, +6), 20 |
 | `REVERB`, `REVERB_SAMPLE` | → `_081DCEC4` and back to `_081DCF36`; one `_081DCEC4` pass | 15, 28 |
 | `CHAN_SETUP`, `SLOT_OFF`, `SLOT_LAST` | `_081DCF36` → ChanLoop; an idle slot; the last slot's `ble` | 11, 30, −2 |
-| `EXIT`, `EPILOGUE`, `EXIT_BX` | `_081DD24A` → `RET` (the `bx r3` refills from ROM); `RET` → `EXIT`; its `bx r0` | 33, 10 (measured), 7 |
+| `EXIT`, `EPILOGUE`, `EXIT_BX` | `_081DD24A` → `RET` (the `bx r3` refills from ROM); `RET` → `EXIT`; its `bx r0` and the cycle before | 33, 10 (measured), 8 (measured) |
 | `CHAN_ON`, `CHAN_NEXT` | ChanLoop → `_081DCF6A`; `_081DD240` → ChanLoop | 20, 9 |
 | `ENV_START` (+`_LOOP`), `ENV_START_STOP`, `ENV_END` | SF_START: `_081DCF6A` → `_081DCFF8` (+ the loop flag); SF_START\|SF_STOP: → `_081DCFB0`; `_081DCFB0` → `_081DD240` | 44 (+5), 8, 6 |
 | `ENV_HEAD`, `ENV_IEC`, `ENV_IEC_END`, `ENV_NOT_IEC` | not START: `_081DCF6A` → `_081DCFA0`'s IEC test; IEC: → `_081DD006` / → `_081DCFB0`; → `_081DCFB6` | 10, 10, 8, 5 |
@@ -802,6 +809,112 @@ reads cartridge space, 6 per byte even beyond the ROM's size (mgba's
 assumes the game's
 `WAITCNT`, samples in ROM, the vanilla m4a_1.s and `maxLines` 0, and
 mgba's timing (docs/cpu-meter D7: hardware may differ by a few percent).
+
+**The model (step 3: the HQ mixer).**  In HQ mode the same publication,
+the same sequencer and cgb terms; the **mixer** term is EXIT − RAM over
+ipatix's mixer: `SoundMainRAM_Buffer` → `C_channel_state_loop` … the
+channel walk … `C_main_mixer_return` → `C_downsampler` → its loop →
+`C_downsampler_return` → `RET` (39; the noise-shape stores, the ident
+store, the pops and the `bx r3` into ROM) → `EXIT` (10), the FIFO
+stalls in [RAM, EXIT − 8] on top.  `m4a_hq_mixer.c` charges
+`M4A_HQMIX_*` (`plugin/m4a_engine.h`) into `engine->mixCycles` at the
+ported labels, in program order (the walk too, unlike the vanilla
+model's separate sum: the DMA3 copies' positions matter, below).  The
+floor is 16 + 5 × (16 + 9) − 2 + 23 + 17 + 112 × 67 + 39 + 10 = **7732**
+(224 samples), 12020 at 352 (12038 with the stall the probe saw).
+
+The constants are **derived**, none fitted: every label pair counted from
+`test/accuracy/rom/hq/m4a_1.s` at mgba's timing (the rules above; the
+mixer runs from its IWRAM copy, Thumb for the walk and the envelope, ARM
+for the rest; SoundInfo, the channels, `hq_buffer` and the stack are
+IWRAM; samples, WaveData headers and synth descriptors ROM), then each
+checked against a probe run breaking on *every* `C_` / `F_` label of the
+mixer (a scratch `mgba_probe` with the label filter widened; breakpoints
+do not change the emulation): the per-pair delta histograms are single
+valued except where a FIFO stall (+18) lands or the data decides.  Two
+mgba rules the vanilla model did not need: an `ldm` of ROM words costs
+4n (`GBALoadMultiple`: S32 − N32 + n (S32 + 1) + 1 at WS0 3/1; the
+two-word loop bounds 8, the FIX path's one-word loads 4), and the DMA3
+copy 5 per word + 4 (`GBADMAService`).  Where an operand varies per
+sample the charge carries its m: the fast loops' `mulne` (by the diff),
+`mlane` (by the output, 2 + m when executed, 1 when not), the
+unbuffered loop's `mul` / `mla`, the saw / triangle `mla` (by the wave
+value), the downsampler's two reverb products (by the tap sums), the
+block-address `mla` (by the block index), `umlal` (by the frame length,
+unsigned) and the step `mul` (by divFreq: 2 at 13379 and 21024).
+
+| Constant(s) | Labels | Value |
+|---|---|---|
+| `ENTRY`, `SKIP`, `LOOP_NEXT`, `LOOP_LAST` | SoundMainRAM → `C_channel_state_loop`; → `C_skip_channel` → `C_end_channel_state_loop`; → the next `C_channel_state_loop`; → `C_main_mixer_return` instead | 16, 16, 9, −2 |
+| `MAIN_RETURN`, `DOWNSAMPLE`, `DOWNSAMPLE_PAIR`, `RETURN` | `C_main_mixer_return` → `C_downsampler`; its setup and exit; one `C_downsampler_loop` pass (2 samples; two `mul` at m 1); `C_downsampler_return` → `RET` | 23, 17, 67, 39 (measured in step 1; counts to 39) |
+| `ENV_HEAD`, `ENV_IEC` / `_IEC_END`, `ENV_NOT_IEC` | not START: → `C_adsr_echo_check`; IEC: → `C_channel_vol_calc` / → `C_stop_channel`; → `C_adsr_release_check` | 15, 14 / 12, 7 |
+| `ENV_RELEASE`, `_RELEASE_ZERO`, `_RELEASE_LOW`, `ENV_ECHO_NONE`, `_ECHO_START` | STOP: → vol calc; released to 0 (`ble`) / at or below the echo volume → `C_adsr_released`; → `C_stop_channel`; IEC set → `C_adsr_save_and_finalize` → vol calc | 16, 11, 14, 7, 12 |
+| `ENV_NOT_STOP`, `ENV_DECAY`, `_DECAY_SUSTAIN`, `_DECAY_ZERO`, `ENV_NOT_DECAY`, `ENV_SUSTAIN`, `ENV_TO_ATTACK`, `ENV_ATTACK`, `_ATTACK_PEAK` | → `C_adsr_decay_check`; decay → vol calc / reaching sustain → `C_adsr_next_state` → vol calc / reaching sustain 0 → `C_adsr_released`; → `C_adsr_attack_check`; → vol calc; → `C_adsr_attack`; `C_adsr_attack` → vol calc below / at 0xFF | 4, 17, 23, 19, 6, 4, 2, 10, 10 |
+| `STOP`, `START_STOP` | `C_stop_channel` → `C_end_channel_state_loop`; START\|STOP → `C_stop_channel` | 6, 16 |
+| `INIT_FWD`, `_REV`, `_CMP_FWD`, `_CMP_REV`, `_SYNTH`, `_SYNTH_TRI`, `INIT_CHECK`, `INIT_FLAGS` (+`_LOOP`) | START: → `C_channel_init_check_loop` by `C_channel_init_noncomp_forward` / `_noncomp_reverse` / `_comp` + `_comp_forward` / `_comp_reverse` / `_synth`; the triangle → `_no_fine_pos`; `_check_loop` → `_no_fine_pos`; → `C_adsr_attack` (WaveData.flags from ROM) | 48, 51, 53, 53, 42, 48, 3, 19 (+2) |
+| `VOL` (+`_LOOP`, `_LOOP_CMP`) | `C_channel_vol_calc` → `C_mixing_setup` (three `mul` at m 1, the `bx` to ARM); + the loop bounds (`ldmia` of two ROM words 8) | 48 (+19, +18) |
+| `VOL_ZERO`, `TO_COMP_REV`, `TO_FIX`, `SETUP` (+ m + m), `SETUP_CMP`, `SETUP_UREV`, `SETUP_SYNTH` (+ m) | volume 0: → `C_mixing_epilogue` → the walk; → `C_mixing_setup_comp_rev`; → `C_setup_fixed_freq_mixing`; `_comp_rev` → `C_data_load_uncomp_for` (step `mul`, `umlal`); → `C_data_load_comp` / `_uncomp_rev` instead; → `C_setup_synth` | 14, 12, 14, 30, −2, −1, 14 |
+| `END`, `END_STORE`, `END_STOP` | `C_end_mixing` → `C_mixing_end_store` → `C_mixing_epilogue` → `C_end_channel_state_loop`; from `C_mixing_end_store`; from `C_mixing_end_and_stop_channel` | 20, 8, 9 |
+| `COPY`, `DMA3` + `DMA3_WORD` × n, `VLA`, `DIRECT` | count > advance: → `_vla_r3_and3` (the `stmia` that starts DMA3); the copy, n = (advance + 7) >> 2; → `C_select_highspeed_codepath`; no copy (advance ≥ 0x400 or no stack): → `C_select_highspeed_codepath` | 25, 4 + 5n, 2, 16 |
+| `SELECT`, `PASTE`, `FAST_ENTRY`, `FAST_ITER`, `FAST_SAMPLE`, `LOAD_STACK` / `_ROM`, `MLA`, `FAST_EXIT` | → `C_skip_fast_mixing_creation`; + the block pasted (`previous_fast_code` differs: the engine keeps it, `hqFastCode`); → `C_fast_mixing_loop`; one pass outside its samples; a sample's nine instructions; an executed `ldrsb`'s extra from the stack / ROM; an executed `mlane`'s extra (+ m); after the last `bgt` → `C_end_mixing` | 16, 103, 9 (+ a load), 26, 9, 2 / 5, 1, 10 |
+| `UNBUF`, `UNBUF_SAMPLE`, `_MIX`, `_ADVANCE`, `_ADVANCE_N`, `_WRAP`, `_END` | count ≤ advance: → `C_unbuffered_mixing_loop`; a pass (no advance, output 0, + the `mul`'s m); + output ≠ 0 (+ m); + an advance by one / more; + a loop wrap; the end without a loop (to `C_mixing_end_and_stop_channel`) | 12, 15, 4, 11, 5, 11, 13 |
+| `FIX_SETUP`, `FIX_CHECK`, `FIX_NOBLOCK`, `FIX_BLOCK`, `FIX_NONZERO`, `FIX_REWIND`, `FIX_REST`, `FIX_SAMPLE`, `FIX_WRAP`, `FIX_END`, `FIX_NEXT`, `FIX_DONE` | `stmfd`; `C_fixed_mixing_length_check` → `C_fixed_mixing_loop` (the code paste, the first word) / → `_process_rest`; a 4-sample block (one ROM word, `mlane` not executed); + a nonzero sample; `sub r3`; `mov r1`; an unaligned-loop pass; + a wrap; + the end; → `_length_check`; → `C_mixing_end_store` | 3, 42, 7, 30, 2, 1, 1, 20, 12, 8, 4, 6 |
+| `COMP`, `COMP_REV`, `COMP_FOR` (`_END`), `COMP_REV_SETUP` (`_END`), `STACK_SKIP` (`_REV`) | `C_data_load_comp` → `_comp_for` / `_comp_rev` (the store code pasted); → `C_data_load_comp_decode` (through `F_clear_mem` at the end); the stack check failing → `C_end_mixing` | 12, 14, 22 (29), 27 (32), 13 (14) |
+| `DECODE_SETUP` (+ m, + 1), `BLOCK`, `BLOCK_OPENBUS`, `DECODE_DONE` | → `C_data_load_comp_loop` (+ the block `mla`'s m, + the `streqb` of the end frame); one block: `bl`, `F_decode_compressed` 748 (33 ROM byte loads), `subs`, `bgt`; a block read from open bus (33 loads of `GBALoad8`'s default case, 3 instead of 6); → `C_select_highspeed_codepath` | 11, 755, −99, 4 |
+| `UREV` (`_END`), `UREV_WORD`, `UREV_DONE` | `C_data_load_uncomp_rev` → its loop (through `F_clear_mem` and the status store); a word (`ldmia` of one ROM word 4, the byte swap); → `C_select_highspeed_codepath` | 22 (32), 14, 6 |
+| `CLEAR`, `CLEAR_STORE`, `CLEAR_RET`, `CLEAR_WORD` | `F_clear_mem` to its computed jump; one 4-word `stmia` ((r1 >> 4) & 3 of them first, then passes of 4 + `subs`, `bpl`); `ands`, the `ldmeqfd` with pc; a remainder word | 16, 5, 11, 6 |
+| `SYNTH`, `PULSE_SETUP`, `PULSE_ITER`, `PULSE_EXIT`, `SAW`, `SAW_ITER` + 4 × `SAW_SAMPLE`, `TRI`, `TRI_ITER` + 4 × `TRI_SAMPLE`, `SYNTH_EXIT` | `C_setup_synth`, pulse; → `C_synth_pulse_loop`; a pass (8 samples); → `C_end_mixing`; → `C_synth_saw_loop`; a pass (4 samples, + `MLA` + m per executed `mlane`); → `C_synth_triangle_loop`; a pass (+ m per `mla`); the `b C_end_mixing` | 8, 37, 55, 9, 16, 15 + 24, 16, 15 + 20, 3 |
+
+**The FIFO refill inside a DMA3 copy.**  A refill due while the fast
+path's DMA3 copy runs does not cost 18: mgba (`dma.c`) services DMA3 a
+word at a time (the first 7 cycles, then 5, 2 more at the end), the
+refill's DMA1 / DMA2 preempt it between two words (the timer event
+winning a tie), and the CPU, already halted, loses only what the copy is
+pushed back.  The engine records each copy (`hqDma3Start`, `hqDma3Len`
+on `mixCycles`' clock) and `mixer_stall` charges a refill due at p
+cycles after the copy's start (the `stmia`'s end, moved on by the span's
+earlier stalls) of length L: 16 at p −1 … 1, 7 + p at 2 … 9 (the first
+word), 12 + p mod 5 at 10 … L (the 5-cycle words), 17 at L + 1
+(`M4A_HQMIX_FIFO_*`).  The shape is mgba's scheduler (a small
+simulation of `GBADMAService` / `GBADMAUpdate` / the timer event
+reproduces it); its one alignment, where the copy's first word falls
+against the model's due cycle, is the corpus's (`p − 2` in the
+simulation's clock): 255 frames at 13379 Hz and 263 at 21024 have a
+refill inside a copy, every one matched (before the rule: up to 6 cycles
+high, the p mod 5 pattern exact).  The L + 1 case is the simulation's
+only (no corpus frame).
+
+**Gate** (`cost_diff.py --corpus`, every frame's total within 2 % or 300
+cycles of the probe's `tot`):
+
+| corpus | tests | frames gated | max \|Δ\| | p99 | frames within 1 % |
+|---|---|---|---|---|---|
+| HQ 13379 (`build/probe-hq`) | 83 | 19041 | **0** | 0 | 100 % |
+| HQ 21024 (`build/probe-hq-21024`) | 83 | 19041 | **0** | 0 | 100 % |
+| vanilla 13379 / 21024 (again, with `EXIT_BX` 8) | 79 / 79 | 18333 / 18333 | 0 / 0 | 0 | 100 % |
+
+Every column matches.  Not gated: the two `cry_third_*` rows (no third
+cry player).  The HQ corpora do not exercise (charged as counted, their
+wiring unit-tested in `test_frame_cost_hq_wiring` /
+`test_frame_cost_hq_paths`): START\|STOP, the pseudo-echo countdown, a
+release into the echo, an attack step after the first frame, a looping
+compressed sample's loop setup, the stack check of the reversed paths
+(the forward DPCM one is: `pcm_cmp_hi`), a FIX voice with REV, a DPCM
+block index past 255 (the `mla`'s m 2), the FIX count-0 host guard and
+`M4A_HQMIX_FIFO_LAST`.  The 15768 / 42048 scratch checks of step 2 were
+not rerun.
+
+**Residual sources (HQ).**  The vanilla ones (mgba's servicing order at
+the exit boundary: the one `RET` + 2 frame in 4 that mgba does not
+count; hardware vs mgba), and: the stack budget follows
+`engine->hqStackSp` (the test ROM's sp; a game's call depth at the
+interrupt moves the copy / skip decisions); `ENABLE_DMA` 1 and
+`ENABLE_REVERB` 1 as the wiki installs the mixer (the CPU-copy variant
+and a reverb-less build cost differently and are not modeled);
+`previous_fast_code` starts invalid after `m4a_engine_set_hq_mixer`
+(the ROM after `m4aSoundInit`), so a mixer switched on mid-song pastes
+once on its first frame like the ROM's first; the open-bus decode
+assumes mgba's `GBALoadBad` timing.
 
 `tools/probe_corpus.sh` regenerates the logs (`build/probe`,
 `build/probe-hq`, `build/probe-21024`, `build/probe-hq-21024`, each with

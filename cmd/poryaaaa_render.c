@@ -906,7 +906,7 @@ static void print_usage(const char *prog)
         "  --cost-log <file>           log each SoundMain's modeled CPU cost, one line per frame:\n"
         "                              frame seq cgb mixer total (cycles from m4aSoundMain's entry;\n"
         "                              the frame counter of --pcm-log and mgba_probe's .frames;\n"
-        "                              vanilla mixer only for now; also with --midi, where seq is\n"
+        "                              vanilla or --hq-mixer; also with --midi, where seq is\n"
         "                              the fixed one-track value unless --gba-tempo-grid)\n"
         "  --seq-log <file>            log each frame's modeled CgbSound entry cycle\n"
         "\n"
@@ -983,8 +983,8 @@ static FILE *sPcmLog;
 /* --cost-log: after each SoundMain, "frame seq cgb mixer total": the
  * engine's SoundMain cost model (M4AFrameCost; docs/ACCURACY.md, "SoundMain
  * cost model"), on the same frame counter as --pcm-log and the probe's
- * .frames, for tools/cost_diff.py.  A frame the model cannot cost (HQ
- * mixer, for now) is skipped. */
+ * .frames, for tools/cost_diff.py.  A frame the model cannot cost (live
+ * mode) is skipped. */
 static FILE *sCostLog;
 static void pcm_log_cb(M4AEngine *engine, void *user)
 {

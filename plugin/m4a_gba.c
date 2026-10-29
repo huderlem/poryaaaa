@@ -334,6 +334,21 @@ int64_t m4a_gba_fifo_dma_stall(const M4AGbaAudio *g, int64_t from, int64_t to)
     return n * M4A_CYC_FIFO_DMA_STALL;
 }
 
+int64_t m4a_gba_fifo_dma_next(const M4AGbaAudio *g, int64_t after)
+{
+    if (g->fifoDmaCycle < 0 || !g->dmaEnabled || g->timerPeriodDen <= 0)
+        return -1;
+    int64_t period = 16 * (int64_t)(g->timerPeriodNum / g->timerPeriodDen);
+    if (period <= 0)
+        return -1;
+    int64_t t = g->fifoDmaCycle;
+    if (t <= after)
+        t += ((after - t) / period + 1) * period;
+    else
+        t -= ((t - after - 1) / period) * period;
+    return t;
+}
+
 int m4a_gba_samples_avail(const M4AGbaAudio *g)
 {
     return m4a_resampler_samples_avail(g->left);

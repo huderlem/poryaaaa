@@ -600,12 +600,47 @@ static void sound_vsync(M4AEngine *engine)
  * SoundMainRAM into the ring slot pcmDmaCounter selects (SoundMain_4/5:
  * pcmBuffer + (pcmDmaPeriod - (pcmDmaCounter - 1)) * pcmSamplesPerVBlank
  * when pcmDmaCounter - 1 > 0, else the start). */
+/* The FIFO refill stalls in the mixer's span [ram, ram + mix + stall]:
+ * each refill due in it, in order, until one is due during m4aSoundMain's
+ * final bx (serviced after the return).  Each costs M4A_CYC_FIFO_DMA_STALL,
+ * less when it falls in one of the HQ fast path's DMA3 copies (the
+ * copies' positions are in mixCycles' clock; the stalls before them move
+ * them on). */
+static int64_t mixer_stall(const M4AEngine *engine, int64_t ram, int64_t mix)
+{
+    const M4AGbaAudio *g = &engine->gba;
+    int64_t stall = 0;
+    int k = 0, n = engine->hqMixer ? engine->hqDma3Count : 0;
+    for (int64_t t = m4a_gba_fifo_dma_next(g, ram); t >= 0 && t <= ram + mix + stall - M4A_MIX_EXIT_BX;
+         t = m4a_gba_fifo_dma_next(g, t)) {
+        int64_t c = M4A_CYC_FIFO_DMA_STALL;
+        for (; k < n; k++) {
+            int64_t p = t - (ram + engine->hqDma3Start[k] + stall), len = engine->hqDma3Len[k];
+            if (p < -1)
+                break;                       /* this copy is later */
+            if (p > len + 1)
+                continue;                    /* this copy is over */
+            if (p <= 1)
+                c = M4A_HQMIX_FIFO_PRE;
+            else if (p <= 9)
+                c = M4A_HQMIX_FIFO_FIRST + p;
+            else if (p <= len)
+                c = M4A_HQMIX_FIFO_WORD + p % 5;
+            else
+                c = M4A_HQMIX_FIFO_LAST;
+            break;
+        }
+        stall += c;
+    }
+    return stall;
+}
+
 /* SoundMain's cost for the frame just run (docs/ACCURACY.md, "SoundMain
  * cost model"), on the CPU clock from `stamp` (SoundMain's entry):
  * m4aSoundMain's entry 12 before it; CgbSound's entry from the sequencer
  * term (cgbEntryCycles); CgbSound's return from the cursor after its last
  * channel; SoundMainRAM's entry after SoundMain_4/5; the mixer's cycles
- * (m4a_mixer.c) to m4aSoundMain's return.  The FIFO DMA stall is charged
+ * (m4a_mixer.c, or m4a_hq_mixer.c in HQ mode) to m4aSoundMain's return.  The FIFO DMA stall is charged
  * on every span it falls in, as the sequencer and CgbSound charge it. */
 static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCounter)
 {
@@ -614,9 +649,10 @@ static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCount
         engine->frameCostMaxResetPending = false;
         memset(&engine->frameCostMax, 0, sizeof(engine->frameCostMax));
     }
-    /* Live mode mixes in pieces (nothing to cost); the HQ mixer's model is
-     * not in yet (step 3 of docs/cpu-meter): both publish invalid. */
-    if (engine->liveMode || engine->hqMixer) {
+    /* Live mode mixes in pieces (nothing to cost): invalid.  The vanilla
+     * and the HQ mixer charge mixCycles the same way (M4A_MIX_* /
+     * M4A_HQMIX_*), from SoundMainRAM's entry to m4aSoundMain's return. */
+    if (engine->liveMode) {
         engine->frameCost = c;
         return;
     }
@@ -633,14 +669,8 @@ static void publish_frame_cost(M4AEngine *engine, int64_t stamp, int pcmDmaCount
     int s2r = pcmDmaCounter <= 1 ? M4A_CYC_SM_TO_RAM_FIRST : M4A_CYC_SM_TO_RAM;
     int64_t ram = cr + s2r;
     ram += m4a_gba_fifo_dma_stall(g, cr, ram);
-    int64_t mix = engine->mixCycles, stall = 0;
-    for (;;) {   /* the stalls the span itself grows into; one due during
-                  * m4aSoundMain's final bx is serviced after the return */
-        int64_t s2 = m4a_gba_fifo_dma_stall(g, ram, ram + mix + stall - M4A_MIX_EXIT_BX);
-        if (s2 == stall)
-            break;
-        stall = s2;
-    }
+    int64_t mix = engine->mixCycles;
+    int64_t stall = mixer_stall(engine, ram, mix);
     int64_t exit = ram + mix + stall;
     c.sequencer = (int32_t)(cgb - sm);
     c.cgb = (int32_t)(ram - cgb);
@@ -939,6 +969,7 @@ void m4a_engine_set_hq_mixer(M4AEngine *engine, bool on)
     memset(engine->hqMutedBuffer, 0, sizeof(engine->hqMutedBuffer));
     engine->hqNoiseShapeLeft = engine->hqNoiseShapeRight = 0;
     engine->hqUnportedChannelFrames = 0;
+    engine->hqFastCode = 0;
     for (int i = 0; i < TOTAL_PCM_CHANNELS; i++)
         engine->pcmChannels[i].sampleStor = 0;
     if (on && engine->pcmFreqMode == 2)

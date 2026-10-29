@@ -136,6 +136,9 @@ void m4a_gba_dma_disable(M4AGbaAudio *g);
  * model adds it to MPlayMain's and CgbSound's cursors. */
 int64_t m4a_gba_fifo_dma_stall(const M4AGbaAudio *g, int64_t from, int64_t to);
 #define M4A_CYC_FIFO_DMA_STALL 18
+/* The first of those refills after `after` (exclusive), or -1 when there
+ * is none (no DMA, no timer); the next one is m4a_gba_fifo_dma_next(g, t). */
+int64_t m4a_gba_fifo_dma_next(const M4AGbaAudio *g, int64_t after);
 void m4a_gba_timer_enable(M4AGbaAudio *g);         /* TM0CNT_H enable: first overflow after one period */
 void m4a_gba_timer_disable(M4AGbaAudio *g);
 void m4a_gba_set_pcm_rate(M4AGbaAudio *g, int pcmSamplesPerVBlank, const int8_t *ring, int ringSize);
